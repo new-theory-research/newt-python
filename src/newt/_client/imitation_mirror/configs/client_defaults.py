@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nt._client.imitation_mirror.config import InferenceClientConfig
+from newt._client.imitation_mirror.config import InferenceClientConfig
 
 
 def get_config(config: InferenceClientConfig) -> InferenceClientConfig:

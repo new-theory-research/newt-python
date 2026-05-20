@@ -28,9 +28,9 @@ try:
 except ImportError:
     _LEROBOT_AVAILABLE = False
 
-from nt._client.imitation_mirror.network_client import NetworkClient
-from nt._client.imitation_mirror.robot import TrossenRobotClient
-from nt._client.imitation_mirror.config import (
+from newt._client.imitation_mirror.network_client import NetworkClient
+from newt._client.imitation_mirror.robot import TrossenRobotClient
+from newt._client.imitation_mirror.config import (
     InferenceClientConfig,
     InferenceRobotConfig,
 )
@@ -191,7 +191,7 @@ def _build_sample_from_buffer(
 
 def _load_extrinsics(config: InferenceClientConfig) -> dict:
     """Load camera extrinsics from site config (nt.toml)."""
-    from nt._client.imitation_mirror.site_config import load_site_config
+    from newt._client.imitation_mirror.site_config import load_site_config
 
     site_path = getattr(config, "site_config_path", None)
     if site_path != "":
@@ -267,7 +267,7 @@ def _build_robot_config(
     robot_config: InferenceRobotConfig,
 ):
     """Build low-level robot config from the arm config set during config resolution."""
-    from nt._client.imitation_mirror.config import (
+    from newt._client.imitation_mirror.config import (
         TrossenBimanualConfig,
         TrossenSingleArmConfig,
     )

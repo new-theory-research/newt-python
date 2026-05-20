@@ -11,8 +11,8 @@ try:
     import torch
     import lerobot
     from lerobot.robots import RobotConfig
-    from nt._client.imitation_mirror.utils.geometry import axis_angle_to_matrix, matrix_to_axis_angle
-    from nt._client.imitation_mirror.utils.trossen_bimanual_frames import left_from_right_base
+    from newt._client.imitation_mirror.utils.geometry import axis_angle_to_matrix, matrix_to_axis_angle
+    from newt._client.imitation_mirror.utils.trossen_bimanual_frames import left_from_right_base
     _LEROBOT_AVAILABLE = True
 except ImportError:
     _LEROBOT_AVAILABLE = False

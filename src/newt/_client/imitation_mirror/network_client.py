@@ -4,7 +4,7 @@ import httpx
 import numpy as np
 import websockets
 
-from nt._client.imitation_mirror import pack, unpack
+from newt._client.imitation_mirror import pack, unpack
 
 
 class NetworkClient:

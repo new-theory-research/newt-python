@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ml_collections import config_dict
 
-from nt._client.imitation_mirror.config_sections import ConfigSection
+from newt._client.imitation_mirror.config_sections import ConfigSection
 
 
 class InferenceSshConfig(ConfigSection):

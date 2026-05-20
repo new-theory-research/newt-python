@@ -54,7 +54,7 @@ from .network_client import NetworkClient
 from .site_config import SiteConfig, load_site_config
 
 # Hardware-only re-exports: robot.py and runtime.py need lerobot/torch at call time.
-# Guarded so `import nt._client.imitation_mirror` succeeds on the X path.
+# Guarded so `import newt._client.imitation_mirror` succeeds on the X path.
 try:
     from .robot import RobotClient, TrossenRobotClient
     from .runtime import run_inference_client, _build_robot_config, normalize_camera_name

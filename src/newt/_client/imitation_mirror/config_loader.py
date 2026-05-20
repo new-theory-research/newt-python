@@ -9,8 +9,8 @@ from typing import Any, Callable
 
 from ml_collections import config_dict
 
-from nt._client.imitation_mirror.config_sections import ConfigSection
-from nt._client.imitation_mirror.utils.env_utils import import_module_from_path
+from newt._client.imitation_mirror.config_sections import ConfigSection
+from newt._client.imitation_mirror.utils.env_utils import import_module_from_path
 
 
 def _apply_override(
