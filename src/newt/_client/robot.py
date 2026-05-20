@@ -74,6 +74,7 @@ class RunResult:
 
 _MODEL_ENDPOINTS: dict[str, str] = {
     "pi05-aloha": "wss://removed-endpoint.invalid/stream",
+    "model-a":    "wss://removed-endpoint.invalid/stream",
 }
 
 
