@@ -74,6 +74,7 @@ class RunResult:
 
 _MODEL_ENDPOINTS: dict[str, str] = {
     "pi05-aloha": "wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream",
+    "nt0-fp3":    "wss://newtheory--ntdeva-nt0-fp3-serve-serve.modal.run/stream",
 }
 
 
