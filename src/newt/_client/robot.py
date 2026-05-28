@@ -194,18 +194,37 @@ class Robot:
             ) from exc
 
     def _run_blocking(self, prompt: str, max_duration: float) -> RunResult:
+        import time as _time
         ws = self._ws_connect()
         stop_reason = "error"
         try:
             first = True
+            frame_no = 0
             while True:
                 obs = self._read_state()
                 frame = _build_obs_frame(obs, prompt, max_duration if first else None)
                 first = False
+                frame_no += 1
 
+                payload = _pack(frame)
+                print(
+                    f"[newt debug] frame {frame_no}: sending {len(payload)} bytes",
+                    flush=True,
+                )
+                _send_t0 = _time.time()
                 try:
-                    ws.send(_pack(frame))
+                    ws.send(payload)
+                    print(
+                        f"[newt debug] frame {frame_no}: send returned in "
+                        f"{(_time.time()-_send_t0)*1000:.1f}ms",
+                        flush=True,
+                    )
                 except ConnectionClosed:
+                    print(
+                        f"[newt debug] frame {frame_no}: send raised "
+                        f"ConnectionClosed after {(_time.time()-_send_t0)*1000:.1f}ms",
+                        flush=True,
+                    )
                     pass  # server may have initiated close; drain recv for terminal
 
                 try:
