@@ -211,6 +211,13 @@ class Robot:
                 try:
                     raw = ws.recv()
                 except ConnectionClosed as exc:
+                    rcvd = getattr(exc, "rcvd", None)
+                    print(
+                        f"[newt] WS closed by server: "
+                        f"code={getattr(rcvd, 'code', None)} "
+                        f"reason={getattr(rcvd, 'reason', None)!r}",
+                        flush=True,
+                    )
                     _check_auth_error(exc)
                     break  # connection closed (non-auth)
 
