@@ -315,6 +315,44 @@ class Robot:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def list_models(api_key: str, base_url: str | None = None) -> list[dict]:
+    """Fetch the list of available models from the NT inference server.
+
+    Args:
+        api_key:  NT API key (nt_xxx).
+        base_url: Override HTTP base URL (e.g. http://localhost:8000). Defaults to
+                  deriving from NT_INFERENCE_URL env var or the default nt0-fp3 server.
+
+    Returns:
+        List of model dicts with uid, tags, type, and base fields.
+
+    Raises:
+        AuthError: API key rejected by the server.
+    """
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    if base_url is None:
+        env_url = os.environ.get("NT_INFERENCE_URL")
+        ws_url = env_url or _MODEL_ENDPOINTS["nt0-fp3"]
+        # wss://host/path → https://host  (strip protocol scheme + trailing path)
+        base_url = ws_url.replace("wss://", "https://").replace("ws://", "http://").rsplit("/", 1)[0]
+
+    url = base_url.rstrip("/") + "/v1/models"
+    req = Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urlopen(req) as resp:
+            return json.loads(resp.read())
+    except HTTPError as exc:
+        if exc.code == 401:
+            raise AuthError(
+                "Authentication failed: API key rejected by /v1/models. "
+                "Rotate your key in the NT console."
+            ) from exc
+        raise
+
+
 def _build_obs_frame(
     obs: dict, prompt: str, max_duration: float | None, model: str | None = None
 ) -> dict:
