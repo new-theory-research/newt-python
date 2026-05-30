@@ -67,10 +67,12 @@ class RunResult:
 # ---------------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------------
-# Maps developer-facing model name → WS endpoint URL. v0 has one entry.
-# Future briefs (brief-205+) add entries. The Robot constructor's `model=`
-# kwarg is an escape hatch for power users; it does NOT belong in QUICKSTART /
-# README / dry_run examples. Default stays "pi05-aloha".
+# Maps model name → WS endpoint URL for multi-server routing (one server per
+# model family). Fine-tune variants (UIDs or tags like "nt0-fp3-pour-coffee-beans")
+# go to the SAME server as their base model; their identifier is forwarded in
+# the first obs frame's `model` field and resolved server-side.
+# Default (model=None): connects to the "nt0-fp3" server; server uses its own
+# default checkpoint when no model field is present in the obs frame.
 
 _MODEL_ENDPOINTS: dict[str, str] = {
     "pi05-aloha": "wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream",
@@ -94,10 +96,11 @@ class Robot:
         execute:    callable receiving an action chunk ndarray (action_horizon, 14).
                     Called once per inference cycle in default (non-stream) mode.
                     Never called in stream mode.
-        model:      Model name; resolves to a WS endpoint via the internal
-                    `_MODEL_ENDPOINTS` registry. v0 default: "pi05-aloha".
-                    Power-user escape hatch — most developers should leave
-                    the default.
+        model:      Model identifier (UID or tag); forwarded as-is in the first
+                    obs frame. The server resolves it to a checkpoint. None
+                    (default) omits the field and lets the server use its own
+                    default checkpoint. Power-user escape hatch — most
+                    developers should leave this unset.
         connect_timeout: Seconds to wait for the WS handshake. Defaults to
                     120s to tolerate Modal cold-start (scale-down → GPU +
                     checkpoint-load can take 30–90s).
@@ -121,13 +124,16 @@ class Robot:
         api_key: str,
         read_state: Callable[[], dict],
         execute: Callable[[np.ndarray], None],
-        model: str = "pi05-aloha",
+        model: str | None = None,
         connect_timeout: float = 120.0,
     ) -> None:
         self._api_key = api_key
         self._read_state = read_state
         self._execute = execute
         self._connect_timeout = connect_timeout
+        # Forwarded as-is in the first obs frame; None = server uses its default.
+        # SDK never interprets UID vs tag — the server resolves the identifier.
+        self._model = model
 
         # Test-affordance: NT_INFERENCE_URL overrides registry lookup so
         # golden tests + smoke can be repointed without touching the registry.
@@ -135,11 +141,16 @@ class Robot:
         if env_url:
             self._url = env_url
         else:
-            if model not in _MODEL_ENDPOINTS:
+            # Fine-tune variants (UIDs/tags) are not in _MODEL_ENDPOINTS;
+            # they connect to the same server as their base via NT_INFERENCE_URL.
+            # Without NT_INFERENCE_URL, only top-level model family names work.
+            _endpoint_key = model if model is not None else "nt0-fp3"
+            if _endpoint_key not in _MODEL_ENDPOINTS:
                 raise ValueError(
-                    f"Unknown model {model!r}; known: {list(_MODEL_ENDPOINTS)}"
+                    f"Unknown model {model!r}; known: {list(_MODEL_ENDPOINTS)}. "
+                    "Set NT_INFERENCE_URL to connect to a custom endpoint."
                 )
-            self._url = _MODEL_ENDPOINTS[model]
+            self._url = _MODEL_ENDPOINTS[_endpoint_key]
 
     # -----------------------------------------------------------------------
     # Public API
@@ -202,7 +213,11 @@ class Robot:
             frame_no = 0
             while True:
                 obs = self._read_state()
-                frame = _build_obs_frame(obs, prompt, max_duration if first else None)
+                frame = _build_obs_frame(
+                    obs, prompt,
+                    max_duration if first else None,
+                    self._model if first else None,
+                )
                 first = False
                 frame_no += 1
 
@@ -264,7 +279,11 @@ class Robot:
             first = True
             while True:
                 obs = self._read_state()
-                frame = _build_obs_frame(obs, prompt, max_duration if first else None)
+                frame = _build_obs_frame(
+                    obs, prompt,
+                    max_duration if first else None,
+                    self._model if first else None,
+                )
                 first = False
 
                 try:
@@ -297,7 +316,7 @@ class Robot:
 # ---------------------------------------------------------------------------
 
 def _build_obs_frame(
-    obs: dict, prompt: str, max_duration: float | None
+    obs: dict, prompt: str, max_duration: float | None, model: str | None = None
 ) -> dict:
     frame = {k: v for k, v in obs.items()}
     frame["type"] = "obs"
@@ -305,6 +324,8 @@ def _build_obs_frame(
         frame["prompt"] = prompt
     if max_duration is not None:
         frame["max_duration"] = max_duration
+    if model is not None:
+        frame["model"] = model
     return frame
 
 
