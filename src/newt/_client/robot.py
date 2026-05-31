@@ -58,6 +58,20 @@ class AuthError(Exception):
     """API key is missing, malformed, or rejected by the server (WS close 4001)."""
 
 
+class ContractMismatchError(Exception):
+    """Obs frame shapes don't match the resolved model's declared contract (WS close 4422).
+
+    Attributes:
+        expected: The full contract the server declared for the resolved model.
+        got:      The first failing field the server observed in the frame.
+    """
+
+    def __init__(self, expected: dict, got: dict, message: str = "") -> None:
+        self.expected = expected
+        self.got = got
+        super().__init__(message or f"Contract mismatch: expected {expected}, got {got}")
+
+
 @dataclass
 class RunResult:
     """Returned by Robot.run() when stream=False."""
@@ -75,6 +89,9 @@ class RunResult:
 # default checkpoint when no model field is present in the obs frame.
 
 _MODEL_ENDPOINTS: dict[str, str] = {
+    # Registry tag (underscore) — canonical form forwarded in obs frames
+    "pi05_aloha": "wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream",
+    # Hyphen alias kept for backwards compatibility
     "pi05-aloha": "wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream",
     "nt0-fp3":    "wss://newtheory--ntdeva-nt0-fp3-serve-serve.modal.run/stream",
 }
@@ -173,7 +190,9 @@ class Robot:
                           internally and return RunResult.
 
         Raises:
-            AuthError: API key rejected by server (WS close 4001).
+            AuthError:             API key rejected by server (WS close 4001).
+            ContractMismatchError: Obs frame shapes don't match the resolved
+                                   model's declared contract (WS close 4422).
         """
         if stream:
             return self._stream(prompt, max_duration)
@@ -253,9 +272,11 @@ class Robot:
                         flush=True,
                     )
                     _check_auth_error(exc)
-                    break  # connection closed (non-auth)
+                    _check_contract_mismatch_close(exc, self._model)
+                    break  # connection closed (non-auth, non-contract-mismatch)
 
                 parsed = _unpack(raw)
+                _check_contract_mismatch_frame(parsed, self._model)
                 ftype = _str_field(parsed, "type")
 
                 if ftype == "action":
@@ -295,9 +316,11 @@ class Robot:
                     raw = ws.recv()
                 except ConnectionClosed as exc:
                     _check_auth_error(exc)
+                    _check_contract_mismatch_close(exc, self._model)
                     return
 
                 parsed = _unpack(raw)
+                _check_contract_mismatch_frame(parsed, self._model)
                 ftype = _str_field(parsed, "type")
 
                 if ftype == "action":
@@ -381,4 +404,45 @@ def _check_auth_error(exc: ConnectionClosed) -> None:
         raise AuthError(
             "Authentication failed: API key is invalid or revoked. "
             "Rotate your key in the NT console."
+        ) from exc
+
+
+def _check_contract_mismatch_frame(parsed: dict, model: str | None = None) -> None:
+    """Raise ContractMismatchError if the parsed frame is a 4422 close payload.
+
+    The server sends a msgpack binary message before the WS close frame. This
+    function catches that message (keyed on close_code == 4422) and raises with
+    the full expected/got payload so the developer sees the exact field mismatch.
+    Handles both str and bytes map keys from msgpack decoding.
+    """
+    close_code = parsed.get("close_code", parsed.get(b"close_code"))
+    if close_code != 4422:
+        return
+    expected = parsed.get("expected", parsed.get(b"expected", {}))
+    got = parsed.get("got", parsed.get(b"got", {}))
+    model_str = f"model={model}: " if model else ""
+    raise ContractMismatchError(
+        expected=expected,
+        got=got,
+        message=f"Contract mismatch for {model_str}expected {expected}, got {got}",
+    )
+
+
+def _check_contract_mismatch_close(exc: ConnectionClosed, model: str | None = None) -> None:
+    """Raise ContractMismatchError if close code is 4422.
+
+    Fallback for the case where the binary close payload was not received (e.g.
+    the connection dropped between send_bytes and close). Raises with empty
+    expected/got — the developer still gets a typed exception, not stop_reason="error".
+    """
+    rcvd = getattr(exc, "rcvd", None)
+    if rcvd and getattr(rcvd, "code", None) == 4422:
+        model_str = f" for model={model}" if model else ""
+        raise ContractMismatchError(
+            expected={},
+            got={},
+            message=(
+                f"Contract mismatch{model_str}: obs frame shapes don't match "
+                "the resolved model's declared contract."
+            ),
         ) from exc
