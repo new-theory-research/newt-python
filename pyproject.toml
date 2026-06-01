@@ -16,6 +16,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Test deps — needed to run pytest tests/test_golden.py.
+# Install: pip install -e ".[test]"
+test = ["pytest>=8.0"]
+
 # Hardware demo deps — client-side only; not needed for serve or library users.
 # lerobot is a private fork; requires SSH key to github.com/new-theory-research.
 # Install: pip install ".[hardware]"
