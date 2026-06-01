@@ -5,8 +5,8 @@ the developer-facing guarantee it protects has regressed, not just an implementa
 
 Required environment variables:
     NT_INFERENCE_URL  — WebSocket endpoint URL (wss://...modal.run/stream).
-                        Overrides newt._client.robot._MODEL_ENDPOINTS for tests.
-                        Used by GT1–GT4. GT5 clears this to test model registry routing.
+                        Skips endpoint discovery in Robot.__init__ (test affordance).
+                        Used by GT1–GT4. GT5 clears this to test discovery-based routing.
     NT_API_KEY        — valid API key (GT1, GT3, GT4, GT5 only — GT2 deliberately uses a bad key)
 
 Run:
@@ -28,6 +28,10 @@ import pytest
 import newt
 
 _VALID_STOP_REASONS = {"task_complete", "max_duration", "interrupted", "error"}
+
+# Hardcoded NT0-FP3 WS URL used by warmup_modal_nt0_fp3 and GT5 without NT_INFERENCE_URL
+# so discovery-based routing can be exercised. _MODEL_ENDPOINTS is gone as of brief-218.
+_NT0_FP3_WS_URL = "wss://newtheory--ntdeva-nt0-fp3-serve-serve.modal.run/stream"
 
 
 # ---------------------------------------------------------------------------
@@ -304,21 +308,15 @@ def test_gt4_sparse_observation(api_key: str, inference_url: str) -> None:
 def warmup_modal_nt0_fp3() -> None:
     """Poll /health on the NT0-FP3 endpoint until loaded.
 
-    Uses the registered URL from newt._client.robot._MODEL_ENDPOINTS directly —
-    GT5 tests model routing so NT_INFERENCE_URL is not used. Skips GT5 (via
-    pytest.skip) if the endpoint doesn't report loaded=True within 180s.
+    Uses _NT0_FP3_WS_URL directly — GT5 tests discovery-based routing so
+    NT_INFERENCE_URL is not set here. Skips GT5 (via pytest.skip) if the
+    endpoint doesn't report loaded=True within 180s.
     Deploy first: modal deploy modal_tunnel_nt0.py
     """
-    from newt._client.robot import _MODEL_ENDPOINTS
-
-    ws_url = _MODEL_ENDPOINTS.get("nt0-fp3")
-    if not ws_url:
-        pytest.skip("nt0-fp3 not in _MODEL_ENDPOINTS — registry entry missing")
-
     if not os.environ.get("NT_API_KEY"):
         return  # api_key fixture will skip the test; don't block here
 
-    health_url = _health_url_from_inference_url(ws_url)
+    health_url = _health_url_from_inference_url(_NT0_FP3_WS_URL)
     deadline = time.monotonic() + 180.0
     t0 = time.monotonic()
     last_err: Exception | None = None
@@ -374,9 +372,11 @@ def test_gt5_nt0_fp3_model_selection(
     result.stop_reason in valid set; on NT0-FP3 baseline today (no learned stop token),
     expect "max_duration". Wall time <= max_duration + 5s overhead (endpoint is warm;
     warmup_modal_nt0_fp3 fixture ensures that before the test body runs).
-    Also verifies: model="unknown-fp9" raises ValueError (defense-in-depth, always runs).
+    Also verifies: model="unknown-fp9" raises ValueError via discovery (defense-in-depth,
+    runs when NT_INFERENCE_URL is unset; C7 promotes to ModelNotFoundError).
     """
-    # Defense-in-depth: unknown model raises ValueError before any network call.
+    # Defense-in-depth: unknown model raises ValueError via registry discovery.
+    # Requires NT_INFERENCE_URL to be unset (else discovery is skipped and no error fires).
     with pytest.raises(ValueError, match="unknown-fp9"):
         newt.Robot(
             api_key=api_key,

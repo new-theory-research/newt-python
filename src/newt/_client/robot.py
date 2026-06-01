@@ -114,22 +114,97 @@ class RunResult:
 
 
 # ---------------------------------------------------------------------------
-# Model registry
+# Bootstrap URL + registry discovery
 # ---------------------------------------------------------------------------
-# Maps model name → WS endpoint URL for multi-server routing (one server per
-# model family). Fine-tune variants (UIDs or tags like "nt0-fp3-pour-coffee-beans")
-# go to the SAME server as their base model; their identifier is forwarded in
-# the first obs frame's `model` field and resolved server-side.
-# Default (model=None): connects to the "nt0-fp3" server; server uses its own
-# default checkpoint when no model field is present in the obs frame.
+# The SDK fetches GET <bootstrap_url>/v1/models once per Robot construction
+# to discover which WS endpoint serves the requested model. Bootstrap URL
+# resolution order (highest to lowest precedence):
+#   1. NT_BOOTSTRAP_URL env var — explicit override
+#   2. Derived from NT_INFERENCE_URL env var — strip WS scheme + path to HTTPS host
+#   3. _DEFAULT_BOOTSTRAP_URL constant — production NT0-FP3 (registry holder today)
+# NT_INFERENCE_URL takes full precedence at the Robot level: if set, discovery
+# is skipped and the env URL is used directly (test/smoke affordance).
 
-_MODEL_ENDPOINTS: dict[str, str] = {
-    # Registry tag (underscore) — canonical form forwarded in obs frames
-    "pi05_aloha": "wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream",
-    # Hyphen alias kept for backwards compatibility
-    "pi05-aloha": "wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream",
-    "nt0-fp3":    "wss://newtheory--ntdeva-nt0-fp3-serve-serve.modal.run/stream",
-}
+_DEFAULT_BOOTSTRAP_URL = "https://newtheory--ntdeva-nt0-fp3-serve-serve.modal.run"
+_DEFAULT_MODEL_UID = "ft_base_nt0fp3"
+
+
+def _resolve_bootstrap_url() -> str:
+    """HTTPS base URL for registry discovery, per the resolution order above."""
+    if url := os.environ.get("NT_BOOTSTRAP_URL"):
+        return url
+    if ws_url := os.environ.get("NT_INFERENCE_URL"):
+        https = ws_url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
+        return https.rsplit("/", 1)[0]
+    return _DEFAULT_BOOTSTRAP_URL
+
+
+def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
+    """GET <bootstrap_url>/v1/models. Single attempt; raises on failure.
+
+    Raises:
+        AuthError:       401 from the registry endpoint.
+        ConnectionError: Network error, 5xx, or non-JSON response.
+                         C7 will replace ConnectionError with RegistryUnavailable.
+    """
+    import json
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    url = bootstrap_url.rstrip("/") + "/v1/models"
+    req = Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except HTTPError as exc:
+        if exc.code == 401:
+            raise AuthError(
+                "Authentication failed: API key rejected by registry /v1/models. "
+                "Rotate your key in the NT console."
+            ) from exc
+        raise ConnectionError(
+            f"Could not reach NT inference registry at {bootstrap_url}: "
+            f"HTTP {exc.code}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
+        ) from exc
+    except URLError as exc:
+        raise ConnectionError(
+            f"Could not reach NT inference registry at {bootstrap_url}: "
+            f"{exc.reason}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
+        ) from exc
+    except Exception as exc:
+        raise ConnectionError(
+            f"Could not reach NT inference registry at {bootstrap_url}: "
+            f"{exc}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
+        ) from exc
+
+
+def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: str) -> str:
+    """Resolve a model UID or tag to its WS endpoint URL from the registry response.
+
+    model=None resolves to _DEFAULT_MODEL_UID. Raises ValueError when the identifier
+    doesn't match any entry; C7 promotes this to ModelNotFoundError with the full
+    six-field envelope shape.
+    """
+    target = model if model is not None else _DEFAULT_MODEL_UID
+    for entry in registry:
+        uid = entry.get("uid") or ""
+        tags = entry.get("tags") or []
+        if target == uid or target in tags:
+            endpoint = entry.get("endpoint")
+            if endpoint:
+                return endpoint
+    known: list = []
+    for entry in registry:
+        uid = entry.get("uid")
+        if uid:
+            known.append(uid)
+        for tag in (entry.get("tags") or []):
+            known.append(tag)
+    raise ValueError(
+        f"Model {model!r} not found in registry at {bootstrap_url}. "
+        f"Known models: {known}. "
+        "Check spelling or list with newt.list_models()."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -148,14 +223,19 @@ class Robot:
         execute:    callable receiving an action chunk ndarray (action_horizon, 14).
                     Called once per inference cycle in default (non-stream) mode.
                     Never called in stream mode.
-        model:      Model identifier (UID or tag); forwarded as-is in the first
-                    obs frame. The server resolves it to a checkpoint. None
-                    (default) omits the field and lets the server use its own
-                    default checkpoint. Power-user escape hatch — most
-                    developers should leave this unset.
+        model:      Model identifier (UID or tag). The SDK resolves it via
+                    endpoint discovery (GET /v1/models on construction) and also
+                    forwards it in the first obs frame so the server resolves the
+                    checkpoint. None (default) resolves to the default base model.
+                    Power-user escape hatch — most developers should leave this unset.
         connect_timeout: Seconds to wait for the WS handshake. Defaults to
                     120s to tolerate Modal cold-start (scale-down → GPU +
                     checkpoint-load can take 30–90s).
+
+    NT_INFERENCE_URL override: if set, endpoint discovery is skipped and this
+                    URL is used directly. Takes highest precedence. Smoke and
+                    golden tests use this to repoint at a specific server without
+                    touching the registry.
 
     Default usage:
         robot = newt.Robot(
@@ -190,22 +270,19 @@ class Robot:
         # Reset to False at the start of each run() call (see _run_blocking/_stream).
         self._degradation_warned: bool = False
 
-        # Test-affordance: NT_INFERENCE_URL overrides registry lookup so
-        # golden tests + smoke can be repointed without touching the registry.
+        # Test-affordance: NT_INFERENCE_URL takes highest precedence — if set,
+        # discovery is skipped and this URL is used directly. Smoke + golden
+        # tests use this to repoint at specific servers without touching the registry.
         env_url = os.environ.get("NT_INFERENCE_URL")
         if env_url:
             self._url = env_url
+            self._registry: list = []
         else:
-            # Fine-tune variants (UIDs/tags) are not in _MODEL_ENDPOINTS;
-            # they connect to the same server as their base via NT_INFERENCE_URL.
-            # Without NT_INFERENCE_URL, only top-level model family names work.
-            _endpoint_key = model if model is not None else "nt0-fp3"
-            if _endpoint_key not in _MODEL_ENDPOINTS:
-                raise ValueError(
-                    f"Unknown model {model!r}; known: {list(_MODEL_ENDPOINTS)}. "
-                    "Set NT_INFERENCE_URL to connect to a custom endpoint."
-                )
-            self._url = _MODEL_ENDPOINTS[_endpoint_key]
+            # Discovery: fetch the registry from the bootstrap URL and resolve the
+            # requested model to its WS endpoint. Single network call per construction.
+            bootstrap_url = _resolve_bootstrap_url()
+            self._registry = _fetch_registry(bootstrap_url, api_key)
+            self._url = _resolve_model_endpoint(self._registry, model, bootstrap_url)
 
     # -----------------------------------------------------------------------
     # Public API
@@ -403,10 +480,7 @@ def list_models(api_key: str, base_url: str | None = None) -> list[dict]:
     from urllib.request import Request, urlopen
 
     if base_url is None:
-        env_url = os.environ.get("NT_INFERENCE_URL")
-        ws_url = env_url or _MODEL_ENDPOINTS["nt0-fp3"]
-        # wss://host/path → https://host  (strip protocol scheme + trailing path)
-        base_url = ws_url.replace("wss://", "https://").replace("ws://", "http://").rsplit("/", 1)[0]
+        base_url = _resolve_bootstrap_url()
 
     url = base_url.rstrip("/") + "/v1/models"
     req = Request(url, headers={"Authorization": f"Bearer {api_key}"})
