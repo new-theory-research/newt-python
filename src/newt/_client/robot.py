@@ -61,15 +61,40 @@ class AuthError(Exception):
 class ContractMismatchError(Exception):
     """Obs frame shapes don't match the resolved model's declared contract (WS close 4422).
 
+    Mirrors the canonical six-field error envelope (per
+    portal/wiki/operating-docs/error-style.md): every field on the envelope
+    is a field on the exception. Group-by-domain — every `contract_mismatch.*`
+    type raises this class; branch on `exc.type` for specific failures
+    (`contract_mismatch.state_shape`, `contract_mismatch.camera_missing`, etc.).
+
     Attributes:
-        expected: The full contract the server declared for the resolved model.
-        got:      The first failing field the server observed in the frame.
+        code:     Numeric WS close code (4422).
+        type:     Two-level dotted identifier (e.g. "contract_mismatch.state_shape").
+        message:  Human-readable prose: what's wrong, expected vs. got, next action.
+        context:  Machine-readable specifics (model, expected_shape, got_shape, etc.).
+        docs:     Stable URL into the docs site (may be None if not populated).
+        trace_id: Server-generated cross-reference into server logs.
     """
 
-    def __init__(self, expected: dict, got: dict, message: str = "") -> None:
-        self.expected = expected
-        self.got = got
-        super().__init__(message or f"Contract mismatch: expected {expected}, got {got}")
+    def __init__(
+        self,
+        code: int,
+        type: str,
+        message: str,
+        context: dict,
+        docs: str | None = None,
+        trace_id: str = "",
+    ) -> None:
+        self.code = code
+        self.type = type
+        self.message = message
+        self.context = context
+        self.docs = docs
+        self.trace_id = trace_id
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass
@@ -407,42 +432,66 @@ def _check_auth_error(exc: ConnectionClosed) -> None:
         ) from exc
 
 
-def _check_contract_mismatch_frame(parsed: dict, model: str | None = None) -> None:
-    """Raise ContractMismatchError if the parsed frame is a 4422 close payload.
+def _decode_key(d: dict, key: str, default=None):
+    """Read `key` from a msgpack-decoded dict, accepting both str and bytes keys."""
+    if key in d:
+        return d[key]
+    bkey = key.encode("utf-8")
+    if bkey in d:
+        val = d[bkey]
+        # Decode top-level string values from bytes for envelope fields.
+        if isinstance(val, bytes):
+            try:
+                return val.decode("utf-8")
+            except UnicodeDecodeError:
+                return val
+        return val
+    return default
 
-    The server sends a msgpack binary message before the WS close frame. This
-    function catches that message (keyed on close_code == 4422) and raises with
-    the full expected/got payload so the developer sees the exact field mismatch.
-    Handles both str and bytes map keys from msgpack decoding.
+
+def _check_contract_mismatch_frame(parsed: dict, model: str | None = None) -> None:
+    """Raise ContractMismatchError if the parsed frame is a 4422 close envelope.
+
+    The server sends a msgpack binary message before the WS close frame
+    carrying the canonical six-field error envelope (code, type, message,
+    context, docs, trace_id — per portal/wiki/operating-docs/error-style.md).
+    This function catches that message (keyed on code == 4422) and raises
+    with every field on the envelope mapped onto the exception. Handles both
+    str and bytes map keys from msgpack decoding.
     """
-    close_code = parsed.get("close_code", parsed.get(b"close_code"))
-    if close_code != 4422:
+    code = _decode_key(parsed, "code")
+    if code != 4422:
         return
-    expected = parsed.get("expected", parsed.get(b"expected", {}))
-    got = parsed.get("got", parsed.get(b"got", {}))
-    model_str = f"model={model}: " if model else ""
     raise ContractMismatchError(
-        expected=expected,
-        got=got,
-        message=f"Contract mismatch for {model_str}expected {expected}, got {got}",
+        code=code,
+        type=_decode_key(parsed, "type", "contract_mismatch.unknown"),
+        message=_decode_key(parsed, "message", "Contract mismatch."),
+        context=_decode_key(parsed, "context", {}) or {},
+        docs=_decode_key(parsed, "docs"),
+        trace_id=_decode_key(parsed, "trace_id", "") or "",
     )
 
 
 def _check_contract_mismatch_close(exc: ConnectionClosed, model: str | None = None) -> None:
     """Raise ContractMismatchError if close code is 4422.
 
-    Fallback for the case where the binary close payload was not received (e.g.
-    the connection dropped between send_bytes and close). Raises with empty
-    expected/got — the developer still gets a typed exception, not stop_reason="error".
+    Fallback for the case where the binary envelope frame was not received
+    (e.g. the connection dropped between send_bytes and close). Raises with
+    empty context + a default message — the developer still gets a typed
+    exception, not stop_reason="error".
     """
     rcvd = getattr(exc, "rcvd", None)
     if rcvd and getattr(rcvd, "code", None) == 4422:
         model_str = f" for model={model}" if model else ""
         raise ContractMismatchError(
-            expected={},
-            got={},
+            code=4422,
+            type="contract_mismatch.unknown",
             message=(
                 f"Contract mismatch{model_str}: obs frame shapes don't match "
-                "the resolved model's declared contract."
+                "the resolved model's declared contract. Server did not deliver "
+                "an envelope; check server logs for details."
             ),
+            context={"model": model} if model else {},
+            docs=None,
+            trace_id="",
         ) from exc
