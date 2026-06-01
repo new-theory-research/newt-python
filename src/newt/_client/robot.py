@@ -107,6 +107,83 @@ class ContractMismatchError(Exception):
         return self.message
 
 
+class ModelNotFoundError(Exception):
+    """Requested model UID or tag not found in the registry (client-side, before WS connection).
+
+    Mirrors the canonical six-field error envelope (per
+    portal/wiki/operating-docs/error-style.md). Raised during Robot construction
+    when discovery's response doesn't contain the requested model identifier.
+
+    Attributes:
+        code:     4404 (client-side; not a WS close code — fires before connection).
+        type:     "model_not_found.unknown_identifier"
+        message:  What was requested, what's available, how to fix.
+        context:  Machine-readable: requested model, known UIDs and tags.
+        docs:     Stable URL (may be None).
+        trace_id: Empty string for client-side errors (no server trace to reference).
+    """
+
+    def __init__(
+        self,
+        model: str | None,
+        known: list,
+        docs: str | None = None,
+    ) -> None:
+        model_str = repr(model)
+        self.code = 4404
+        self.type = "model_not_found.unknown_identifier"
+        self.message = (
+            f"Model {model_str} not found in registry. "
+            f"Known models: {known}. "
+            "Check spelling or list with newt.list_models()."
+        )
+        self.context = {"requested": model, "known_models": known}
+        self.docs = docs
+        self.trace_id = ""
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class RegistryUnavailable(Exception):
+    """Registry fetch failed before WS connection could be established.
+
+    Mirrors the canonical six-field error envelope (per
+    portal/wiki/operating-docs/error-style.md). Raised when GET /v1/models fails
+    (network error, 5xx, or malformed JSON). Single attempt; no retry. Developer
+    retries by re-instantiating Robot.
+
+    Attributes:
+        code:     503 (HTTP-convention; client-side before WS connection).
+        type:     "registry.unavailable"
+        message:  What was tried, why it failed, how to fix.
+        context:  Machine-readable: bootstrap_url, reason string.
+        docs:     Stable URL (may be None).
+        trace_id: Empty string for client-side errors.
+    """
+
+    def __init__(
+        self,
+        bootstrap_url: str,
+        reason: str,
+        docs: str | None = None,
+    ) -> None:
+        self.code = 503
+        self.type = "registry.unavailable"
+        self.message = (
+            f"Could not reach NT inference registry at {bootstrap_url}: "
+            f"{reason}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
+        )
+        self.context = {"bootstrap_url": bootstrap_url, "reason": reason}
+        self.docs = docs
+        self.trace_id = ""
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        return self.message
+
+
 @dataclass
 class RunResult:
     """Returned by Robot.run() when stream=False."""
@@ -143,9 +220,8 @@ def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
     """GET <bootstrap_url>/v1/models. Single attempt; raises on failure.
 
     Raises:
-        AuthError:       401 from the registry endpoint.
-        ConnectionError: Network error, 5xx, or non-JSON response.
-                         C7 will replace ConnectionError with RegistryUnavailable.
+        AuthError:          401 from the registry endpoint.
+        RegistryUnavailable: Network error, 5xx, or non-JSON response.
     """
     import json
     from urllib.error import HTTPError, URLError
@@ -162,28 +238,18 @@ def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
                 "Authentication failed: API key rejected by registry /v1/models. "
                 "Rotate your key in the NT console."
             ) from exc
-        raise ConnectionError(
-            f"Could not reach NT inference registry at {bootstrap_url}: "
-            f"HTTP {exc.code}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
-        ) from exc
+        raise RegistryUnavailable(bootstrap_url, f"HTTP {exc.code}") from exc
     except URLError as exc:
-        raise ConnectionError(
-            f"Could not reach NT inference registry at {bootstrap_url}: "
-            f"{exc.reason}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
-        ) from exc
+        raise RegistryUnavailable(bootstrap_url, str(exc.reason)) from exc
     except Exception as exc:
-        raise ConnectionError(
-            f"Could not reach NT inference registry at {bootstrap_url}: "
-            f"{exc}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
-        ) from exc
+        raise RegistryUnavailable(bootstrap_url, str(exc)) from exc
 
 
 def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: str) -> str:
     """Resolve a model UID or tag to its WS endpoint URL from the registry response.
 
-    model=None resolves to _DEFAULT_MODEL_UID. Raises ValueError when the identifier
-    doesn't match any entry; C7 promotes this to ModelNotFoundError with the full
-    six-field envelope shape.
+    model=None resolves to _DEFAULT_MODEL_UID. Raises ModelNotFoundError when the
+    identifier doesn't match any entry in the registry.
     """
     target = model if model is not None else _DEFAULT_MODEL_UID
     for entry in registry:
@@ -200,11 +266,7 @@ def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: st
             known.append(uid)
         for tag in (entry.get("tags") or []):
             known.append(tag)
-    raise ValueError(
-        f"Model {model!r} not found in registry at {bootstrap_url}. "
-        f"Known models: {known}. "
-        "Check spelling or list with newt.list_models()."
-    )
+    raise ModelNotFoundError(model, known)
 
 
 # ---------------------------------------------------------------------------
