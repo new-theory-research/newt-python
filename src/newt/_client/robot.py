@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import functools
 import os
+import warnings
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -56,6 +57,15 @@ _unpack = functools.partial(msgpack.unpackb, object_hook=_unpack_array)
 
 class AuthError(Exception):
     """API key is missing, malformed, or rejected by the server (WS close 4001)."""
+
+
+class DegradationWarning(UserWarning):
+    """Server reports that one or more expected cameras were absent from the obs frame.
+
+    The connection succeeds and actions are returned; missing cameras were zero-filled
+    by the server. Actions may be degraded relative to the model's trained distribution.
+    Emitted at most once per Robot.run() call via warnings.warn.
+    """
 
 
 class ContractMismatchError(Exception):
@@ -177,6 +187,9 @@ class Robot:
         # SDK never interprets UID vs tag — the server resolves the identifier.
         self._model = model
 
+        # Reset to False at the start of each run() call (see _run_blocking/_stream).
+        self._degradation_warned: bool = False
+
         # Test-affordance: NT_INFERENCE_URL overrides registry lookup so
         # golden tests + smoke can be repointed without touching the registry.
         env_url = os.environ.get("NT_INFERENCE_URL")
@@ -250,6 +263,7 @@ class Robot:
 
     def _run_blocking(self, prompt: str, max_duration: float) -> RunResult:
         import time as _time
+        self._degradation_warned = False
         ws = self._ws_connect()
         stop_reason = "error"
         try:
@@ -306,6 +320,9 @@ class Robot:
 
                 if ftype == "action":
                     chunk = parsed.get("chunk")
+                    if not self._degradation_warned:
+                        self._degradation_warned = True
+                        _maybe_warn_degradation(parsed, self._model)
                     self._execute(chunk)
                 elif ftype == "terminal":
                     stop_reason = _str_field(parsed, "stop_reason") or "error"
@@ -320,6 +337,7 @@ class Robot:
     def _stream(
         self, prompt: str, max_duration: float
     ) -> Generator[np.ndarray, None, None]:
+        self._degradation_warned = False
         ws = self._ws_connect()
         try:
             first = True
@@ -349,6 +367,9 @@ class Robot:
                 ftype = _str_field(parsed, "type")
 
                 if ftype == "action":
+                    if not self._degradation_warned:
+                        self._degradation_warned = True
+                        _maybe_warn_degradation(parsed, self._model)
                     yield parsed.get("chunk")
                 elif ftype == "terminal":
                     return
@@ -469,6 +490,33 @@ def _check_contract_mismatch_frame(parsed: dict, model: str | None = None) -> No
         context=_decode_key(parsed, "context", {}) or {},
         docs=_decode_key(parsed, "docs"),
         trace_id=_decode_key(parsed, "trace_id", "") or "",
+    )
+
+
+def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
+    """Emit DegradationWarning if the first action frame carries missing_expected_cameras.
+
+    Called once per run() on the first action frame. Does nothing when the
+    warnings field is absent or empty (the happy path has no overhead).
+    """
+    warnings_field = _decode_key(parsed, "warnings")
+    if not isinstance(warnings_field, dict):
+        return
+    missing = (
+        warnings_field.get("missing_expected_cameras")
+        or warnings_field.get(b"missing_expected_cameras")
+    )
+    if not missing:
+        return
+    missing_strs = [c.decode() if isinstance(c, bytes) else c for c in missing]
+    model_str = model or "nt0-fp3"
+    warnings.warn(
+        DegradationWarning(
+            f"Model {model_str!r} expected cameras not all present. "
+            f"Missing: {missing_strs}. "
+            "Missing cameras zero-filled; actions may be degraded."
+        ),
+        stacklevel=3,
     )
 
 
