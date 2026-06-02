@@ -29,6 +29,8 @@ Public surface:
 - `newt.EnvOverrideWarning`   — warnings.warn'd once per Robot instance when
                                  NT_INFERENCE_URL is set, bypassing /v1/models discovery
 - `newt.RunResult`            — returned by Robot.run() (non-stream mode)
+- `newt.InferenceResponse`    — returned by Robot.infer() (one-shot); wraps the raw
+                                 action chunk with semantic axis labels + latency
 - `newt.list_models`          — fetch available models from the inference server
 - `newt.trossen.WidowX_250`   — vendor-namespaced robot class (planned)
 
@@ -44,6 +46,7 @@ from newt._client.robot import (
     ContractMismatchError,
     DegradationWarning,
     EnvOverrideWarning,
+    InferenceResponse,
     ModelNotFoundError,
     NewTheoryError,
     ProtocolError,
@@ -62,6 +65,7 @@ __all__ = [
     "ContractMismatchError",
     "DegradationWarning",
     "EnvOverrideWarning",
+    "InferenceResponse",
     "ModelNotFoundError",
     "NewTheoryError",
     "ProtocolError",
