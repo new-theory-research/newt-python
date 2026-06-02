@@ -419,8 +419,15 @@ class Robot:
 
         Raises:
             AuthError:             API key rejected by server (WS close 4001).
+            ProtocolError:         Frame could not be parsed or has unrecognized type
+                                   (WS close 4400).
+            ModelNotFoundError:    Requested model not found server-side (WS close 4404).
             ContractMismatchError: Obs frame shapes don't match the resolved
                                    model's declared contract (WS close 4422).
+            ServerError:           Inference failure or internal server error
+                                   (WS close 4500).
+            VerifierError:         Console verifier infrastructure failure
+                                   (WS close 4503).
         """
         if stream:
             return self._stream(prompt, max_duration)
@@ -505,12 +512,11 @@ class Robot:
                         f"reason={getattr(rcvd, 'reason', None)!r}",
                         flush=True,
                     )
-                    _check_auth_error(exc)
-                    _check_contract_mismatch_close(exc, self._model)
-                    break  # connection closed (non-auth, non-contract-mismatch)
+                    _check_close_error(exc, self._model)
+                    break  # connection closed cleanly (no known error code)
 
                 parsed = _unpack(raw)
-                _check_contract_mismatch_frame(parsed, self._model)
+                _check_error_envelope_frame(parsed)
                 ftype = _str_field(parsed, "type")
 
                 if ftype == "action":
@@ -553,12 +559,11 @@ class Robot:
                 try:
                     raw = ws.recv()
                 except ConnectionClosed as exc:
-                    _check_auth_error(exc)
-                    _check_contract_mismatch_close(exc, self._model)
+                    _check_close_error(exc, self._model)
                     return
 
                 parsed = _unpack(raw)
-                _check_contract_mismatch_frame(parsed, self._model)
+                _check_error_envelope_frame(parsed)
                 ftype = _str_field(parsed, "type")
 
                 if ftype == "action":
@@ -640,26 +645,6 @@ def _str_field(frame: dict, key: str) -> str:
     return val or ""
 
 
-def _check_auth_error(exc: ConnectionClosed) -> None:
-    """Raise AuthError if close code is 4001 (auth failure).
-
-    Fallback for when the binary envelope frame was not received before the close.
-    C6 adds a frame-level handler (_check_envelope_frame) that parses the full
-    six-field envelope; this function fires for the bare-close case.
-    """
-    rcvd = getattr(exc, "rcvd", None)
-    if rcvd and getattr(rcvd, "code", None) == 4001:
-        raise AuthError(
-            code=4001,
-            type="auth.invalid_key",
-            message=(
-                "Authentication failed: API key is invalid or revoked. "
-                "Rotate your key in the NT console."
-            ),
-            context={},
-        ) from exc
-
-
 def _decode_key(d: dict, key: str, default=None):
     """Read `key` from a msgpack-decoded dict, accepting both str and bytes keys."""
     if key in d:
@@ -675,29 +660,6 @@ def _decode_key(d: dict, key: str, default=None):
                 return val
         return val
     return default
-
-
-def _check_contract_mismatch_frame(parsed: dict, model: str | None = None) -> None:
-    """Raise ContractMismatchError if the parsed frame is a 4422 close envelope.
-
-    The server sends a msgpack binary message before the WS close frame
-    carrying the canonical six-field error envelope (code, type, message,
-    context, docs, trace_id — per portal/wiki/operating-docs/error-style.md).
-    This function catches that message (keyed on code == 4422) and raises
-    with every field on the envelope mapped onto the exception. Handles both
-    str and bytes map keys from msgpack decoding.
-    """
-    code = _decode_key(parsed, "code")
-    if code != 4422:
-        return
-    raise ContractMismatchError(
-        code=code,
-        type=_decode_key(parsed, "type", "contract_mismatch.unknown"),
-        message=_decode_key(parsed, "message", "Contract mismatch."),
-        context=_decode_key(parsed, "context", {}) or {},
-        docs=_decode_key(parsed, "docs"),
-        trace_id=_decode_key(parsed, "trace_id", "") or "",
-    )
 
 
 def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
@@ -727,26 +689,82 @@ def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
     )
 
 
-def _check_contract_mismatch_close(exc: ConnectionClosed, model: str | None = None) -> None:
-    """Raise ContractMismatchError if close code is 4422.
+# ---------------------------------------------------------------------------
+# Close-code routing
+# ---------------------------------------------------------------------------
 
-    Fallback for the case where the binary envelope frame was not received
-    (e.g. the connection dropped between send_bytes and close). Raises with
-    empty context + a default message — the developer still gets a typed
-    exception, not stop_reason="error".
+# Hardcoded per C1 decision — type-checked, predictable, no install-time YAML
+# parsing. Catalog-driven migration is deferred.
+_CLOSE_CODE_TO_EXCEPTION: dict[int, type[NewTheoryError]] = {
+    4001: AuthError,
+    4400: ProtocolError,
+    4404: ModelNotFoundError,
+    4422: ContractMismatchError,
+    4500: ServerError,
+    4503: VerifierError,
+}
+
+# Default type per close code — used for bare-close fallback when no envelope
+# frame was received before the close.
+_DEFAULT_TYPE_FOR_CODE: dict[int, str] = {
+    4001: "auth.invalid_key",
+    4400: "protocol.unknown_type",
+    4404: "model_not_found.unknown_identifier",
+    4422: "contract_mismatch.unknown",
+    4500: "server.internal",
+    4503: "verifier.unavailable",
+}
+
+
+def _check_error_envelope_frame(parsed: dict) -> None:
+    """Raise the typed exception if `parsed` is a server error envelope frame.
+
+    The server sends a msgpack binary message immediately before the WS close
+    frame, carrying the canonical six-field error envelope (code, type, message,
+    context, docs, trace_id — per portal/wiki/operating-docs/error-style.md).
+    Covers all close codes: 4001, 4400, 4404, 4422, 4500, 4503.
+
+    Uses NewTheoryError.__init__ directly to bypass per-subclass custom
+    constructors (e.g. ModelNotFoundError's client-side convenience init).
+    """
+    code = _decode_key(parsed, "code")
+    exc_class = _CLOSE_CODE_TO_EXCEPTION.get(code)
+    if exc_class is None:
+        return
+    type_ = _decode_key(parsed, "type") or _DEFAULT_TYPE_FOR_CODE.get(code, "unknown.error")
+    message = _decode_key(parsed, "message") or f"Server error (code {code})."
+    context = _decode_key(parsed, "context") or {}
+    docs = _decode_key(parsed, "docs")
+    trace_id = _decode_key(parsed, "trace_id") or ""
+
+    inst = exc_class.__new__(exc_class)
+    NewTheoryError.__init__(inst, code=code, type=type_, message=message,
+                            context=context, docs=docs, trace_id=trace_id)
+    raise inst
+
+
+def _check_close_error(exc: ConnectionClosed, model: str | None = None) -> None:
+    """Raise the typed exception for any known 4xxx WS close code.
+
+    Fallback for when no envelope frame was received before the close
+    (e.g. connection dropped between send_bytes and close). Raises with
+    minimal context — developer still gets a typed exception, not
+    stop_reason="error".
     """
     rcvd = getattr(exc, "rcvd", None)
-    if rcvd and getattr(rcvd, "code", None) == 4422:
-        model_str = f" for model={model}" if model else ""
-        raise ContractMismatchError(
-            code=4422,
-            type="contract_mismatch.unknown",
-            message=(
-                f"Contract mismatch{model_str}: obs frame shapes don't match "
-                "the resolved model's declared contract. Server did not deliver "
-                "an envelope; check server logs for details."
-            ),
-            context={"model": model} if model else {},
-            docs=None,
-            trace_id="",
-        ) from exc
+    if not rcvd:
+        return
+    code = getattr(rcvd, "code", None)
+    exc_class = _CLOSE_CODE_TO_EXCEPTION.get(code)
+    if exc_class is None:
+        return
+
+    reason = getattr(rcvd, "reason", "") or ""
+    type_ = _DEFAULT_TYPE_FOR_CODE.get(code, "unknown.error")
+    message = reason or f"Server closed connection with code {code}."
+    context: dict = {"model": model} if model else {}
+
+    inst = exc_class.__new__(exc_class)
+    NewTheoryError.__init__(inst, code=code, type=type_, message=message,
+                            context=context, docs=None, trace_id="")
+    raise inst from exc
