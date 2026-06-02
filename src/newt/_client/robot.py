@@ -109,6 +109,17 @@ class DegradationWarning(UserWarning):
     """
 
 
+class ColdStartRetry(UserWarning):
+    """First WS connection timed out; SDK retried with an extended timeout (180s).
+
+    Modal containers serving large NT0-FP3 checkpoints (~5GB) take 60–90s to warm
+    up from cold. On the FIRST connection attempt of a Robot instance's lifecycle,
+    a TimeoutError triggers one automatic retry with connect_timeout=180. Emitted
+    exactly once per Robot instance via warnings.warn. Subsequent connections (warm
+    container) don't retry.
+    """
+
+
 class ProtocolError(NewTheoryError):
     """Obs frame could not be parsed or has an unrecognized type (WS close 4400).
 
@@ -441,6 +452,10 @@ class Robot:
         # Reset to False at the start of each run() call (see _run_blocking/_stream).
         self._degradation_warned: bool = False
 
+        # Consumed after the first _ws_connect() attempt (success or retry).
+        # Never reset — cold-start retry fires at most once per Robot instance.
+        self._cold_start_retry_consumed: bool = False
+
         # Test-affordance: NT_INFERENCE_URL takes highest precedence — if set,
         # discovery is skipped and this URL is used directly. Smoke + golden
         # tests use this to repoint at specific servers without touching the registry.
@@ -501,14 +516,43 @@ class Robot:
         open_timeout defaults to 120s (set on Robot via `connect_timeout=`) so
         cold-start cost (Modal scale-down → GPU + checkpoint-load, 30–90s typical)
         doesn't surface as a handshake timeout.
+
+        On the FIRST call of this Robot instance's lifecycle, a TimeoutError triggers
+        one automatic retry with open_timeout=180 and emits a ColdStartRetry warning.
+        Subsequent calls (warm container, reconnects) do not retry. If the 180s retry
+        also times out, the original TimeoutError is re-raised unmasked.
         """
         try:
-            return connect(
+            ws = connect(
                 self._url,
                 additional_headers={"Authorization": f"Bearer {self._api_key}"},
                 open_timeout=self._connect_timeout,
             )
+            self._cold_start_retry_consumed = True
+            return ws
+        except TimeoutError as original_exc:
+            if self._cold_start_retry_consumed:
+                raise
+            self._cold_start_retry_consumed = True
+            model_str = self._model or "nt0-fp3"
+            warnings.warn(
+                ColdStartRetry(
+                    f"Cold-start retry for model={model_str!r} "
+                    "(warming up the container, may take 60-90s). "
+                    "Subsequent calls hit the warm container."
+                ),
+                stacklevel=3,
+            )
+            try:
+                return connect(
+                    self._url,
+                    additional_headers={"Authorization": f"Bearer {self._api_key}"},
+                    open_timeout=180,
+                )
+            except Exception:
+                raise original_exc
         except InvalidStatus as exc:
+            self._cold_start_retry_consumed = True
             status = getattr(exc, "response", None)
             http_code = getattr(status, "status_code", 0) if status else 0
             raise AuthError(
