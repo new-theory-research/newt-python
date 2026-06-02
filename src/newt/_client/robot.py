@@ -192,6 +192,24 @@ class ModelNotFoundError(NewTheoryError):
         )
 
 
+class BaseNotDeployableError(NewTheoryError):
+    """Requested model is a base (lineage anchor) — not directly deployable (client-side, before WS connection).
+
+    Raised when the requested model identifier resolves to a registry entry that
+    has no endpoint field — the entry is a lineage anchor, not a deployable fine-tune.
+    SDK raises before opening the WS connection. context.fine_tunes carries the
+    dynamically-resolved deployable fine-tunes for this family.
+
+    Attributes:
+        code:     4424 (client-side; not a WS close code — fires before connection).
+        type:     "model.base_not_deployable"
+        message:  Human-readable: what was requested, which fine-tunes are available.
+        context:  {"model": model_id, "fine_tunes": [list of deployable tags]}.
+        docs:     Stable URL (may be None).
+        trace_id: Empty string for client-side errors (no server trace).
+    """
+
+
 class RegistryUnavailable(Exception):
     """Registry fetch failed before WS connection could be established.
 
@@ -296,20 +314,60 @@ def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
         raise RegistryUnavailable(bootstrap_url, str(exc)) from exc
 
 
+def _find_deployable_fine_tunes(base_uid: str, registry: list) -> list[str]:
+    """Return the first tag (or UID) of each registry entry that has base_uid as its
+    direct base and has an endpoint (i.e. is deployable)."""
+    result = []
+    for entry in registry:
+        if entry.get("base") == base_uid and entry.get("endpoint"):
+            tags = entry.get("tags") or []
+            uid = entry.get("uid") or ""
+            result.append(tags[0] if tags else uid)
+    return result
+
+
 def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: str) -> str:
     """Resolve a model UID or tag to its WS endpoint URL from the registry response.
 
     model=None resolves to _DEFAULT_MODEL_UID. Raises ModelNotFoundError when the
-    identifier doesn't match any entry in the registry.
+    identifier doesn't match any entry in the registry. Raises BaseNotDeployableError
+    when the entry exists but has no endpoint (lineage anchor, not deployable).
     """
     target = model if model is not None else _DEFAULT_MODEL_UID
+    matched_entry = None
     for entry in registry:
         uid = entry.get("uid") or ""
         tags = entry.get("tags") or []
         if target == uid or target in tags:
-            endpoint = entry.get("endpoint")
-            if endpoint:
-                return endpoint
+            matched_entry = entry
+            break
+
+    if matched_entry is not None:
+        endpoint = matched_entry.get("endpoint")
+        if endpoint:
+            return endpoint
+        # Entry exists but no endpoint — lineage anchor, not deployable.
+        entry_uid = matched_entry.get("uid") or target
+        deployable_tags = _find_deployable_fine_tunes(entry_uid, registry)
+        if deployable_tags:
+            message = (
+                f"Model {target!r} is a base model — not directly deployable. "
+                f"Use one of its fine-tunes: {', '.join(deployable_tags)}."
+            )
+        else:
+            message = (
+                f"Model {target!r} is a base model — not directly deployable. "
+                "No deployable fine-tunes registered for this family yet."
+            )
+        raise BaseNotDeployableError(
+            code=4424,
+            type="model.base_not_deployable",
+            message=message,
+            context={"model": target, "fine_tunes": deployable_tags},
+            docs="https://docs.newtheory.ai/api/errors#model-base-not-deployable",
+            trace_id="",
+        )
+
     known: list = []
     for entry in registry:
         uid = entry.get("uid")

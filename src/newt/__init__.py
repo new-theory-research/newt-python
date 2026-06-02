@@ -9,6 +9,9 @@ Public surface:
 - `newt.AuthError`            — raised when API key is rejected (WS close 4001 / HTTP 401)
 - `newt.ProtocolError`        — raised when obs frame is malformed or has unknown type
                                  (WS close 4400)
+- `newt.BaseNotDeployableError` — raised when the requested model is a base (lineage anchor)
+                                 with no endpoint; fires client-side before WS connection
+                                 with context.fine_tunes listing deployable alternatives
 - `newt.ModelNotFoundError`   — raised when the requested model UID or tag isn't found
                                  (client-side before WS connection, or WS close 4404)
 - `newt.ContractMismatchError` — raised when obs frame shapes don't match the resolved
@@ -32,6 +35,7 @@ Internal:
 
 from newt._client.robot import (
     AuthError,
+    BaseNotDeployableError,
     ContractMismatchError,
     DegradationWarning,
     ModelNotFoundError,
@@ -47,6 +51,7 @@ from newt._client.robot import (
 
 __all__ = [
     "AuthError",
+    "BaseNotDeployableError",
     "ContractMismatchError",
     "DegradationWarning",
     "ModelNotFoundError",
