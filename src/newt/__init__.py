@@ -26,6 +26,8 @@ Public surface:
                                  timeout; SDK retried with 180s timeout (Modal cold-start)
 - `newt.DegradationWarning`   — warnings.warn'd once per run() when expected cameras
                                  are absent; actions succeed but may be degraded
+- `newt.EnvOverrideWarning`   — warnings.warn'd once per Robot instance when
+                                 NT_INFERENCE_URL is set, bypassing /v1/models discovery
 - `newt.RunResult`            — returned by Robot.run() (non-stream mode)
 - `newt.list_models`          — fetch available models from the inference server
 - `newt.trossen.WidowX_250`   — vendor-namespaced robot class (planned)
@@ -41,6 +43,7 @@ from newt._client.robot import (
     ColdStartRetry,
     ContractMismatchError,
     DegradationWarning,
+    EnvOverrideWarning,
     ModelNotFoundError,
     NewTheoryError,
     ProtocolError,
@@ -58,6 +61,7 @@ __all__ = [
     "ColdStartRetry",
     "ContractMismatchError",
     "DegradationWarning",
+    "EnvOverrideWarning",
     "ModelNotFoundError",
     "NewTheoryError",
     "ProtocolError",
