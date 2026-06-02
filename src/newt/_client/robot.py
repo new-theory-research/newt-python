@@ -137,6 +137,15 @@ class ServerError(NewTheoryError):
     `server.internal`).
     """
 
+    def __str__(self) -> str:
+        lines = [
+            f"ServerError(code={self.code}, type={self.type}, trace_id={self.trace_id})"
+        ]
+        for k, v in (self.context or {}).items():
+            lines.append(f"  context.{k}={v}")
+        lines.append(f"  {self.message}  (Check type and context before retrying.)")
+        return "\n".join(lines)
+
 
 class VerifierError(NewTheoryError):
     """Console verifier infrastructure failure at handshake (WS close 4503).
