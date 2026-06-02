@@ -120,6 +120,16 @@ class ColdStartRetry(UserWarning):
     """
 
 
+class EnvOverrideWarning(UserWarning):
+    """NT_INFERENCE_URL is set, bypassing dynamic /v1/models discovery for ALL models.
+
+    Emitted at most once per Robot instance at construction time. This override is
+    intentional for smoke and golden tests; in normal usage it means per-model
+    cross-app routing is disabled and every Robot() will hit the same endpoint
+    regardless of which model was requested.
+    """
+
+
 class ProtocolError(NewTheoryError):
     """Obs frame could not be parsed or has an unrecognized type (WS close 4400).
 
@@ -470,6 +480,14 @@ class Robot:
         # tests use this to repoint at specific servers without touching the registry.
         env_url = os.environ.get("NT_INFERENCE_URL")
         if env_url:
+            warnings.warn(
+                EnvOverrideWarning(
+                    f"NT_INFERENCE_URL is set to {env_url!r} — this overrides dynamic "
+                    "/v1/models discovery for ALL models. "
+                    "Unset it to use per-model cross-app routing."
+                ),
+                stacklevel=2,
+            )
             self._url = env_url
             self._registry: list = []
         else:
