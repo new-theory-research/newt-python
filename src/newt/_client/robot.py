@@ -55,33 +55,18 @@ _unpack = functools.partial(msgpack.unpackb, object_hook=_unpack_array)
 # Public types
 # ---------------------------------------------------------------------------
 
-class AuthError(Exception):
-    """API key is missing, malformed, or rejected by the server (WS close 4001)."""
-
-
-class DegradationWarning(UserWarning):
-    """Server reports that one or more expected cameras were absent from the obs frame.
-
-    The connection succeeds and actions are returned; missing cameras were zero-filled
-    by the server. Actions may be degraded relative to the model's trained distribution.
-    Emitted at most once per Robot.run() call via warnings.warn.
-    """
-
-
-class ContractMismatchError(Exception):
-    """Obs frame shapes don't match the resolved model's declared contract (WS close 4422).
+class NewTheoryError(Exception):
+    """Base class for all New Theory server-emitted errors.
 
     Mirrors the canonical six-field error envelope (per
-    portal/wiki/operating-docs/error-style.md): every field on the envelope
-    is a field on the exception. Group-by-domain — every `contract_mismatch.*`
-    type raises this class; branch on `exc.type` for specific failures
-    (`contract_mismatch.state_shape`, `contract_mismatch.camera_missing`, etc.).
+    portal/wiki/operating-docs/error-style.md). Every WS close-code error
+    inherits from this class; branch on `exc.type` for specific failures.
 
     Attributes:
-        code:     Numeric WS close code (4422).
-        type:     Two-level dotted identifier (e.g. "contract_mismatch.state_shape").
+        code:     Numeric WS close code (or HTTP status for client-side errors).
+        type:     Two-level dotted identifier (e.g. "auth.invalid_key").
         message:  Human-readable prose: what's wrong, expected vs. got, next action.
-        context:  Machine-readable specifics (model, expected_shape, got_shape, etc.).
+        context:  Machine-readable specifics (varies by error type).
         docs:     Stable URL into the docs site (may be None if not populated).
         trace_id: Server-generated cross-reference into server logs.
     """
@@ -107,7 +92,69 @@ class ContractMismatchError(Exception):
         return self.message
 
 
-class ModelNotFoundError(Exception):
+class AuthError(NewTheoryError):
+    """API key is missing, malformed, or rejected (WS close 4001 / HTTP 401).
+
+    Group-by-domain: every `auth.*` type raises this class; branch on
+    `exc.type` for specific failures (e.g. "auth.invalid_key").
+    """
+
+
+class DegradationWarning(UserWarning):
+    """Server reports that one or more expected cameras were absent from the obs frame.
+
+    The connection succeeds and actions are returned; missing cameras were zero-filled
+    by the server. Actions may be degraded relative to the model's trained distribution.
+    Emitted at most once per Robot.run() call via warnings.warn.
+    """
+
+
+class ProtocolError(NewTheoryError):
+    """Obs frame could not be parsed or has an unrecognized type (WS close 4400).
+
+    Group-by-domain: every `protocol.*` type raises this class; branch on
+    `exc.type` for specific failures (`protocol.malformed_msgpack`,
+    `protocol.missing_type`, `protocol.unknown_type`).
+    """
+
+
+class ServerError(NewTheoryError):
+    """Server-side error during inference or in the WS handler (WS close 4500).
+
+    Group-by-domain: every `server.*` type raises this class; branch on
+    `exc.type` for specific failures (`server.inference_error`,
+    `server.internal`).
+    """
+
+
+class VerifierError(NewTheoryError):
+    """Console verifier infrastructure failure at handshake (WS close 4503).
+
+    Group-by-domain: every `verifier.*` type raises this class; branch on
+    `exc.type` for specific failures (e.g. `verifier.unavailable`).
+    """
+
+
+class ContractMismatchError(NewTheoryError):
+    """Obs frame shapes don't match the resolved model's declared contract (WS close 4422).
+
+    Mirrors the canonical six-field error envelope (per
+    portal/wiki/operating-docs/error-style.md): every field on the envelope
+    is a field on the exception. Group-by-domain — every `contract_mismatch.*`
+    type raises this class; branch on `exc.type` for specific failures
+    (`contract_mismatch.state_shape`, `contract_mismatch.camera_missing`, etc.).
+
+    Attributes:
+        code:     Numeric WS close code (4422).
+        type:     Two-level dotted identifier (e.g. "contract_mismatch.state_shape").
+        message:  Human-readable prose: what's wrong, expected vs. got, next action.
+        context:  Machine-readable specifics (model, expected_shape, got_shape, etc.).
+        docs:     Stable URL into the docs site (may be None if not populated).
+        trace_id: Server-generated cross-reference into server logs.
+    """
+
+
+class ModelNotFoundError(NewTheoryError):
     """Requested model UID or tag not found in the registry (client-side, before WS connection).
 
     Mirrors the canonical six-field error envelope (per
@@ -130,20 +177,19 @@ class ModelNotFoundError(Exception):
         docs: str | None = None,
     ) -> None:
         model_str = repr(model)
-        self.code = 4404
-        self.type = "model_not_found.unknown_identifier"
-        self.message = (
+        message = (
             f"Model {model_str} not found in registry. "
             f"Known models: {known}. "
             "Check spelling or list with newt.list_models()."
         )
-        self.context = {"requested": model, "known_models": known}
-        self.docs = docs
-        self.trace_id = ""
-        super().__init__(self.message)
-
-    def __str__(self) -> str:
-        return self.message
+        super().__init__(
+            code=4404,
+            type="model_not_found.unknown_identifier",
+            message=message,
+            context={"requested": model, "known_models": known},
+            docs=docs,
+            trace_id="",
+        )
 
 
 class RegistryUnavailable(Exception):
@@ -235,8 +281,13 @@ def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
     except HTTPError as exc:
         if exc.code == 401:
             raise AuthError(
-                "Authentication failed: API key rejected by registry /v1/models. "
-                "Rotate your key in the NT console."
+                code=4001,
+                type="auth.invalid_key",
+                message=(
+                    "Authentication failed: API key rejected by registry /v1/models. "
+                    "Rotate your key in the NT console."
+                ),
+                context={},
             ) from exc
         raise RegistryUnavailable(bootstrap_url, f"HTTP {exc.code}") from exc
     except URLError as exc:
@@ -394,10 +445,15 @@ class Robot:
             )
         except InvalidStatus as exc:
             status = getattr(exc, "response", None)
-            code = getattr(status, "status_code", 0) if status else 0
+            http_code = getattr(status, "status_code", 0) if status else 0
             raise AuthError(
-                f"Authentication failed during WS upgrade (HTTP {code}). "
-                "Check your API key and rotate it in the NT console if needed."
+                code=4001,
+                type="auth.invalid_key",
+                message=(
+                    f"Authentication failed during WS upgrade (HTTP {http_code}). "
+                    "Check your API key and rotate it in the NT console if needed."
+                ),
+                context={},
             ) from exc
 
     def _run_blocking(self, prompt: str, max_duration: float) -> RunResult:
@@ -552,8 +608,13 @@ def list_models(api_key: str, base_url: str | None = None) -> list[dict]:
     except HTTPError as exc:
         if exc.code == 401:
             raise AuthError(
-                "Authentication failed: API key rejected by /v1/models. "
-                "Rotate your key in the NT console."
+                code=4001,
+                type="auth.invalid_key",
+                message=(
+                    "Authentication failed: API key rejected by /v1/models. "
+                    "Rotate your key in the NT console."
+                ),
+                context={},
             ) from exc
         raise
 
@@ -580,12 +641,22 @@ def _str_field(frame: dict, key: str) -> str:
 
 
 def _check_auth_error(exc: ConnectionClosed) -> None:
-    """Raise AuthError if close code is 4001 (auth failure)."""
+    """Raise AuthError if close code is 4001 (auth failure).
+
+    Fallback for when the binary envelope frame was not received before the close.
+    C6 adds a frame-level handler (_check_envelope_frame) that parses the full
+    six-field envelope; this function fires for the bare-close case.
+    """
     rcvd = getattr(exc, "rcvd", None)
     if rcvd and getattr(rcvd, "code", None) == 4001:
         raise AuthError(
-            "Authentication failed: API key is invalid or revoked. "
-            "Rotate your key in the NT console."
+            code=4001,
+            type="auth.invalid_key",
+            message=(
+                "Authentication failed: API key is invalid or revoked. "
+                "Rotate your key in the NT console."
+            ),
+            context={},
         ) from exc
 
 

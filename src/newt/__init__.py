@@ -4,11 +4,19 @@ Importable as `import newt`. Distribution name on PyPI: `newt`.
 
 Public surface:
 - `newt.Robot`                — top-level robot handle
-- `newt.AuthError`            — raised when API key is rejected by the server
-- `newt.ContractMismatchError` — raised when obs frame shapes don't match the
-                                 resolved model's declared contract (WS close 4422)
-- `newt.ModelNotFoundError`   — raised when the requested model UID or tag isn't
-                                 in the registry (client-side, before WS connection)
+- `newt.NewTheoryError`       — base class for all server-emitted errors; six-field
+                                 envelope (code, type, message, context, docs, trace_id)
+- `newt.AuthError`            — raised when API key is rejected (WS close 4001 / HTTP 401)
+- `newt.ProtocolError`        — raised when obs frame is malformed or has unknown type
+                                 (WS close 4400)
+- `newt.ModelNotFoundError`   — raised when the requested model UID or tag isn't found
+                                 (client-side before WS connection, or WS close 4404)
+- `newt.ContractMismatchError` — raised when obs frame shapes don't match the resolved
+                                 model's declared contract (WS close 4422)
+- `newt.ServerError`          — raised on server-side inference or internal error
+                                 (WS close 4500)
+- `newt.VerifierError`        — raised when the console verifier is unavailable at
+                                 handshake (WS close 4503)
 - `newt.RegistryUnavailable`  — raised when the registry fetch itself fails
                                  (network error, 5xx, or malformed JSON)
 - `newt.DegradationWarning`   — warnings.warn'd once per run() when expected cameras
@@ -27,9 +35,13 @@ from newt._client.robot import (
     ContractMismatchError,
     DegradationWarning,
     ModelNotFoundError,
+    NewTheoryError,
+    ProtocolError,
     RegistryUnavailable,
     Robot,
     RunResult,
+    ServerError,
+    VerifierError,
     list_models,
 )
 
@@ -38,8 +50,12 @@ __all__ = [
     "ContractMismatchError",
     "DegradationWarning",
     "ModelNotFoundError",
+    "NewTheoryError",
+    "ProtocolError",
     "RegistryUnavailable",
     "Robot",
     "RunResult",
+    "ServerError",
+    "VerifierError",
     "list_models",
 ]
