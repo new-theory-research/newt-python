@@ -22,6 +22,8 @@ Public surface:
                                  handshake (WS close 4503)
 - `newt.RegistryUnavailable`  — raised when the registry fetch itself fails
                                  (network error, 5xx, or malformed JSON)
+- `newt.ColdStartRetry`       — warnings.warn'd once per Robot instance on first-connect
+                                 timeout; SDK retried with 180s timeout (Modal cold-start)
 - `newt.DegradationWarning`   — warnings.warn'd once per run() when expected cameras
                                  are absent; actions succeed but may be degraded
 - `newt.RunResult`            — returned by Robot.run() (non-stream mode)
@@ -36,6 +38,7 @@ Internal:
 from newt._client.robot import (
     AuthError,
     BaseNotDeployableError,
+    ColdStartRetry,
     ContractMismatchError,
     DegradationWarning,
     ModelNotFoundError,
@@ -52,6 +55,7 @@ from newt._client.robot import (
 __all__ = [
     "AuthError",
     "BaseNotDeployableError",
+    "ColdStartRetry",
     "ContractMismatchError",
     "DegradationWarning",
     "ModelNotFoundError",
