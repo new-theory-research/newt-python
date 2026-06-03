@@ -284,6 +284,50 @@ class RunResult:
     stop_reason: str
 
 
+class InferenceResponse:
+    """Returned by Robot.infer() — one labeled action chunk from a single request.
+
+    The streaming Robot.run()/execute loop delivers bare ndarray chunks. infer()
+    is the single-request primitive for the "evaluate the API" audience: it wraps
+    the same raw chunk with the semantic axis labels and latency so a developer can
+    see what they got back without consulting the wire spec.
+
+    Attributes:
+        action_chunk: The raw action chunk ndarray, shape (action_horizon, action_dim).
+                      Canonical accessor — identical to what execute() receives in run().
+        axes:         Semantic name per action dim (len == action_dim), e.g.
+                      ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]. Falls back to
+                      ["dim_0", ..., "dim_N"] when the registry carries no labels for
+                      the resolved model.
+        latency_ms:   Wall-clock round-trip for the single request, in milliseconds.
+        model:        Resolved model identifier (UID or tag), or None when not known
+                      (e.g. NT_INFERENCE_URL override skips registry discovery).
+    """
+
+    def __init__(
+        self,
+        action_chunk: np.ndarray,
+        axes: list[str],
+        latency_ms: float,
+        model: str | None = None,
+    ) -> None:
+        self.action_chunk = action_chunk
+        self.axes = axes
+        self.latency_ms = latency_ms
+        self.model = model
+
+    def __repr__(self) -> str:
+        shape = getattr(self.action_chunk, "shape", ())
+        shape_str = ", ".join(str(d) for d in shape)
+        axes_str = ", ".join(self.axes)
+        return (
+            f"action_chunk ({shape_str}): {axes_str} | "
+            f"latency {self.latency_ms:.0f}ms"
+        )
+
+    __str__ = __repr__
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap URL + registry discovery
 # ---------------------------------------------------------------------------
@@ -408,6 +452,28 @@ def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: st
     raise ModelNotFoundError(model, known)
 
 
+def _resolve_action_axes(registry: list, model: str | None) -> list[str] | None:
+    """Return the resolved model's contract.action_axes from the registry, or None.
+
+    The /v1/models response already injects the inherited contract onto fine-tune
+    entries (server resolves the base: chain), so a flat per-entry lookup is enough.
+    Returns None when the model isn't found, has no contract, or the contract carries
+    no action_axes — callers fall back to dim_N labels. Never raises; the labels are
+    cosmetic and must not break the inference path.
+    """
+    target = model if model is not None else _DEFAULT_MODEL_UID
+    for entry in registry:
+        uid = entry.get("uid") or ""
+        tags = entry.get("tags") or []
+        if target == uid or target in tags:
+            contract = entry.get("contract") or {}
+            axes = contract.get("action_axes")
+            if isinstance(axes, list) and axes:
+                return [str(a) for a in axes]
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Robot
 # ---------------------------------------------------------------------------
@@ -455,11 +521,14 @@ class Robot:
     def __init__(
         self,
         api_key: str,
-        read_state: Callable[[], dict],
-        execute: Callable[[np.ndarray], None],
+        read_state: Callable[[], dict] | None = None,
+        execute: Callable[[np.ndarray], None] | None = None,
         model: str | None = None,
         connect_timeout: float = 120.0,
     ) -> None:
+        # read_state/execute are optional: the one-shot infer() path never uses
+        # them, so an API-evaluator can construct Robot(api_key=...) and call
+        # infer() with no hardware callbacks. run() requires both and guards for it.
         self._api_key = api_key
         self._read_state = read_state
         self._execute = execute
@@ -529,13 +598,121 @@ class Robot:
             VerifierError:         Console verifier infrastructure failure
                                    (WS close 4503).
         """
+        if self._read_state is None or self._execute is None:
+            raise TypeError(
+                "Robot.run() requires read_state and execute callbacks. "
+                "Construct Robot(api_key, read_state, execute) to drive a robot, "
+                "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
+            )
         if stream:
             return self._stream(prompt, max_duration)
         return self._run_blocking(prompt, max_duration)
 
+    def infer(self, obs: dict, prompt: str | None = None) -> InferenceResponse:
+        """One-shot inference: send a single observation, get one labeled action chunk.
+
+        The single-request counterpart to run()'s streaming loop. Same wire and
+        transport (per tenet T1 — invariant client): opens the same authenticated WS,
+        sends one obs frame, receives one action chunk, returns it wrapped with the
+        model's semantic axis labels and the round-trip latency. Does NOT touch the
+        read_state/execute callbacks — infer() is self-contained.
+
+        Args:
+            obs:    Observation dict, same shape read_state() returns. Optional keys:
+                    "state", "images"/"depth_maps"/"intrinsics"/"extrinsics", "prompt".
+                    Missing fields are firehose-coerced server-side — partial dicts
+                    (even {}) are fine. If obs carries "prompt", it's used as-is.
+            prompt: Language instruction. Used only when obs has no "prompt" of its own
+                    (run()'s frame builder prefers the obs prompt). Defaults to "" so the
+                    server applies its default prompt when neither is supplied.
+
+        Returns:
+            InferenceResponse — .action_chunk (raw ndarray), .axes (semantic labels),
+            .latency_ms, .model.
+
+        Raises:
+            AuthError, ProtocolError, ModelNotFoundError, ContractMismatchError,
+            ServerError, VerifierError — same typed errors as run(), surfaced from
+            the shared close-code routing.
+        """
+        import time as _time
+
+        ws = self._ws_connect()
+        try:
+            frame = _build_obs_frame(obs, prompt or "", None, self._model)
+            t0 = _time.perf_counter()
+            try:
+                ws.send(_pack(frame))
+            except ConnectionClosed as exc:
+                # Server may have closed before recv; drain the close for a typed error.
+                _check_close_error(exc, self._model)
+                raise
+
+            try:
+                raw = ws.recv()
+            except ConnectionClosed as exc:
+                _check_close_error(exc, self._model)
+                raise
+            latency_ms = (_time.perf_counter() - t0) * 1000.0
+
+            parsed = _unpack(raw)
+            _check_error_envelope_frame(parsed)
+            ftype = _str_field(parsed, "type")
+
+            if ftype != "action":
+                # terminal-first or any non-action frame: nothing to wrap. Fail loud
+                # rather than return an empty/mislabeled chunk.
+                raise ServerError(
+                    code=4500,
+                    type="server.no_action",
+                    message=(
+                        f"infer() expected an action frame, got type={ftype!r}. "
+                        "The server returned no action chunk for this single request."
+                    ),
+                    context={"frame_type": ftype, "model": self._model},
+                )
+
+            _maybe_warn_degradation(parsed, self._model)
+            chunk = parsed.get("chunk")
+            axes = self._action_axes_for(chunk)
+            return InferenceResponse(
+                action_chunk=chunk,
+                axes=axes,
+                latency_ms=latency_ms,
+                model=self._model,
+            )
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
     # -----------------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------------
+
+    def _action_axes_for(self, chunk: Any) -> list[str]:
+        """Semantic axis labels for the resolved model, or dim_N fallback.
+
+        Pulls contract.action_axes from the registry fetched at construction. Falls
+        back to dim_0..dim_N (sized to the chunk's last dim) with a debug-level log
+        when the registry has no labels — e.g. NT_INFERENCE_URL override (empty
+        registry) or a model whose contract omits action_axes. Never mislabels: the
+        fallback is index-named, not guessed.
+        """
+        axes = _resolve_action_axes(self._registry, self._model)
+        if axes:
+            return axes
+        import logging
+
+        shape = getattr(chunk, "shape", None)
+        n = shape[-1] if shape else 0
+        logging.getLogger("newt").debug(
+            "No action_axes in registry for model=%r; falling back to dim_0..dim_%d",
+            self._model,
+            max(n - 1, 0),
+        )
+        return [f"dim_{i}" for i in range(n)]
 
     def _ws_connect(self):
         """Open authenticated WS connection. Raises AuthError on HTTP-level rejection.
