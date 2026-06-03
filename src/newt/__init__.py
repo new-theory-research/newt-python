@@ -32,6 +32,8 @@ Public surface:
 - `newt.InferenceResponse`    — returned by Robot.infer() (one-shot); wraps the raw
                                  action chunk with semantic axis labels + latency
 - `newt.list_models`          — fetch available models from the inference server
+- `newt.fixtures`             — real recorded observations (`fixtures.load("cup_stacking")`)
+                                 for trying inference without hardware
 - `newt.trossen.WidowX_250`   — vendor-namespaced robot class (planned)
 
 Internal:
@@ -57,6 +59,7 @@ from newt._client.robot import (
     VerifierError,
     list_models,
 )
+from newt import fixtures
 
 __all__ = [
     "AuthError",
@@ -74,5 +77,6 @@ __all__ = [
     "RunResult",
     "ServerError",
     "VerifierError",
+    "fixtures",
     "list_models",
 ]
