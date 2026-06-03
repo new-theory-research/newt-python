@@ -39,6 +39,14 @@ _FIXTURES = {
 _CAMERA_KEYS = ("right-wrist-camera", "surrounding1", "surrounding2")
 _JPEG_KEYS = ("jpeg_right_wrist", "jpeg_surrounding1", "jpeg_surrounding2")
 
+# Override the prompt carried in the recorded .npz. cup_stacking's raw recorded
+# tag ("blue cups stitch cup") is too rough for docs; substitute NT0-FP3's clean
+# canonical task prompt, which still matches the obs and returns a non-degenerate
+# chunk. Fixtures absent from this map keep their recorded prompt.
+_PROMPT_OVERRIDES = {
+    "cup_stacking": "Stack one cup into another cup.",
+}
+
 
 def _decode_jpeg(buf: np.ndarray) -> np.ndarray:
     """Decode JPEG bytes (stored as a uint8 array) to (3, 240, 320) uint8 CHW."""
@@ -89,7 +97,7 @@ def load(name: str) -> dict:
             cam: _decode_jpeg(npz[jpeg_key])
             for cam, jpeg_key in zip(_CAMERA_KEYS, _JPEG_KEYS)
         }
-        prompt = str(npz["prompt"])
+        prompt = _PROMPT_OVERRIDES.get(name, str(npz["prompt"]))
 
     return {"state": state, "images": images, "prompt": prompt}
 
