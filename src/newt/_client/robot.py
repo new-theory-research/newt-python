@@ -521,11 +521,14 @@ class Robot:
     def __init__(
         self,
         api_key: str,
-        read_state: Callable[[], dict],
-        execute: Callable[[np.ndarray], None],
+        read_state: Callable[[], dict] | None = None,
+        execute: Callable[[np.ndarray], None] | None = None,
         model: str | None = None,
         connect_timeout: float = 120.0,
     ) -> None:
+        # read_state/execute are optional: the one-shot infer() path never uses
+        # them, so an API-evaluator can construct Robot(api_key=...) and call
+        # infer() with no hardware callbacks. run() requires both and guards for it.
         self._api_key = api_key
         self._read_state = read_state
         self._execute = execute
@@ -595,6 +598,12 @@ class Robot:
             VerifierError:         Console verifier infrastructure failure
                                    (WS close 4503).
         """
+        if self._read_state is None or self._execute is None:
+            raise TypeError(
+                "Robot.run() requires read_state and execute callbacks. "
+                "Construct Robot(api_key, read_state, execute) to drive a robot, "
+                "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
+            )
         if stream:
             return self._stream(prompt, max_duration)
         return self._run_blocking(prompt, max_duration)
