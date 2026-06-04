@@ -354,12 +354,55 @@ def _resolve_bootstrap_url() -> str:
     return _DEFAULT_BOOTSTRAP_URL
 
 
+def _key_format_hint(api_key: str) -> str:
+    """One-line nudge when a key is the wrong format (brief-229).
+
+    The `ak_…` key from Clerk's console-profile panel is the landmine that cost a
+    beta tester ~30 min: it's not an NT inference key. Name it specifically when the
+    presented key doesn't start with `nt_`; otherwise give the generic next action.
+    """
+    if not api_key.startswith("nt_"):
+        return (
+            " NT keys start with nt_; the key you sent does not"
+            + (f" (it starts with {api_key.split('_', 1)[0]}_)" if "_" in api_key else "")
+            + ". An ak_ key comes from the wrong flow — create one in the console "
+            "Create-key flow."
+        )
+    return " Rotate your key in the NT console if it was revoked."
+
+
+def _http_error_detail(exc) -> str | None:
+    """Best-effort: pull FastAPI's {"detail": ...} body off an HTTPError, or None.
+
+    The server's 401 for a rejected key carries the key-format hint in `detail`
+    (brief-229). Surfacing it keeps the SDK message in lockstep with the server
+    without the SDK hardcoding a second copy. Never raises — diagnostics only.
+    """
+    import json
+
+    try:
+        body = exc.read()
+    except Exception:
+        return None
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return None
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
+    return detail if isinstance(detail, str) and detail else None
+
+
 def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
     """GET <bootstrap_url>/v1/models. Single attempt; raises on failure.
 
     Raises:
-        AuthError:          401 from the registry endpoint.
-        RegistryUnavailable: Network error, 5xx, or non-JSON response.
+        AuthError:          401 from the registry endpoint (bad/wrong-format/rejected
+                            key). NOT RegistryUnavailable — a rejected key is a
+                            client error, not an outage (brief-229).
+        RegistryUnavailable: Network error, 5xx, or non-JSON response — genuine
+                            registry/verifier outages only.
     """
     import json
     from urllib.error import HTTPError, URLError
@@ -372,14 +415,20 @@ def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
             return json.loads(resp.read())
     except HTTPError as exc:
         if exc.code == 401:
+            # Prefer the server's detail (it carries the key-format hint); fall back
+            # to a locally-derived hint so a bad key never reads as a registry outage.
+            detail = _http_error_detail(exc)
+            message = (
+                f"Authentication failed: {detail}"
+                if detail
+                else "Authentication failed: API key rejected by registry /v1/models."
+                + _key_format_hint(api_key)
+            )
             raise AuthError(
                 code=4001,
                 type="auth.invalid_key",
-                message=(
-                    "Authentication failed: API key rejected by registry /v1/models. "
-                    "Rotate your key in the NT console."
-                ),
-                context={},
+                message=message,
+                context={"key_prefix": api_key[:8]},
             ) from exc
         raise RegistryUnavailable(bootstrap_url, f"HTTP {exc.code}") from exc
     except URLError as exc:
@@ -918,14 +967,18 @@ def list_models(api_key: str, base_url: str | None = None) -> list[dict]:
             return json.loads(resp.read())
     except HTTPError as exc:
         if exc.code == 401:
+            detail = _http_error_detail(exc)
+            message = (
+                f"Authentication failed: {detail}"
+                if detail
+                else "Authentication failed: API key rejected by /v1/models."
+                + _key_format_hint(api_key)
+            )
             raise AuthError(
                 code=4001,
                 type="auth.invalid_key",
-                message=(
-                    "Authentication failed: API key rejected by /v1/models. "
-                    "Rotate your key in the NT console."
-                ),
-                context={},
+                message=message,
+                context={"key_prefix": api_key[:8]},
             ) from exc
         raise
 
