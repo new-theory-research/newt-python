@@ -336,11 +336,11 @@ class InferenceResponse:
 # resolution order (highest to lowest precedence):
 #   1. NT_BOOTSTRAP_URL env var — explicit override
 #   2. Derived from NT_INFERENCE_URL env var — strip WS scheme + path to HTTPS host
-#   3. _DEFAULT_BOOTSTRAP_URL constant — production NT0-FP3 (registry holder today)
+#   3. _DEFAULT_BOOTSTRAP_URL constant — always-on Railway registry (no cold start)
 # NT_INFERENCE_URL takes full precedence at the Robot level: if set, discovery
 # is skipped and the env URL is used directly (test/smoke affordance).
 
-_DEFAULT_BOOTSTRAP_URL = "https://newtheory--ntdeva-nt0-fp3-serve-serve.modal.run"
+_DEFAULT_BOOTSTRAP_URL = "https://nt-registry-production.up.railway.app"
 _DEFAULT_MODEL_UID = "ft_base_nt0fp3"
 
 
