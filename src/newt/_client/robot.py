@@ -532,6 +532,9 @@ class Robot:
 
     Args:
         api_key:    NT API key (nt_xxx); sent as Bearer in WS handshake.
+                    Optional — if not provided, the SDK resolves credentials in
+                    order: api_key arg → ~/.nt/credentials → NT_API_KEY env var.
+                    Raises AuthError if none of the three sources yield a key.
         read_state: callable returning an observation dict. Optional keys:
                     "state" (float32 ndarray (14,)), "images" (dict of camera
                     arrays), "prompt" (str). Missing fields are firehose-coerced
@@ -553,14 +556,20 @@ class Robot:
                     golden tests use this to repoint at a specific server without
                     touching the registry.
 
-    Default usage:
+    Default usage (credentials from `newt login` or NT_API_KEY):
         robot = newt.Robot(
-            api_key=os.environ["NT_API_KEY"],
             read_state=lambda: {"state": arm.get_joints()},
             execute=lambda chunk: arm.move_to(chunk[0]),
         )
         result = robot.run("pick up the cup", max_duration=30)
         # result.stop_reason == "max_duration" on pi0.5 today
+
+    Explicit key (testing / CI):
+        robot = newt.Robot(
+            api_key=os.environ["NT_API_KEY"],
+            read_state=lambda: {"state": arm.get_joints()},
+            execute=lambda chunk: arm.move_to(chunk[0]),
+        )
 
     Stream usage (caller applies chunks, library drives obs):
         for chunk in robot.run("pick up the cup", stream=True):
@@ -569,7 +578,7 @@ class Robot:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
         read_state: Callable[[], dict] | None = None,
         execute: Callable[[np.ndarray], None] | None = None,
         model: str | None = None,
@@ -578,6 +587,22 @@ class Robot:
         # read_state/execute are optional: the one-shot infer() path never uses
         # them, so an API-evaluator can construct Robot(api_key=...) and call
         # infer() with no hardware callbacks. run() requires both and guards for it.
+
+        # Credential resolution: api_key arg → ~/.nt/credentials → NT_API_KEY env var
+        if api_key is None:
+            from newt._credentials import read_api_key
+            api_key = read_api_key() or os.environ.get("NT_API_KEY")
+        if not api_key:
+            raise AuthError(
+                code=401,
+                type="auth.no_credentials",
+                message=(
+                    "No API key found. Run `newt login` to authenticate, "
+                    "or set the NT_API_KEY environment variable."
+                ),
+                context={},
+            )
+
         self._api_key = api_key
         self._read_state = read_state
         self._execute = execute
