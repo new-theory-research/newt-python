@@ -16,6 +16,9 @@ dependencies = [
     "pillow>=10.0",
 ]
 
+[project.scripts]
+newt = "newt._cli:main"
+
 [project.optional-dependencies]
 # Test deps — needed to run pytest tests/test_golden.py.
 # Install: pip install -e ".[test]"
