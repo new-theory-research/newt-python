@@ -28,6 +28,10 @@ Public surface:
                                  are absent; actions succeed but may be degraded
 - `newt.EnvOverrideWarning`   — warnings.warn'd once per Robot instance when
                                  NT_INFERENCE_URL is set, bypassing /v1/models discovery
+- `newt.VerifierTransientRetry` — warnings.warn'd once per call on first retry when the
+                                 key verifier is temporarily unavailable (WS close 4503,
+                                 type "verifier.unavailable"); SDK retries automatically
+                                 with bounded backoff (≤45s)
 - `newt.RunResult`            — returned by Robot.run() (non-stream mode)
 - `newt.InferenceResponse`    — returned by Robot.infer() (one-shot); wraps the raw
                                  action chunk with semantic axis labels + latency
@@ -57,6 +61,7 @@ from newt._client.robot import (
     RunResult,
     ServerError,
     VerifierError,
+    VerifierTransientRetry,
     list_models,
 )
 from newt import fixtures
@@ -77,6 +82,7 @@ __all__ = [
     "RunResult",
     "ServerError",
     "VerifierError",
+    "VerifierTransientRetry",
     "fixtures",
     "list_models",
 ]

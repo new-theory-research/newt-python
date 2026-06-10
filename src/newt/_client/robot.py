@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import functools
 import os
+import time
 import warnings
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 import msgpack
 import numpy as np
@@ -127,6 +128,19 @@ class EnvOverrideWarning(UserWarning):
     intentional for smoke and golden tests; in normal usage it means per-model
     cross-app routing is disabled and every Robot() will hit the same endpoint
     regardless of which model was requested.
+    """
+
+
+class VerifierTransientRetry(UserWarning):
+    """Key verifier temporarily unavailable; SDK retrying automatically.
+
+    The NT key-verification service occasionally takes a few seconds to become
+    available after a cold start. When this happens the server closes the WS
+    connection with close code 4503 before the first obs frame is sent. The SDK
+    retries with bounded backoff (≤45s total) so the first documented call works
+    without a hand-written retry loop. Emitted on the first retry via
+    warnings.warn; subsequent retries are silent. A definitively-invalid key
+    (AuthError) is never retried.
     """
 
 
@@ -403,6 +417,12 @@ def _fetch_registry(bootstrap_url: str, api_key: str) -> list:
                             client error, not an outage (brief-229).
         RegistryUnavailable: Network error, 5xx, or non-JSON response — genuine
                             registry/verifier outages only.
+
+    Note on VerifierError: the registry path cannot raise VerifierError. The verifier
+    runs inside the registry server; when it's unavailable the server returns HTTP 5xx
+    (before the JWT is validated), which becomes RegistryUnavailable. VerifierError
+    (WS close 4503) is only emitted on the WS inference path after the TCP+HTTP
+    upgrade, when the server checks the key mid-handshake.
     """
     import json
     from urllib.error import HTTPError, URLError
@@ -521,6 +541,63 @@ def _resolve_action_axes(registry: list, model: str | None) -> list[str] | None:
                 return [str(a) for a in axes]
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Verifier-unavailable retry
+# ---------------------------------------------------------------------------
+# The NT key-verification service can be momentarily unavailable when a cold
+# system first receives traffic (server emits WS close 4503 with type
+# "verifier.unavailable"). The error message prescribes its own fix ("retry in
+# a few seconds") — the SDK implements that prescription so the documented
+# first-call snippet works verbatim.
+#
+# Policy:
+#   - Only VerifierError with type "verifier.unavailable" is retried (transient).
+#   - AuthError (definitively-bad key) is NEVER retried — zero added latency.
+#   - Max 4 retries, backoff 3–8s per attempt, total budget ≤45s.
+#   - warnings.warn(VerifierTransientRetry) on the FIRST retry only (mirrors
+#     ColdStartRetry's pattern).
+
+_VERIFIER_MAX_RETRIES = 4
+_VERIFIER_BACKOFF_SECONDS = (3.0, 5.0, 7.0, 8.0)  # one per retry slot
+
+_T = TypeVar("_T")
+
+
+def _with_verifier_retry(fn: Callable[[], _T]) -> _T:
+    """Call fn(); retry transparently on transient VerifierError (verifier.unavailable).
+
+    fn must be a zero-argument callable. Each attempt opens a fresh connection so
+    fn must be side-effect-free with respect to state outside itself (i.e. suitable
+    to re-run from scratch). AuthError passes through immediately — zero retries.
+
+    Emits VerifierTransientRetry on the first retry.
+    """
+    last_exc: VerifierError | None = None
+    for attempt in range(_VERIFIER_MAX_RETRIES + 1):  # attempt 0 is the initial try
+        try:
+            return fn()
+        except VerifierError as exc:
+            if exc.type != "verifier.unavailable":
+                # Non-transient verifier error — not eligible for retry.
+                raise
+            last_exc = exc
+            if attempt == _VERIFIER_MAX_RETRIES:
+                break  # budget exhausted; fall through to re-raise
+            delay = _VERIFIER_BACKOFF_SECONDS[attempt]
+            if attempt == 0:
+                warnings.warn(
+                    VerifierTransientRetry(
+                        f"Key verifier temporarily unavailable; retrying in {delay:.0f}s "
+                        f"(attempt {attempt + 1}/{_VERIFIER_MAX_RETRIES}). "
+                        "Subsequent calls hit the warm verifier."
+                    ),
+                    stacklevel=3,
+                )
+            time.sleep(delay)
+    # All retries exhausted — re-raise with the original message intact.
+    raise last_exc  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -708,58 +785,65 @@ class Robot:
             AuthError, ProtocolError, ModelNotFoundError, ContractMismatchError,
             ServerError, VerifierError — same typed errors as run(), surfaced from
             the shared close-code routing.
+
+        Transient verifier unavailability (VerifierError with type
+        "verifier.unavailable") is retried automatically with bounded backoff
+        (≤45s total, ≤4 retries). AuthError always propagates immediately.
         """
         import time as _time
 
-        ws = self._ws_connect()
-        try:
-            frame = _build_obs_frame(obs, prompt or "", None, self._model)
-            t0 = _time.perf_counter()
+        def _attempt() -> InferenceResponse:
+            ws = self._ws_connect()
             try:
-                ws.send(_pack(frame))
-            except ConnectionClosed as exc:
-                # Server may have closed before recv; drain the close for a typed error.
-                _check_close_error(exc, self._model)
-                raise
+                frame = _build_obs_frame(obs, prompt or "", None, self._model)
+                t0 = _time.perf_counter()
+                try:
+                    ws.send(_pack(frame))
+                except ConnectionClosed as exc:
+                    # Server may have closed before recv; drain the close for a typed error.
+                    _check_close_error(exc, self._model)
+                    raise
 
-            try:
-                raw = ws.recv()
-            except ConnectionClosed as exc:
-                _check_close_error(exc, self._model)
-                raise
-            latency_ms = (_time.perf_counter() - t0) * 1000.0
+                try:
+                    raw = ws.recv()
+                except ConnectionClosed as exc:
+                    _check_close_error(exc, self._model)
+                    raise
+                latency_ms = (_time.perf_counter() - t0) * 1000.0
 
-            parsed = _unpack(raw)
-            _check_error_envelope_frame(parsed)
-            ftype = _str_field(parsed, "type")
+                parsed = _unpack(raw)
+                _check_error_envelope_frame(parsed)
+                ftype = _str_field(parsed, "type")
 
-            if ftype != "action":
-                # terminal-first or any non-action frame: nothing to wrap. Fail loud
-                # rather than return an empty/mislabeled chunk.
-                raise ServerError(
-                    code=4500,
-                    type="server.no_action",
-                    message=(
-                        f"infer() expected an action frame, got type={ftype!r}. "
-                        "The server returned no action chunk for this single request."
-                    ),
-                    context={"frame_type": ftype, "model": self._model},
+                if ftype != "action":
+                    # terminal-first or any non-action frame: nothing to wrap. Fail loud
+                    # rather than return an empty/mislabeled chunk.
+                    raise ServerError(
+                        code=4500,
+                        type="server.no_action",
+                        message=(
+                            f"infer() expected an action frame, got type={ftype!r}. "
+                            "The server returned no action chunk for this single request."
+                        ),
+                        context={"frame_type": ftype, "model": self._model},
+                    )
+
+                _maybe_warn_degradation(parsed, self._model)
+                chunk = parsed.get("chunk")
+                axes = self._action_axes_for(chunk)
+                return InferenceResponse(
+                    action_chunk=chunk,
+                    axes=axes,
+                    latency_ms=latency_ms,
+                    model=self._model,
                 )
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
 
-            _maybe_warn_degradation(parsed, self._model)
-            chunk = parsed.get("chunk")
-            axes = self._action_axes_for(chunk)
-            return InferenceResponse(
-                action_chunk=chunk,
-                axes=axes,
-                latency_ms=latency_ms,
-                model=self._model,
-            )
-        finally:
-            try:
-                ws.close()
-            except Exception:
-                pass
+        return _with_verifier_retry(_attempt)
 
     # -----------------------------------------------------------------------
     # Internal
@@ -844,6 +928,9 @@ class Robot:
             ) from exc
 
     def _run_blocking(self, prompt: str, max_duration: float) -> RunResult:
+        return _with_verifier_retry(lambda: self._run_blocking_once(prompt, max_duration))
+
+    def _run_blocking_once(self, prompt: str, max_duration: float) -> RunResult:
         import time as _time
         self._degradation_warned = False
         ws = self._ws_connect()
@@ -916,6 +1003,38 @@ class Robot:
         return RunResult(stop_reason=stop_reason)
 
     def _stream(
+        self, prompt: str, max_duration: float
+    ) -> Generator[np.ndarray, None, None]:
+        # Verifier retry wrapper for the stream path. VerifierError fires on the
+        # first WS operation (before any chunks are yielded), so it's safe to retry
+        # the whole connection from scratch. After the first successful chunk, any
+        # VerifierError would be a mid-stream event (not a cold-verifier race) and
+        # propagates normally.
+        last_exc: VerifierError | None = None
+        warned = False
+        for attempt in range(_VERIFIER_MAX_RETRIES + 1):
+            try:
+                yield from self._stream_once(prompt, max_duration)
+                return
+            except VerifierError as exc:
+                if exc.type != "verifier.unavailable" or attempt == _VERIFIER_MAX_RETRIES:
+                    raise
+                last_exc = exc
+                delay = _VERIFIER_BACKOFF_SECONDS[attempt]
+                if not warned:
+                    warned = True
+                    warnings.warn(
+                        VerifierTransientRetry(
+                            f"Key verifier temporarily unavailable; retrying in {delay:.0f}s "
+                            f"(attempt {attempt + 1}/{_VERIFIER_MAX_RETRIES}). "
+                            "Subsequent calls hit the warm verifier."
+                        ),
+                        stacklevel=3,
+                    )
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
+    def _stream_once(
         self, prompt: str, max_duration: float
     ) -> Generator[np.ndarray, None, None]:
         self._degradation_warned = False
