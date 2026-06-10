@@ -1,0 +1,238 @@
+# onboarding-full-run.yml
+#
+# Weekly full onboarding probe — a headless agent follows the public docs literally
+# from a clean machine (install → key → fixture inference) on BOTH ubuntu-latest and
+# macos-latest, logging every friction point and uploading a structured report artifact.
+#
+# Triggers: weekly cron + workflow_dispatch ONLY.
+# Per-push is explicitly forbidden — every run spends metered ANTHROPIC_API_KEY money.
+#
+# Spend guards (belt-and-suspenders):
+#   --max-budget-usd 2.00   per matrix leg (Claude CLI hard cap)
+#   timeout-minutes: 45     per job (wall-clock kill for wedged runs)
+#
+# Secrets required (see review.md for setup commands):
+#   ANTHROPIC_API_KEY — METERED; Mattie mints. Missing = loud failure.
+#   NT_API_KEY        — pre-issued key substituted at the "get-a-key" doc step.
+
+name: onboarding-full-run
+
+on:
+  schedule:
+    # Weekly: Mondays at 09:00 UTC.
+    # NOT per-push — cost constraint (metered ANTHROPIC_API_KEY).
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    inputs:
+      site:
+        description: 'Docs site URL override'
+        required: false
+        default: 'https://nt-docs-eight.vercel.app'
+      file_issue:
+        description: 'File GitHub issue on hard stops (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  onboarding-probe:
+    name: "Onboarding probe (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45   # spend guard: kills wedged agent — no unbounded bill
+    strategy:
+      fail-fast: false    # both legs always run; one failure doesn't cancel the other
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    permissions:
+      issues: write       # needed for the issue-filing step (Task 3)
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Vantage recording (golden-tests.md contract: record the runner image) ---
+      - name: Record runner vantage
+        id: vantage
+        run: |
+          # ImageOS and ImageVersion are set by GitHub-hosted runners
+          IMAGE_OS_VAL="${ImageOS:-${{ runner.os }}}"
+          IMAGE_VER_VAL="${ImageVersion:-unknown}"
+          VANTAGE="${{ runner.os }}-${{ runner.arch }} (${IMAGE_OS_VAL} ${IMAGE_VER_VAL})"
+          echo "runner_label=${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_OUTPUT"
+          echo "image_os=${IMAGE_OS_VAL}" >> "$GITHUB_OUTPUT"
+          echo "image_version=${IMAGE_VER_VAL}" >> "$GITHUB_OUTPUT"
+          echo "vantage_id=${VANTAGE}" >> "$GITHUB_OUTPUT"
+          echo "Runner vantage: ${VANTAGE}"
+
+      # --- Loud secret check — missing secret = actionable error, not silent skip ---
+      - name: Check required secrets
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NT_API_KEY: ${{ secrets.NT_API_KEY }}
+        run: |
+          missing=()
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            missing+=("ANTHROPIC_API_KEY — metered; Mattie must mint at https://console.anthropic.com/account/keys then: gh secret set ANTHROPIC_API_KEY --repo ${{ github.repository }}")
+          fi
+          if [ -z "$NT_API_KEY" ]; then
+            missing+=("NT_API_KEY — gh secret set NT_API_KEY --repo ${{ github.repository }}")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required secrets. This workflow cannot run without them:"
+            for s in "${missing[@]}"; do
+              echo "::error::  • $s"
+            done
+            exit 1
+          fi
+          echo "Secrets present."
+
+      # --- Clean-state contract: fake HOME so no dotfiles / cached keys bleed in ---
+      - name: Set up clean home
+        run: |
+          FAKE_HOME="$(mktemp -d)"
+          echo "HOME=${FAKE_HOME}" >> "$GITHUB_ENV"
+          echo "FAKE_HOME=${FAKE_HOME}" >> "$GITHUB_ENV"
+          echo "Clean home: ${FAKE_HOME}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install Claude Code CLI (provides `claude` for headless probe)
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # --- Headless onboarding probe ---
+      # Spend guards: --max-budget-usd 2.00 (hard API cap) + timeout-minutes: 45 (wall-clock)
+      # --bare: no hooks, no CLAUDE.md discovery, uses ANTHROPIC_API_KEY strictly
+      # --permission-mode bypassPermissions: allows Bash without per-command approval (CI only)
+      - name: Run onboarding probe (headless)
+        id: probe
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NT_API_KEY: ${{ secrets.NT_API_KEY }}
+          HOME: ${{ env.FAKE_HOME }}
+          DOCS_SITE: ${{ github.event.inputs.site || 'https://nt-docs-eight.vercel.app' }}
+          RUNNER_LABEL: "${{ steps.vantage.outputs.runner_label }}"
+          IMAGE_OS: "${{ steps.vantage.outputs.image_os }}"
+          IMAGE_VERSION: "${{ steps.vantage.outputs.image_version }}"
+          REPORT_FILE: "${{ github.workspace }}/friction-report-${{ matrix.os }}.md"
+        run: |
+          # Inject runner context into the probe prompt
+          python3 - << 'PYEOF'
+          import os, pathlib
+
+          prompt = pathlib.Path('.github/prompts/onboarding-probe.md').read_text()
+          replacements = {
+              '__RUNNER_LABEL__': os.environ.get('RUNNER_LABEL', 'unknown'),
+              '__IMAGE_OS__':     os.environ.get('IMAGE_OS', 'unknown'),
+              '__IMAGE_VERSION__': os.environ.get('IMAGE_VERSION', 'unknown'),
+              '__DOCS_SITE__':    os.environ.get('DOCS_SITE', 'https://nt-docs-eight.vercel.app'),
+              '__REPORT_FILE__':  os.environ.get('REPORT_FILE', '/tmp/friction-report.md'),
+          }
+          for placeholder, value in replacements.items():
+              prompt = prompt.replace(placeholder, value)
+
+          pathlib.Path('/tmp/onboarding-prompt.txt').write_text(prompt)
+          print("Prompt written to /tmp/onboarding-prompt.txt")
+          PYEOF
+
+          # Run the probe. Spend guards:
+          #   --max-budget-usd 2.00 — hard API dollar cap per leg
+          #   timeout-minutes: 45   — job-level wall-clock cap (set above on the job)
+          claude -p "$(cat /tmp/onboarding-prompt.txt)" \
+            --bare \
+            --model claude-sonnet-4-6 \
+            --max-budget-usd 2.00 \
+            --allowedTools "Bash,WebFetch,Read" \
+            --permission-mode bypassPermissions \
+            --no-session-persistence
+
+          PROBE_EXIT=$?
+          echo "probe_exit_code=${PROBE_EXIT}" >> "$GITHUB_OUTPUT"
+
+          # Confirm the agent wrote its report
+          if [ ! -f "$REPORT_FILE" ] || [ ! -s "$REPORT_FILE" ]; then
+            echo "::error::Probe exited but no friction report was found at $REPORT_FILE"
+            echo "::error::The agent may have been cut off by the budget guard (--max-budget-usd 2.00)"
+            # Create a minimal stub so the artifact step has something to upload
+            cat > "$REPORT_FILE" << STUB_EOF
+# Onboarding Probe — INCOMPLETE RUN
+
+**Platform:** ${{ steps.vantage.outputs.vantage_id }}
+**Exit code:** ${PROBE_EXIT}
+**Cause:** Agent exited before writing the friction report. Likely budget guard
+(--max-budget-usd 2.00) was hit, or the probe encountered a fatal error.
+
+**Action required:** Check the workflow run log for the last Claude output.
+Consider increasing --max-budget-usd or investigating what consumed the budget.
+STUB_EOF
+            exit 1
+          fi
+
+          exit $PROBE_EXIT
+
+      # --- Upload friction report (always — even on failure, for diagnostics) ---
+      - name: Upload friction report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "friction-report-${{ matrix.os }}-run${{ github.run_number }}"
+          path: "friction-report-${{ matrix.os }}.md"
+          if-no-files-found: warn
+
+      # --- File / update GitHub issue on hard stops (Task 3: wired here, proof in review.md) ---
+      # Uses brief-236's dedup pattern: update the existing open issue rather than spamming new ones.
+      # Only fires on job failure AND when file_issue=true (default true for cron runs).
+      - name: File or update issue on hard stop
+        if: failure() && (github.event.inputs.file_issue || 'true') == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_FILE: "${{ github.workspace }}/friction-report-${{ matrix.os }}.md"
+          VANTAGE_ID: "${{ steps.vantage.outputs.vantage_id }}"
+          IMAGE_OS: "${{ steps.vantage.outputs.image_os }}"
+          IMAGE_VERSION: "${{ steps.vantage.outputs.image_version }}"
+        run: |
+          ISSUE_TITLE="[onboarding-probe] full run failing — ${{ matrix.os }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          REPORT_CONTENT="$(cat "$REPORT_FILE" 2>/dev/null || echo 'No friction report generated — probe died before writing output.')"
+
+          # Dedup check: search for existing open issue with exact title (brief-236 pattern)
+          EXISTING_NUMBER=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --search "\"${ISSUE_TITLE}\"" \
+            --json number,title \
+            --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number" | head -1)
+
+          if [ -n "$EXISTING_NUMBER" ]; then
+            # Add a comment to the existing issue
+            gh issue comment "$EXISTING_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "## Run failure: ${RUN_DATE}
+
+**Run:** [${RUN_URL}](${RUN_URL})
+**Runner:** ${VANTAGE_ID}
+
+---
+
+${REPORT_CONTENT}"
+            echo "::notice::Updated existing issue #${EXISTING_NUMBER} with new run failure"
+          else
+            # Create a new issue
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "${ISSUE_TITLE}" \
+              --body "## Automated onboarding probe failure
+
+**Date:** ${RUN_DATE}
+**Run:** [${RUN_URL}](${RUN_URL})
+**Runner:** ${VANTAGE_ID}
+
+---
+
+${REPORT_CONTENT}"
+            echo "::notice::Created new issue: ${ISSUE_TITLE}"
+          fi
