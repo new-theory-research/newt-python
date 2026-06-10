@@ -176,6 +176,7 @@ def cmd_login(args: list[str]) -> int:
                 print(f"  Device:          {device}")
                 print(f"\nThe SDK will read this key automatically. No NT_API_KEY needed.")
                 print(f"To revoke this key, visit the console key management page.")
+                print(f"\nUsing Claude Code? Run `newt skill install` to equip it with the onboarding guide.")
             return 0
 
         # Unknown status — escalate rather than silently retry
