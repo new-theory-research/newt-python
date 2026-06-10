@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from newt._credentials import write_api_key
 
-_DEFAULT_CONSOLE = "https://console.newtheory.ai"
+_DEFAULT_CONSOLE = "https://console-production-91bb.up.railway.app"
 _POLL_INTERVAL_S = 2.0
 _MAX_WAIT_S = 10 * 60  # 10 minutes, matching server TTL
 

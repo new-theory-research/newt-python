@@ -154,7 +154,7 @@ def _render(
     elif error_kind == "bad_key":
         print(_c(_RED, f"Registry:     reachable ({latency_ms}ms) — key rejected"))
         print(f"              {error_detail}")
-        print("              Rotate your key at console.newtheory.ai, or run `newt login` again.")
+        print("              Rotate your key in the console, or run `newt login` again.")
     elif error_kind in ("registry_down", "error"):
         print(_c(_RED, f"Registry:     unreachable ({latency_ms}ms)"))
         print(f"              {error_detail}")
