@@ -61,7 +61,7 @@ def cmd_models(args: list[str]) -> int:
         model_type = model.get("type") or ""
         base = model.get("base") or ""
         tags = [t for t in (model.get("tags") or []) if t]
-        axes = model.get("axes") or []
+        axes = (model.get("contract") or {}).get("action_axes") or []
 
         # UID is the headline — pop-green
         print(_c(_GREEN, uid), end="")
