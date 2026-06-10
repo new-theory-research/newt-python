@@ -157,16 +157,16 @@ jobs:
             echo "::error::The agent may have been cut off by the budget guard (--max-budget-usd 2.00)"
             # Create a minimal stub so the artifact step has something to upload
             cat > "$REPORT_FILE" << STUB_EOF
-# Onboarding Probe — INCOMPLETE RUN
+          # Onboarding Probe — INCOMPLETE RUN
 
-**Platform:** ${{ steps.vantage.outputs.vantage_id }}
-**Exit code:** ${PROBE_EXIT}
-**Cause:** Agent exited before writing the friction report. Likely budget guard
-(--max-budget-usd 2.00) was hit, or the probe encountered a fatal error.
+          **Platform:** ${{ steps.vantage.outputs.vantage_id }}
+          **Exit code:** ${PROBE_EXIT}
+          **Cause:** Agent exited before writing the friction report. Likely budget guard
+          (--max-budget-usd 2.00) was hit, or the probe encountered a fatal error.
 
-**Action required:** Check the workflow run log for the last Claude output.
-Consider increasing --max-budget-usd or investigating what consumed the budget.
-STUB_EOF
+          **Action required:** Check the workflow run log for the last Claude output.
+          Consider increasing --max-budget-usd or investigating what consumed the budget.
+          STUB_EOF
             exit 1
           fi
 
@@ -230,13 +230,13 @@ STUB_EOF
               --repo "${{ github.repository }}" \
               --body "## Hard stop(s) detected: ${RUN_DATE}
 
-**Run:** [${RUN_URL}](${RUN_URL})
-**Runner:** ${VANTAGE_ID}
-**Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
+          **Run:** [${RUN_URL}](${RUN_URL})
+          **Runner:** ${VANTAGE_ID}
+          **Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
 
----
+          ---
 
-${REPORT_CONTENT}"
+          ${REPORT_CONTENT}"
             echo "::notice::Updated existing issue #${EXISTING_NUMBER} with new hard-stop report"
           else
             # Create a new issue
@@ -245,13 +245,13 @@ ${REPORT_CONTENT}"
               --title "${ISSUE_TITLE}" \
               --body "## Automated onboarding probe — hard stops detected
 
-**Date:** ${RUN_DATE}
-**Run:** [${RUN_URL}](${RUN_URL})
-**Runner:** ${VANTAGE_ID}
-**Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
+          **Date:** ${RUN_DATE}
+          **Run:** [${RUN_URL}](${RUN_URL})
+          **Runner:** ${VANTAGE_ID}
+          **Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
 
----
+          ---
 
-${REPORT_CONTENT}"
+          ${REPORT_CONTENT}"
             echo "::notice::Created new issue: ${ISSUE_TITLE}"
           fi
