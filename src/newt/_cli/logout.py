@@ -19,11 +19,7 @@ import sys
 
 from newt._credentials import CREDENTIALS_DIR, CREDENTIALS_PATH
 
-_DEFAULT_CONSOLE = "https://console.newtheory.ai"
-
-
-def _console_url() -> str:
-    return os.environ.get("NT_CONSOLE_URL", _DEFAULT_CONSOLE).rstrip("/")
+from .login import _console_url
 
 
 def cmd_logout(args: list[str]) -> int:
@@ -56,7 +52,7 @@ def cmd_logout(args: list[str]) -> int:
     if credentials_existed:
         print(f"Logged out.")
         print(f"  Removed:  {CREDENTIALS_PATH}")
-        print(f"  The key itself remains valid — revoke it at {_console_url()}/settings/keys")
+        print(f"  The key itself remains valid — revoke it at {_console_url()}/keys")
     else:
         print("Already logged out — no credentials file found.")
 
