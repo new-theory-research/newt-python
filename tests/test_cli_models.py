@@ -13,7 +13,7 @@ import pytest
 
 import newt
 from newt._client.robot import AuthError, RegistryUnavailable
-from newt._cli.models import cmd_models
+from newt._cli.models import cmd_models, _render_models
 
 
 # ---------------------------------------------------------------------------
@@ -42,21 +42,292 @@ def _run(args: list[str], monkeypatch, models_return=None, side_effect=None):
     return exit_code, captured_out.getvalue(), captured_err.getvalue()
 
 
-_SAMPLE_MODELS = [
+# Real 7-model registry payload (structure matches live API)
+_REAL_7_MODELS = [
     {
         "uid": "ft_base_nt0fp3",
-        "type": "fine_tune",
-        "base": "base_nt0fp3",
         "tags": ["nt0-fp3"],
+        "type": "base",
+        "base": None,
         "contract": {
-            "action_axes": [
-                "shoulder_pan", "shoulder_lift", "elbow", "forearm_roll",
-                "wrist_angle", "wrist_rotate", "gripper",
-            ]
+            "action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]
         },
     },
-    {"uid": "base_nt0fp3", "type": "base", "base": None, "tags": []},
+    {
+        "uid": "ft_4hn40z6a",
+        "tags": ["nt0-fp3-pour-coffee-beans", "pour-coffee-beans"],
+        "type": "fine_tune",
+        "base": "ft_base_nt0fp3",
+        "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
+    },
+    {
+        "uid": "ft_6d0cfd51_e63fbb",
+        "tags": ["nt0-fp3-clean-table"],
+        "type": "fine_tune",
+        "base": "ft_base_nt0fp3",
+        "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
+    },
+    {
+        "uid": "ft_6d0cfd51_c9d8ba",
+        "tags": ["nt0-fp3-pour-coffee-beans-wm"],
+        "type": "fine_tune",
+        "base": "ft_base_nt0fp3",
+        "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
+    },
+    {
+        "uid": "ft_base_molmoact2",
+        "tags": ["molmoact2"],
+        "type": "base",
+        "base": None,
+        "contract": None,
+    },
+    {
+        "uid": "ft_molmoact2_yam",
+        "tags": ["molmoact2-yam", "molmoact2-bimanual-yam"],
+        "type": "fine_tune",
+        "base": "ft_base_molmoact2",
+        "contract": {"state_shape": [14]},
+    },
+    {
+        "uid": "ft_base_pi05_aloha",
+        "tags": ["pi05_aloha"],
+        "type": "base",
+        "base": None,
+        "contract": {"state_shape": [14]},
+    },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Grouped layout: A-option design
+# ---------------------------------------------------------------------------
+
+def test_grouped_layout_three_families():
+    """The real 7-model registry renders as three family groups.
+
+    Three distinct base models → three groups, separated by blank lines.
+    A developer scanning the output sees at a glance which fine-tunes belong
+    to which base — something the old flat dump made impossible.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    groups = [g.strip() for g in output.split("\n\n") if g.strip()]
+    assert len(groups) == 3, (
+        f"expected 3 family groups separated by blank lines, got {len(groups)}: {groups!r}"
+    )
+
+
+def test_grouped_layout_base_names_lead():
+    """Base display names lead each family group — nt0-fp3 / molmoact2 / pi05_aloha.
+
+    The human name (primary tag) should appear first on the base line, not the
+    opaque uid. A developer picking a model should find it by name.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    lines = output.splitlines()
+    # Base lines are the non-indented ones
+    base_lines = [l for l in lines if l and not l.startswith("    ")]
+    names = [l.split()[0] for l in base_lines]
+    assert names == ["nt0-fp3", "molmoact2", "pi05_aloha"], (
+        f"base display names must lead each group in order: {names!r}"
+    )
+
+
+def test_grouped_layout_fine_tunes_indented():
+    """Fine-tunes are indented 4 spaces under their base — not at top level.
+
+    Indentation communicates hierarchy without tree glyphs. The developer
+    immediately reads: these tasks run on this base.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    lines = output.splitlines()
+    ft_lines = [l for l in lines if l.startswith("    ")]
+    assert len(ft_lines) == 4, (
+        f"expected 4 indented fine-tune lines, got {len(ft_lines)}: {ft_lines!r}"
+    )
+
+
+def test_axes_appear_once_on_nt0fp3_base_only():
+    """Action axes appear exactly once: on the nt0-fp3 base line.
+
+    Fine-tunes inherit axes — repeating them on every fine-tune line was noise.
+    molmoact2 and pi05_aloha have no action_axes so they get none. This test
+    exists because the old flat renderer printed inherited axes on every row.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    lines = output.splitlines()
+
+    # Count lines that contain "axes"
+    axes_lines = [l for l in lines if "axes" in l]
+    assert len(axes_lines) == 1, (
+        f"axes fragment must appear exactly once, got {len(axes_lines)}: {axes_lines!r}"
+    )
+
+    # That one line must be the nt0-fp3 base line
+    assert "nt0-fp3" in axes_lines[0], (
+        f"axes line must be the nt0-fp3 base, got: {axes_lines[0]!r}"
+    )
+
+    # All axes present on that line
+    for ax in ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]:
+        assert ax in axes_lines[0], f"axis {ax!r} missing from base line: {axes_lines[0]!r}"
+
+
+def test_axes_absent_on_contract_less_bases():
+    """molmoact2 (null contract) and pi05_aloha (no action_axes) get no axes fragment.
+
+    A base with no action_axes contract is not missing data — axes just aren't
+    part of its schema. The renderer must not emit an empty or confusing axes field.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    groups = [g.strip() for g in output.split("\n\n") if g.strip()]
+    molmo_group = next(g for g in groups if "molmoact2" in g.splitlines()[0])
+    pi_group = next(g for g in groups if "pi05_aloha" in g.splitlines()[0])
+
+    assert "axes" not in molmo_group, (
+        f"molmoact2 has no action_axes — must not emit axes fragment: {molmo_group!r}"
+    )
+    assert "axes" not in pi_group, (
+        f"pi05_aloha has no action_axes — must not emit axes fragment: {pi_group!r}"
+    )
+
+
+def test_name_derivation_task_tags():
+    """Fine-tune task names derive correctly from tags, not raw uids.
+
+    pour-coffee-beans — shortest non-prefixed tag wins.
+    clean-table — single base-prefixed tag, strip prefix.
+    pour-coffee-beans-wm — strip prefix, only candidate.
+    bimanual-yam — all tags share molmoact2- prefix; strip + take longest.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    lines = output.splitlines()
+    ft_lines = [l.strip() for l in lines if l.startswith("    ")]
+    task_names = [l.split()[0] for l in ft_lines]
+
+    assert "pour-coffee-beans" in task_names, f"task names: {task_names!r}"
+    assert "clean-table" in task_names, f"task names: {task_names!r}"
+    assert "pour-coffee-beans-wm" in task_names, f"task names: {task_names!r}"
+    assert "bimanual-yam" in task_names, f"task names: {task_names!r}"
+
+
+def test_fine_tune_uids_visible():
+    """Fine-tune uids appear on their lines (secondary, after task name).
+
+    Developers reference models by uid in code. The name is scannable; the uid
+    is the actual handle.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    for uid in ["ft_4hn40z6a", "ft_6d0cfd51_e63fbb", "ft_6d0cfd51_c9d8ba", "ft_molmoact2_yam"]:
+        assert uid in output, f"fine-tune uid {uid!r} must appear in output"
+
+
+def test_uid_alignment_within_family():
+    """Fine-tune uids are column-aligned within a family.
+
+    Same leading whitespace (4 spaces) + task name padded to column width.
+    This makes the uid column visually scannable.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    lines = output.splitlines()
+    # Get the nt0-fp3 family's fine-tune lines
+    nt0_fts = []
+    in_nt0 = False
+    for line in lines:
+        if line and not line.startswith("    "):
+            in_nt0 = "nt0-fp3" in line
+        elif in_nt0 and line.startswith("    "):
+            nt0_fts.append(line)
+
+    # Find the position where uid starts on each line (after padding)
+    uid_positions = []
+    for line in nt0_fts:
+        # uid starts after the padded task name + 2-space separator
+        parts = line.split("  ")
+        # first part is "    taskname"
+        uid_start = len(parts[0]) + 2  # 2 spaces separator
+        uid_positions.append(uid_start)
+
+    assert len(set(uid_positions)) == 1, (
+        f"uid column must be aligned across family fine-tunes, positions: {uid_positions!r}"
+    )
+
+
+def test_no_box_drawing_or_tree_glyphs():
+    """No tree glyphs, box-drawing characters, or decorative unicode in output.
+
+    Indentation only — clean, pipeable, grep-friendly.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    forbidden = ["├", "└", "─", "│", "┌", "┐", "┘", "└", "╭", "╰", "►", "▷", "→"]
+    for char in forbidden:
+        assert char not in output, f"found forbidden glyph {char!r} in output"
+
+
+def test_no_line_exceeds_100_chars():
+    """No output line exceeds 100 characters on the real dataset.
+
+    The old flat dump wrapped badly on small terminals because it repeated long
+    axes lists on every fine-tune row. The new layout must stay under 100 chars.
+    """
+    output = _render_models(_REAL_7_MODELS)
+    for line in output.splitlines():
+        assert len(line) <= 100, f"line exceeds 100 chars ({len(line)}): {line!r}"
+
+
+# ---------------------------------------------------------------------------
+# Orphan fine-tunes
+# ---------------------------------------------------------------------------
+
+def test_orphan_fine_tune_renders_without_crashing():
+    """A fine-tune whose base isn't in the payload renders without crashing.
+
+    An orphan appears at top level, clearly labeled with its base reference.
+    This guards against partial registry payloads or future splits where a
+    base is temporarily absent.
+    """
+    models = [
+        {
+            "uid": "ft_orphan_abc123",
+            "tags": ["orphan-task"],
+            "type": "fine_tune",
+            "base": "ft_base_missing",
+            "contract": None,
+        }
+    ]
+    # Must not raise
+    output = _render_models(models)
+    assert "ft_orphan_abc123" in output, "orphan uid must appear"
+    assert "ft_base_missing" in output, "orphan base reference must appear"
+
+
+def test_orphan_renders_at_top_level_before_families():
+    """Orphan fine-tunes render before family groups, at top level (no indent)."""
+    models = [
+        {
+            "uid": "ft_orphan_abc123",
+            "tags": ["orphan-task"],
+            "type": "fine_tune",
+            "base": "ft_base_missing",
+            "contract": None,
+        },
+        {
+            "uid": "ft_base_nt0fp3",
+            "tags": ["nt0-fp3"],
+            "type": "base",
+            "base": None,
+            "contract": {"action_axes": ["x", "y", "z"]},
+        },
+    ]
+    output = _render_models(models)
+    lines = output.splitlines()
+    non_empty = [l for l in lines if l.strip()]
+    # Orphan must come before any family
+    orphan_idx = next(i for i, l in enumerate(non_empty) if "ft_orphan_abc123" in l)
+    base_idx = next(i for i, l in enumerate(non_empty) if "nt0-fp3" in l)
+    assert orphan_idx < base_idx, "orphan must appear before family groups"
+    # Orphan line is not indented
+    orphan_line = non_empty[orphan_idx]
+    assert not orphan_line.startswith("    "), f"orphan must not be indented: {orphan_line!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -67,55 +338,48 @@ _SAMPLE_MODELS = [
 def test_models_renders_catalog(monkeypatch):
     """A developer who just logged in types `newt models` and sees the catalog.
 
-    The command must exit 0 and print each model's UID, type, and base on its
-    own line. The developer can scan the list to find the model they want.
+    The command must exit 0 and print each model's UID on its line.
+    The developer can scan the list to find the model they want.
     """
-    exit_code, out, err = _run([], monkeypatch, models_return=_SAMPLE_MODELS)
+    exit_code, out, err = _run([], monkeypatch, models_return=_REAL_7_MODELS)
 
     assert exit_code == 0, f"expected exit 0, got {exit_code}; stderr={err!r}"
     assert "ft_base_nt0fp3" in out
-    assert "base_nt0fp3" in out
+    assert "ft_base_molmoact2" in out
     assert err == ""
 
 
 def test_models_renders_axes_from_contract(monkeypatch):
-    """A developer scanning the catalog sees each model's labeled action axes.
+    """A developer scanning the catalog sees action axes on the base model line.
 
-    The registry payload carries axes at contract.action_axes — the human
-    render must surface them (the axes are part of the reward moment: you see
-    what the model actually drives). A model without a contract renders cleanly
-    with no axes fragment. This test exists because the renderer once read a
-    nonexistent top-level "axes" key and the column silently never printed.
+    Axes appear exactly once (on the base line), not repeated on fine-tunes.
+    Bases without action_axes (molmoact2, pi05_aloha) have no axes fragment.
+    This test exists because the old renderer once read a nonexistent top-level
+    'axes' key and the column silently never printed.
     """
-    exit_code, out, _ = _run([], monkeypatch, models_return=_SAMPLE_MODELS)
+    exit_code, out, _ = _run([], monkeypatch, models_return=_REAL_7_MODELS)
 
     assert exit_code == 0
-    lines = [l for l in out.splitlines() if l.strip()]
-    ft_line = next(l for l in lines if "ft_base_nt0fp3" in l)
-    base_line = next(l for l in lines if l.strip().startswith("base_nt0fp3"))
+    lines = out.splitlines()
+    nt0_base_line = next(l for l in lines if "nt0-fp3" in l and not l.startswith("    "))
 
-    assert "axes [" in ft_line, f"axes must render for a model with a contract: {ft_line!r}"
-    assert "shoulder_pan" in ft_line and "gripper" in ft_line, (
-        f"axis labels from contract.action_axes must appear: {ft_line!r}"
-    )
-    assert "axes [" not in base_line, (
-        f"model without a contract must not render an axes fragment: {base_line!r}"
-    )
+    assert "axes" in nt0_base_line, f"axes must render on the nt0-fp3 base line: {nt0_base_line!r}"
+    assert "gripper" in nt0_base_line, f"axis labels must appear: {nt0_base_line!r}"
 
+    # Fine-tune lines must NOT repeat axes
+    ft_lines = [l for l in lines if l.startswith("    ")]
+    for line in ft_lines:
+        assert "axes" not in line, f"fine-tune must not repeat axes: {line!r}"
 
-def test_models_one_line_per_model(monkeypatch):
-    """Each model appears on its own line — so a developer can scan or grep."""
-    exit_code, out, _ = _run([], monkeypatch, models_return=_SAMPLE_MODELS)
-
-    assert exit_code == 0
-    lines = [l for l in out.splitlines() if l.strip()]
-    assert len(lines) == len(_SAMPLE_MODELS), (
-        f"expected {len(_SAMPLE_MODELS)} non-empty lines, got {len(lines)}: {lines!r}"
-    )
+    # molmoact2 and pi05_aloha base lines have no axes
+    molmo_line = next(l for l in lines if "molmoact2" in l and not l.startswith("    "))
+    pi_line = next(l for l in lines if "pi05_aloha" in l and not l.startswith("    "))
+    assert "axes" not in molmo_line
+    assert "axes" not in pi_line
 
 
 # ---------------------------------------------------------------------------
-# Golden: `--json` emits a valid JSON array
+# Golden: `--json` emits a valid JSON array — byte-identical to raw API response
 # ---------------------------------------------------------------------------
 
 def test_models_json_flag_emits_valid_array(monkeypatch):
@@ -123,15 +387,29 @@ def test_models_json_flag_emits_valid_array(monkeypatch):
 
     Every model dict must be present. The output must parse as a list.
     """
-    exit_code, out, err = _run(["--json"], monkeypatch, models_return=_SAMPLE_MODELS)
+    exit_code, out, err = _run(["--json"], monkeypatch, models_return=_REAL_7_MODELS)
 
     assert exit_code == 0, f"expected exit 0; stderr={err!r}"
     parsed = json.loads(out)
     assert isinstance(parsed, list), f"expected JSON array, got {type(parsed)}"
-    assert len(parsed) == len(_SAMPLE_MODELS)
+    assert len(parsed) == len(_REAL_7_MODELS)
     uids = [m["uid"] for m in parsed]
     assert "ft_base_nt0fp3" in uids
-    assert "base_nt0fp3" in uids
+    assert "ft_base_molmoact2" in uids
+
+
+def test_models_json_unchanged_by_renderer(monkeypatch):
+    """--json output is byte-identical to json.dumps(models).
+
+    The human renderer must not touch the JSON path. Scripts that pipe
+    `newt models --json` to jq cannot tolerate any mutation.
+    """
+    exit_code, out, _ = _run(["--json"], monkeypatch, models_return=_REAL_7_MODELS)
+
+    assert exit_code == 0
+    # Must parse to the original list with no modification
+    parsed = json.loads(out)
+    assert parsed == _REAL_7_MODELS, "json output must be the raw models list, unmodified"
 
 
 # ---------------------------------------------------------------------------
