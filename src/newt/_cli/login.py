@@ -1,0 +1,142 @@
+"""newt login — browser-pairing flow (Stripe pattern).
+
+1. POST /api/cli/auth/start  → browser_url + user_code + poll_url
+2. Print URL + code; attempt webbrowser.open (silent on SSH/headless)
+3. Poll /api/cli/auth/poll every 2s until confirmed, expired, or 10-min TTL
+4. Write key to ~/.nt/credentials (chmod 600), print loud completion message
+"""
+from __future__ import annotations
+
+import json
+import os
+import platform
+import socket
+import sys
+import time
+import webbrowser
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from newt._credentials import write_api_key
+
+_DEFAULT_CONSOLE = "https://console.newtheory.ai"
+_POLL_INTERVAL_S = 2.0
+_MAX_WAIT_S = 10 * 60  # 10 minutes, matching server TTL
+
+
+def _console_url() -> str:
+    return os.environ.get("NT_CONSOLE_URL", _DEFAULT_CONSOLE).rstrip("/")
+
+
+def _device_name() -> str:
+    try:
+        return socket.gethostname()
+    except Exception:
+        return platform.node() or "unknown"
+
+
+def cmd_login(args: list[str]) -> int:
+    console = _console_url()
+    device = _device_name()
+
+    print("Starting authentication…")
+
+    # Step 1: create a pairing record on the console
+    body = json.dumps({"device_name": device}).encode()
+    req = Request(
+        f"{console}/api/cli/auth/start",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except HTTPError as exc:
+        print(f"\nError from console ({exc.code}): {exc.reason}", file=sys.stderr)
+        return 1
+    except URLError as exc:
+        print(f"\nCannot reach {console}: {exc.reason}", file=sys.stderr)
+        print("Set NT_CONSOLE_URL if you're running a local console.", file=sys.stderr)
+        return 1
+
+    browser_url: str = data["browser_url"]
+    user_code: str = data["user_code"]
+    poll_url: str = data["poll_url"]
+
+    print(f"\n  Open this URL to authenticate:\n\n    {browser_url}\n")
+    print(f"  Confirm this code matches what you see in your browser:\n")
+    print(f"      {user_code}\n")
+
+    # Step 2: attempt browser open (silent failure for SSH/headless rigs)
+    try:
+        opened = webbrowser.open(browser_url)
+    except Exception:
+        opened = False
+
+    if opened:
+        print("  Browser opened. If nothing appeared, paste the URL above manually.")
+    else:
+        print("  (No browser detected — open the URL above on any device.)")
+
+    print("\nWaiting for you to confirm in the browser", end="", flush=True)
+
+    # Step 3: poll until confirmed, expired, or deadline
+    deadline = time.monotonic() + _MAX_WAIT_S
+    while time.monotonic() < deadline:
+        time.sleep(_POLL_INTERVAL_S)
+        print(".", end="", flush=True)
+
+        try:
+            with urlopen(Request(poll_url), timeout=15) as resp:
+                poll = json.loads(resp.read())
+        except HTTPError as exc:
+            if exc.code == 410:
+                print(
+                    "\n\nPairing expired — the 10-minute window passed.\n"
+                    "Run `newt login` again.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"\n\nUnexpected error polling ({exc.code}): {exc.reason}", file=sys.stderr)
+            return 1
+        except URLError as exc:
+            print(f"\n\nNetwork error while polling: {exc.reason}", file=sys.stderr)
+            return 1
+
+        status = poll.get("status")
+        if status == "pending":
+            continue
+
+        if status == "confirmed":
+            key = poll.get("key")
+            if not key:
+                # Key was already burned (duplicate poll race) — shouldn't happen
+                # in normal flow, but treat as success since the login already ran.
+                print(
+                    "\n\nLogin was confirmed but the key was already delivered. "
+                    "Check ~/.nt/credentials.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            write_api_key(key)
+            prefix = key[:12] if len(key) > 12 else key
+            print(f"\n\nLogged in successfully.")
+            print(f"  Key written to:  ~/.nt/credentials  (mode 0600)")
+            print(f"  Key prefix:      {prefix}…")
+            print(f"  Device:          {device}")
+            print(f"\nThe SDK will read this key automatically. No NT_API_KEY needed.")
+            print(f"To revoke this key, visit the console key management page.")
+            return 0
+
+        # Unknown status — escalate rather than silently retry
+        print(f"\n\nUnexpected poll response: {poll}", file=sys.stderr)
+        return 1
+
+    print(
+        "\n\nTimed out after 10 minutes waiting for browser confirmation.\n"
+        "Run `newt login` to start a new pairing.",
+        file=sys.stderr,
+    )
+    return 1
