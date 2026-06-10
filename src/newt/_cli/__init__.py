@@ -31,6 +31,10 @@ def main() -> None:
         from newt._cli.status import cmd_status
         sys.exit(cmd_status(args[1:]))
 
+    if cmd == "skill":
+        from newt._cli.skill import cmd_skill
+        sys.exit(cmd_skill(args[1:]))
+
     print(f"newt: unknown command '{cmd}'", file=sys.stderr)
     print("Run 'newt --help' for usage.", file=sys.stderr)
     sys.exit(1)
@@ -44,6 +48,7 @@ def _usage() -> None:
     print("  logout   Remove local credentials (key remains valid until revoked on the console)")
     print("  models   List every model your key can drive")
     print("  status   Show your current key, identity, and registry connectivity")
+    print("  skill    Manage built-in skills (try: newt skill install)")
     print("")
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status)")
