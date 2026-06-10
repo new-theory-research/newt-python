@@ -1,6 +1,6 @@
 """Offline unit tests for `newt login` CLI command.
 
-Tests cover the three acceptance criteria WITHOUT touching the network or
+Tests cover the TTL acceptance criteria WITHOUT touching the network or
 waiting 10 minutes:
 
   AC1 — bounded poll: a pairing never confirmed terminates at the TTL bound,
@@ -18,14 +18,19 @@ TTL source (AC4): the server currently does NOT return expires_in / expires_at
 (documented in the module docstring).  The 10-minute fallback is always active
 in production.  The deadline derivation is tested here by injecting a short
 deadline via monkeypatching time.monotonic.
+
+--print tests cover the developer-visible contract WITHOUT touching the
+network.  Each test encodes WHY the behavior matters, not just WHAT it does.
+The mock structure replaces `urlopen` so both the /start POST and the
+/poll GET are intercepted.  A minimal fake response object matches the
+interface urlopen returns (read(), __enter__, __exit__).
 """
 from __future__ import annotations
 
 import io
 import json
 import sys
-from typing import Iterator
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -73,6 +78,62 @@ class _FakeHTTPResp:
 
     def __exit__(self, *_) -> None:
         pass
+
+
+_START_RESPONSE = {
+    "browser_url": "https://console.newtheory.ai/pair?code=WXYZ",
+    "user_code": "WXYZ",
+    "poll_url": "https://console.newtheory.ai/api/cli/auth/poll/abc123",
+}
+
+_CONFIRMED_RESPONSE = {
+    "status": "confirmed",
+    "key": _FAKE_KEY,
+}
+
+_PENDING_RESPONSE = {"status": "pending"}
+
+
+def _make_response(payload: dict) -> MagicMock:
+    """Return a mock that behaves like urlopen()'s context-manager response."""
+    m = MagicMock()
+    m.read.return_value = json.dumps(payload).encode()
+    m.__enter__ = lambda s: s
+    m.__exit__ = MagicMock(return_value=False)
+    return m
+
+
+def _run(args: list[str], monkeypatch, urlopen_side_effect=None) -> tuple[int, str, str]:
+    """
+    Run cmd_login with:
+    - webbrowser.open patched to no-op (never open a real browser)
+    - time.sleep patched to no-op (don't actually wait)
+    - urlopen replaced by urlopen_side_effect (a list of return values or exceptions)
+    - stdout/stderr captured
+    """
+    out = io.StringIO()
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+    call_count = [0]
+
+    def fake_urlopen(req, timeout=None):
+        idx = call_count[0]
+        call_count[0] += 1
+        if urlopen_side_effect is None:
+            raise RuntimeError("urlopen_side_effect not set")
+        val = urlopen_side_effect[idx]
+        if isinstance(val, BaseException):
+            raise val
+        return val
+
+    monkeypatch.setattr("newt._cli.login.urlopen", fake_urlopen)
+    monkeypatch.setattr("newt._cli.login.webbrowser.open", lambda url: False)
+    monkeypatch.setattr("newt._cli.login.time.sleep", lambda s: None)
+
+    exit_code = cmd_login(args)
+    return exit_code, out.getvalue(), err.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -323,4 +384,265 @@ def test_happy_path_confirm_on_second_poll_writes_key(monkeypatch, tmp_path):
 
     assert poll_calls == 2, (
         f"expected exactly 2 poll calls (pending then confirmed), got {poll_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# --print AC1: --print routes instructions to stderr; bare key goes to stdout only
+# ---------------------------------------------------------------------------
+
+def test_print_flag_key_on_stdout_only(monkeypatch, tmp_path):
+    """With --print, stdout is EXACTLY the key (+ trailing newline) — nothing else.
+
+    Composability is the contract: KEY=$(newt login --print) must capture only the
+    key string.  The URL, user-code, status lines belong on stderr so the human/agent
+    watching the terminal still sees them.
+    """
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0, f"expected exit 0; stderr={err!r}"
+    assert out.strip() == _FAKE_KEY, (
+        f"stdout must be exactly the key; got: {out!r}"
+    )
+    # Instructions must have gone to stderr, not stdout
+    assert _START_RESPONSE["browser_url"] in err, (
+        f"browser URL must appear on stderr: {err!r}"
+    )
+    assert _START_RESPONSE["user_code"] in err, (
+        f"user code must appear on stderr: {err!r}"
+    )
+    # URL and code must NOT appear on stdout
+    assert _START_RESPONSE["browser_url"] not in out, (
+        f"browser URL must NOT appear on stdout: {out!r}"
+    )
+    assert _START_RESPONSE["user_code"] not in out, (
+        f"user code must NOT appear on stdout: {out!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# --print AC2a: --print does not call write_api_key (credentials file never touched)
+# ---------------------------------------------------------------------------
+
+def test_print_flag_does_not_write_credentials(monkeypatch):
+    """With --print, write_api_key is never called.
+
+    The whole point of --print is scripting: the caller manages the key.
+    Writing to disk would silently contradict the contract.
+    """
+    write_calls: list[str] = []
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: write_calls.append(key))
+
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0
+    assert write_calls == [], (
+        f"write_api_key must NOT be called with --print; called with: {write_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# --print AC2b: --print does not modify an EXISTING credentials file
+# ---------------------------------------------------------------------------
+
+def test_print_flag_does_not_modify_existing_credentials(monkeypatch, tmp_path):
+    """With --print, an existing credentials file is left byte-identical.
+
+    An agent or script may share a machine with a human who already logged in.
+    --print must not overwrite or corrupt their credentials.
+    We test this by verifying write_api_key is never called — since _credentials.py
+    paths are module-level constants computed at import time, write_api_key is the
+    only path that mutates the file.
+    """
+    write_calls: list[str] = []
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: write_calls.append(key))
+
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0
+    assert write_calls == [], (
+        f"write_api_key must NOT be called with --print; called with: {write_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# --print AC3: without --print, behavior is unchanged
+# ---------------------------------------------------------------------------
+
+def test_normal_login_writes_credentials(monkeypatch):
+    """Without --print, a successful pairing calls write_api_key with the key.
+
+    This is the happy path every developer hits on first setup.
+    We verify write_api_key is called (not the file itself) since CREDENTIALS_PATH
+    is a module-level constant resolved at import time.
+    """
+    write_calls: list[str] = []
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: write_calls.append(key))
+
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    exit_code, out, err = _run([], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0, f"expected exit 0; stderr={err!r}"
+    assert write_calls == [_FAKE_KEY], (
+        f"write_api_key must be called with the key; calls: {write_calls}"
+    )
+
+
+def test_normal_login_key_prefix_in_stdout(monkeypatch, tmp_path):
+    """Without --print, the success message with key prefix appears on stdout.
+
+    The developer must see confirmation — the key prefix lets them cross-check
+    without exposing the full secret.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    exit_code, out, err = _run([], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0
+    # Key prefix (first 12 chars) must appear in stdout
+    assert _FAKE_KEY[:12] in out, (
+        f"key prefix must appear in stdout success message: {out!r}"
+    )
+
+
+def test_normal_login_ttl_expiry(monkeypatch, tmp_path):
+    """Without --print, a 410 during polling exits non-zero with the expiry message.
+
+    The 10-minute TTL is a server-enforced security boundary.  The developer must
+    know to re-run `newt login` rather than keep waiting.
+    """
+    from urllib.error import HTTPError
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    gone = HTTPError(
+        url="https://console.newtheory.ai/api/cli/auth/poll/abc123",
+        code=410,
+        msg="Gone",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=None,
+    )
+    responses = [
+        _make_response(_START_RESPONSE),
+        gone,
+    ]
+    exit_code, out, err = _run([], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code != 0, "expired pairing must exit non-zero"
+    assert "expired" in err.lower() or "10-minute" in err.lower(), (
+        f"expiry message must appear on stderr: {err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# --print AC4: --print + TTL expiry → non-zero exit, empty stdout
+# ---------------------------------------------------------------------------
+
+def test_print_flag_ttl_expiry_empty_stdout(monkeypatch, tmp_path):
+    """With --print, a 410 expiry exits non-zero and stdout is empty.
+
+    Composability contract: KEY=$(newt login --print) must never capture
+    anything key-like in a failure mode.  An empty stdout tells the caller
+    unambiguously that no key was obtained.
+    """
+    from urllib.error import HTTPError
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    gone = HTTPError(
+        url="https://console.newtheory.ai/api/cli/auth/poll/abc123",
+        code=410,
+        msg="Gone",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=None,
+    )
+    responses = [
+        _make_response(_START_RESPONSE),
+        gone,
+    ]
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code != 0, "expired pairing must exit non-zero with --print"
+    assert out == "", (
+        f"stdout must be empty on failure with --print; got: {out!r}"
+    )
+    assert "expired" in err.lower() or "10-minute" in err.lower(), (
+        f"expiry message must appear on stderr: {err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# --print AC4 extension: --print + pending → confirmed after one pending poll
+# ---------------------------------------------------------------------------
+
+def test_print_flag_pending_then_confirmed(monkeypatch, tmp_path):
+    """With --print, a pending poll followed by confirm still delivers the key on stdout.
+
+    The poll loop must keep going through pending responses and only exit at confirmed.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_PENDING_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0
+    assert out.strip() == _FAKE_KEY
+
+
+# ---------------------------------------------------------------------------
+# --print AC5: "key not saved" stderr note appears with --print on success
+# ---------------------------------------------------------------------------
+
+def test_print_flag_key_not_saved_note_on_stderr(monkeypatch, tmp_path):
+    """With --print, the success path prints a 'key not saved' note to stderr.
+
+    Without the note, an agent watching stderr would see no signal that persistence
+    was intentionally skipped — they'd be left wondering if something went wrong.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0
+    assert "not saved" in err.lower() or "key not saved" in err.lower(), (
+        f"must emit 'key not saved' note on stderr: {err!r}"
     )
