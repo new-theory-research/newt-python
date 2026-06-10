@@ -717,6 +717,31 @@ class Robot:
             self._registry = _fetch_registry(bootstrap_url, api_key)
             self._url = _resolve_model_endpoint(self._registry, model, bootstrap_url)
 
+    def __repr__(self) -> str:
+        try:
+            target = self._model if self._model is not None else _DEFAULT_MODEL_UID
+            # Resolve display name: prefer first tag, fall back to UID/target.
+            display = target
+            for entry in self._registry:
+                uid = entry.get("uid") or ""
+                tags = entry.get("tags") or []
+                if target == uid or target in tags:
+                    display = tags[0] if tags else uid or target
+                    contract = entry.get("contract") or {}
+                    shape = contract.get("action_shape")
+                    axes = contract.get("action_axes")
+                    if shape and len(shape) == 2 and axes:
+                        return (
+                            f"{display} · contract received · "
+                            f"({shape[0]},{shape[1]}) · {len(axes)} labeled axes"
+                        )
+                    break
+            return f"{display} · contract pending"
+        except Exception:
+            return "<Robot>"
+
+    __str__ = __repr__
+
     # -----------------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------------
