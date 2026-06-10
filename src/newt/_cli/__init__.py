@@ -47,6 +47,8 @@ def _usage() -> None:
     print("")
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status)")
+    print("  --print  (login only) Print the key to stdout; do not write credentials.")
+    print("           Compose with: KEY=$(newt login --print)")
     print("")
     print("Environment:")
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials)")

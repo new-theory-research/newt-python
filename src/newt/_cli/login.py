@@ -11,6 +11,10 @@ server-side TTL constant of 10 minutes. As of the initial implementation the
 server does NOT return an expiry field, so the 10-minute fallback is always
 used in practice. When the server starts returning one, the client will use it
 automatically.
+
+--print flag: runs the identical pairing flow but routes all instructional output
+to stderr and writes the bare key to stdout; ~/.nt/credentials is never touched.
+Compose with: KEY=$(newt login --print)
 """
 from __future__ import annotations
 
@@ -52,10 +56,16 @@ def _device_name() -> str:
 
 
 def cmd_login(args: list[str]) -> int:
+    print_only = "--print" in args
+
+    # All instructional output goes to stderr when --print is set so that
+    # stdout carries nothing but the bare key (composable with $(...)).
+    out = sys.stderr if print_only else sys.stdout
+
     console = _console_url()
     device = _device_name()
 
-    print("Starting authentication…")
+    print("Starting authentication…", file=out)
 
     # Step 1: create a pairing record on the console
     body = json.dumps({"device_name": device}).encode()
@@ -93,9 +103,9 @@ def cmd_login(args: list[str]) -> int:
     else:
         deadline = now + _MAX_WAIT_S
 
-    print(f"\n  Open this URL to authenticate:\n\n    {browser_url}\n")
-    print(f"  Confirm this code matches what you see in your browser:\n")
-    print(f"      {user_code}\n")
+    print(f"\n  Open this URL to authenticate:\n\n    {browser_url}\n", file=out)
+    print(f"  Confirm this code matches what you see in your browser:\n", file=out)
+    print(f"      {user_code}\n", file=out)
 
     # Step 2: attempt browser open (silent failure for SSH/headless rigs)
     try:
@@ -104,16 +114,16 @@ def cmd_login(args: list[str]) -> int:
         opened = False
 
     if opened:
-        print("  Browser opened. If nothing appeared, paste the URL above manually.")
+        print("  Browser opened. If nothing appeared, paste the URL above manually.", file=out)
     else:
-        print("  (No browser detected — open the URL above on any device.)")
+        print("  (No browser detected — open the URL above on any device.)", file=out)
 
-    print("\nWaiting for you to confirm in the browser", end="", flush=True)
+    print("\nWaiting for you to confirm in the browser", end="", flush=True, file=out)
 
     # Step 3: poll until confirmed, expired, or deadline
     while time.monotonic() < deadline:
         time.sleep(_POLL_INTERVAL_S)
-        print(".", end="", flush=True)
+        print(".", end="", flush=True, file=out)
 
         try:
             with urlopen(Request(poll_url), timeout=15) as resp:
@@ -150,14 +160,22 @@ def cmd_login(args: list[str]) -> int:
                 )
                 return 1
 
-            write_api_key(key)
-            prefix = key[:12] if len(key) > 12 else key
-            print(f"\n\nLogged in successfully.")
-            print(f"  Key written to:  ~/.nt/credentials  (mode 0600)")
-            print(f"  Key prefix:      {prefix}…")
-            print(f"  Device:          {device}")
-            print(f"\nThe SDK will read this key automatically. No NT_API_KEY needed.")
-            print(f"To revoke this key, visit the console key management page.")
+            if print_only:
+                # Composability contract: bare key on stdout, nothing else.
+                print(key)
+                print(
+                    "\n\nKey not saved — export NT_API_KEY or store it yourself.",
+                    file=sys.stderr,
+                )
+            else:
+                write_api_key(key)
+                prefix = key[:12] if len(key) > 12 else key
+                print(f"\n\nLogged in successfully.")
+                print(f"  Key written to:  ~/.nt/credentials  (mode 0600)")
+                print(f"  Key prefix:      {prefix}…")
+                print(f"  Device:          {device}")
+                print(f"\nThe SDK will read this key automatically. No NT_API_KEY needed.")
+                print(f"To revoke this key, visit the console key management page.")
             return 0
 
         # Unknown status — escalate rather than silently retry
