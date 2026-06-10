@@ -19,6 +19,10 @@ def main() -> None:
         from newt._cli.login import cmd_login
         sys.exit(cmd_login(args[1:]))
 
+    if cmd == "logout":
+        from newt._cli.logout import cmd_logout
+        sys.exit(cmd_logout(args[1:]))
+
     if cmd == "models":
         from newt._cli.models import cmd_models
         sys.exit(cmd_models(args[1:]))
@@ -37,11 +41,12 @@ def _usage() -> None:
     print("")
     print("Commands:")
     print("  login    Authenticate and store credentials in ~/.nt/credentials")
+    print("  logout   Remove local credentials (key remains valid until revoked on the console)")
     print("  models   List every model your key can drive")
     print("  status   Show your current key, identity, and registry connectivity")
     print("")
     print("Options:")
-    print("  --json   Emit machine-readable JSON (supported by models, status)")
+    print("  --json   Emit machine-readable JSON (supported by logout, models, status)")
     print("")
     print("Environment:")
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials)")
