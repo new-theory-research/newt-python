@@ -181,11 +181,28 @@ STUB_EOF
           path: "friction-report-${{ matrix.os }}.md"
           if-no-files-found: warn
 
-      # --- File / update GitHub issue on hard stops (Task 3: wired here, proof in review.md) ---
-      # Uses brief-236's dedup pattern: update the existing open issue rather than spamming new ones.
-      # Only fires on job failure AND when file_issue=true (default true for cron runs).
+      # --- Parse hard stop count from friction report ---
+      # Issues fire on hard stops ONLY (not on spend-guard hits or runner infra errors).
+      # Extracts the count from the report so the filing step can check it.
+      - name: Parse hard stop count from report
+        id: parse_report
+        if: always()
+        env:
+          REPORT_FILE: "${{ github.workspace }}/friction-report-${{ matrix.os }}.md"
+        run: |
+          if [ -f "$REPORT_FILE" ] && [ -s "$REPORT_FILE" ]; then
+            COUNT=$(grep -oE 'Hard stops this run: [0-9]+' "$REPORT_FILE" | grep -oE '[0-9]+$' || echo "0")
+          else
+            COUNT="0"
+          fi
+          echo "hard_stop_count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Parsed hard stop count: ${COUNT}"
+
+      # --- File / update GitHub issue on hard stops ONLY (brief-236 dedup pattern) ---
+      # Fires when hardStopCount > 0 — NOT on spend-guard hits, infra failures, or papercuts.
+      # The friction-report artifact carries everything; issues are the escalation path for hard stops.
       - name: File or update issue on hard stop
-        if: failure() && (github.event.inputs.file_issue || 'true') == 'true'
+        if: always() && steps.parse_report.outputs.hard_stop_count != '0' && (github.event.inputs.file_issue || 'true') == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_FILE: "${{ github.workspace }}/friction-report-${{ matrix.os }}.md"
@@ -193,7 +210,7 @@ STUB_EOF
           IMAGE_OS: "${{ steps.vantage.outputs.image_os }}"
           IMAGE_VERSION: "${{ steps.vantage.outputs.image_version }}"
         run: |
-          ISSUE_TITLE="[onboarding-probe] full run failing — ${{ matrix.os }}"
+          ISSUE_TITLE="[onboarding-probe] hard stops detected — ${{ matrix.os }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           RUN_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -211,25 +228,27 @@ STUB_EOF
             # Add a comment to the existing issue
             gh issue comment "$EXISTING_NUMBER" \
               --repo "${{ github.repository }}" \
-              --body "## Run failure: ${RUN_DATE}
+              --body "## Hard stop(s) detected: ${RUN_DATE}
 
 **Run:** [${RUN_URL}](${RUN_URL})
 **Runner:** ${VANTAGE_ID}
+**Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
 
 ---
 
 ${REPORT_CONTENT}"
-            echo "::notice::Updated existing issue #${EXISTING_NUMBER} with new run failure"
+            echo "::notice::Updated existing issue #${EXISTING_NUMBER} with new hard-stop report"
           else
             # Create a new issue
             gh issue create \
               --repo "${{ github.repository }}" \
               --title "${ISSUE_TITLE}" \
-              --body "## Automated onboarding probe failure
+              --body "## Automated onboarding probe — hard stops detected
 
 **Date:** ${RUN_DATE}
 **Run:** [${RUN_URL}](${RUN_URL})
 **Runner:** ${VANTAGE_ID}
+**Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
 
 ---
 
