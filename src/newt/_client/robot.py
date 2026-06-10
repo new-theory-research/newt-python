@@ -965,18 +965,18 @@ class Robot:
 # ---------------------------------------------------------------------------
 
 def list_models(api_key: str, base_url: str | None = None) -> list[dict]:
-    """Fetch the list of available models from the NT inference server.
+    """Fetch the list of available models from the always-on NT registry.
 
     Args:
         api_key:  NT API key (nt_xxx).
         base_url: Override HTTP base URL (e.g. http://localhost:8000). Defaults to
-                  deriving from NT_INFERENCE_URL env var or the default nt0-fp3 server.
+                  the NT registry (Railway); overridden by NT_BOOTSTRAP_URL env var.
 
     Returns:
         List of model dicts with uid, tags, type, and base fields.
 
     Raises:
-        AuthError: API key rejected by the server.
+        AuthError: API key rejected by the registry.
     """
     import json
     from urllib.error import HTTPError
