@@ -181,28 +181,63 @@ jobs:
           path: "friction-report-${{ matrix.os }}.md"
           if-no-files-found: warn
 
-      # --- Parse hard stop count from friction report ---
-      # Issues fire on hard stops ONLY (not on spend-guard hits or runner infra errors).
-      # Extracts the count from the report so the filing step can check it.
+      # --- Parse hard stops + reached_success from friction report ---
+      # Primary: the machine-readable footer block the prompt requires:
+      #   <!-- probe-machine-summary
+      #   hard_stops: N
+      #   reached_success: true|false
+      #   -->
+      # Fallback (footer-less reports, e.g. run 27305021924): count friction-table rows
+      # whose "Hard stop" column (second-to-last cell) says Yes (handles "**Yes**",
+      # "Yes — reason", case-insensitive), and grep for reachedSuccess/reached_success: false.
+      # Issues fire on hard stops or a failed run — NOT on spend-guard hits or runner infra
+      # errors. The job stays green on friction (friction is data); the loud path is the
+      # filed issue + the ::warning:: annotation below.
       - name: Parse hard stop count from report
         id: parse_report
         if: always()
         env:
           REPORT_FILE: "${{ github.workspace }}/friction-report-${{ matrix.os }}.md"
         run: |
+          HARD_STOPS=""
+          REACHED=""
           if [ -f "$REPORT_FILE" ] && [ -s "$REPORT_FILE" ]; then
-            COUNT=$(grep -oE 'Hard stops this run: [0-9]+' "$REPORT_FILE" | grep -oE '[0-9]+$' || echo "0")
+            # Primary: machine-readable footer
+            FOOTER=$(sed -n '/<!-- probe-machine-summary/,/-->/p' "$REPORT_FILE")
+            if [ -n "$FOOTER" ]; then
+              HARD_STOPS=$(printf '%s\n' "$FOOTER" | grep -iE '^[[:space:]]*hard_stops:' | grep -oE '[0-9]+' | head -1 || true)
+              REACHED=$(printf '%s\n' "$FOOTER" | grep -ioE 'reached_success:[[:space:]]*(true|false)' | grep -ioE '(true|false)$' | head -1 | tr '[:upper:]' '[:lower:]' || true)
+            fi
+            # Fallback: footer absent or incomplete — derive from the report body
+            if [ -z "$HARD_STOPS" ]; then
+              HARD_STOPS=$(grep -icE '\|[[:space:]]*(\*\*)?yes[^|]*\|[^|]*\|[[:space:]]*$' "$REPORT_FILE" || true)
+              HARD_STOPS="${HARD_STOPS:-0}"
+              echo "No machine footer — fallback table scan found ${HARD_STOPS} hard-stop row(s)"
+            fi
+            if [ -z "$REACHED" ]; then
+              if grep -qiE 'reached_?success[`*:[:space:]]*(\|[[:space:]]*)?`?false' "$REPORT_FILE"; then
+                REACHED="false"
+              else
+                REACHED="true"
+              fi
+            fi
           else
-            COUNT="0"
+            # No report at all — fail loud, never report a silent pass
+            HARD_STOPS="0"
+            REACHED="false"
           fi
-          echo "hard_stop_count=${COUNT}" >> "$GITHUB_OUTPUT"
-          echo "Parsed hard stop count: ${COUNT}"
+          echo "hard_stop_count=${HARD_STOPS}" >> "$GITHUB_OUTPUT"
+          echo "reached_success=${REACHED}" >> "$GITHUB_OUTPUT"
+          echo "Parsed: hard_stops=${HARD_STOPS} reached_success=${REACHED}"
+          if [ "${HARD_STOPS}" != "0" ] || [ "${REACHED}" = "false" ]; then
+            echo "::warning::Onboarding probe (${{ matrix.os }}): hard_stops=${HARD_STOPS}, reached_success=${REACHED} — see the friction-report artifact and the filed issue"
+          fi
 
-      # --- File / update GitHub issue on hard stops ONLY (brief-236 dedup pattern) ---
-      # Fires when hardStopCount > 0 — NOT on spend-guard hits, infra failures, or papercuts.
-      # The friction-report artifact carries everything; issues are the escalation path for hard stops.
+      # --- File / update GitHub issue on hard stops or failed runs (brief-236 dedup pattern) ---
+      # Fires when hardStopCount > 0 OR reached_success is false — NOT on papercuts.
+      # The friction-report artifact carries everything; issues are the escalation path.
       - name: File or update issue on hard stop
-        if: always() && steps.parse_report.outputs.hard_stop_count != '0' && (github.event.inputs.file_issue || 'true') == 'true'
+        if: always() && (steps.parse_report.outputs.hard_stop_count != '0' || steps.parse_report.outputs.reached_success == 'false') && (github.event.inputs.file_issue || 'true') == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_FILE: "${{ github.workspace }}/friction-report-${{ matrix.os }}.md"
@@ -233,6 +268,7 @@ jobs:
           **Run:** [${RUN_URL}](${RUN_URL})
           **Runner:** ${VANTAGE_ID}
           **Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
+          **Reached success:** ${{ steps.parse_report.outputs.reached_success }}
 
           ---
 
@@ -249,6 +285,7 @@ jobs:
           **Run:** [${RUN_URL}](${RUN_URL})
           **Runner:** ${VANTAGE_ID}
           **Hard stops:** ${{ steps.parse_report.outputs.hard_stop_count }}
+          **Reached success:** ${{ steps.parse_report.outputs.reached_success }}
 
           ---
 
