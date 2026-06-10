@@ -115,6 +115,22 @@ P0 / P1 / P2, each tied to friction item numbers. Concrete one-line fixes where 
 **7. CI substitution note**
 Record the NT_API_KEY substitution (or its absence if the docs handled keys differently than expected).
 
+**8. Machine-readable footer — REQUIRED, CI parses this**
+
+The report MUST end with exactly this HTML comment block, values filled in:
+
+```
+<!-- probe-machine-summary
+hard_stops: <integer>
+reached_success: <true|false>
+-->
+```
+
+- `hard_stops`: the total number of hard stops this run — must equal the count of friction-log rows marked as hard stops.
+- `reached_success`: `true` ONLY if you observed a valid fixture inference (the success criterion above); `false` otherwise.
+
+CI reads this block to decide whether the run files a GitHub issue. If the block is missing or malformed, real failures can go undetected. It must be the literal last lines of the report file — not inside a code fence.
+
 ---
 
 Keep the API key **redacted** (`nt_***REDACTED***`) everywhere in your output.  
