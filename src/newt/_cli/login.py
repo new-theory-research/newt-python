@@ -2,8 +2,15 @@
 
 1. POST /api/cli/auth/start  → browser_url + user_code + poll_url
 2. Print URL + code; attempt webbrowser.open (silent on SSH/headless)
-3. Poll /api/cli/auth/poll every 2s until confirmed, expired, or 10-min TTL
+3. Poll /api/cli/auth/poll every 2s until confirmed, expired, or TTL deadline
 4. Write key to ~/.nt/credentials (chmod 600), print loud completion message
+
+TTL handling: the start response is checked for `expires_in` (seconds) or
+`expires_at` (Unix timestamp). If neither is present, we fall back to the
+server-side TTL constant of 10 minutes. As of the initial implementation the
+server does NOT return an expiry field, so the 10-minute fallback is always
+used in practice. When the server starts returning one, the client will use it
+automatically.
 """
 from __future__ import annotations
 
@@ -22,6 +29,15 @@ from newt._credentials import write_api_key
 _DEFAULT_CONSOLE = "https://console.newtheory.ai"
 _POLL_INTERVAL_S = 2.0
 _MAX_WAIT_S = 10 * 60  # 10 minutes, matching server TTL
+
+# Single expiry message used for all expiration paths (deadline reached OR
+# server signals expired). Naming NT_API_KEY here is intentional: headless
+# environments (CI, agents, bare SSH) cannot complete the browser flow and
+# must use a key directly.
+_EXPIRY_MSG = (
+    "Pairing expired — run `newt login` again. "
+    "In non-interactive environments (CI, agents), set NT_API_KEY instead."
+)
 
 
 def _console_url() -> str:
@@ -64,6 +80,19 @@ def cmd_login(args: list[str]) -> int:
     user_code: str = data["user_code"]
     poll_url: str = data["poll_url"]
 
+    # Derive the poll deadline from the server's expiry hint when present,
+    # falling back to the _MAX_WAIT_S constant.  The server currently does
+    # not return either field, so the fallback always applies in practice.
+    now = time.monotonic()
+    if "expires_in" in data:
+        deadline = now + float(data["expires_in"])
+    elif "expires_at" in data:
+        # expires_at is a Unix wall-clock timestamp; convert to monotonic.
+        wall_remaining = float(data["expires_at"]) - time.time()
+        deadline = now + max(wall_remaining, 0.0)
+    else:
+        deadline = now + _MAX_WAIT_S
+
     print(f"\n  Open this URL to authenticate:\n\n    {browser_url}\n")
     print(f"  Confirm this code matches what you see in your browser:\n")
     print(f"      {user_code}\n")
@@ -82,7 +111,6 @@ def cmd_login(args: list[str]) -> int:
     print("\nWaiting for you to confirm in the browser", end="", flush=True)
 
     # Step 3: poll until confirmed, expired, or deadline
-    deadline = time.monotonic() + _MAX_WAIT_S
     while time.monotonic() < deadline:
         time.sleep(_POLL_INTERVAL_S)
         print(".", end="", flush=True)
@@ -91,12 +119,9 @@ def cmd_login(args: list[str]) -> int:
             with urlopen(Request(poll_url), timeout=15) as resp:
                 poll = json.loads(resp.read())
         except HTTPError as exc:
-            if exc.code == 410:
-                print(
-                    "\n\nPairing expired — the 10-minute window passed.\n"
-                    "Run `newt login` again.",
-                    file=sys.stderr,
-                )
+            if exc.code in (410, 404):
+                # Server signals the pairing is gone — no point continuing.
+                print(f"\n\n{_EXPIRY_MSG}", file=sys.stderr)
                 return 1
             print(f"\n\nUnexpected error polling ({exc.code}): {exc.reason}", file=sys.stderr)
             return 1
@@ -107,6 +132,11 @@ def cmd_login(args: list[str]) -> int:
         status = poll.get("status")
         if status == "pending":
             continue
+
+        if status == "expired":
+            # Poll body explicitly signals expiry before our local deadline.
+            print(f"\n\n{_EXPIRY_MSG}", file=sys.stderr)
+            return 1
 
         if status == "confirmed":
             key = poll.get("key")
@@ -134,9 +164,5 @@ def cmd_login(args: list[str]) -> int:
         print(f"\n\nUnexpected poll response: {poll}", file=sys.stderr)
         return 1
 
-    print(
-        "\n\nTimed out after 10 minutes waiting for browser confirmation.\n"
-        "Run `newt login` to start a new pairing.",
-        file=sys.stderr,
-    )
+    print(f"\n\n{_EXPIRY_MSG}", file=sys.stderr)
     return 1
