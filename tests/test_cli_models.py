@@ -43,7 +43,18 @@ def _run(args: list[str], monkeypatch, models_return=None, side_effect=None):
 
 
 _SAMPLE_MODELS = [
-    {"uid": "ft_base_nt0fp3", "type": "fine_tune", "base": "base_nt0fp3", "tags": ["nt0-fp3"]},
+    {
+        "uid": "ft_base_nt0fp3",
+        "type": "fine_tune",
+        "base": "base_nt0fp3",
+        "tags": ["nt0-fp3"],
+        "contract": {
+            "action_axes": [
+                "shoulder_pan", "shoulder_lift", "elbow", "forearm_roll",
+                "wrist_angle", "wrist_rotate", "gripper",
+            ]
+        },
+    },
     {"uid": "base_nt0fp3", "type": "base", "base": None, "tags": []},
 ]
 
@@ -65,6 +76,31 @@ def test_models_renders_catalog(monkeypatch):
     assert "ft_base_nt0fp3" in out
     assert "base_nt0fp3" in out
     assert err == ""
+
+
+def test_models_renders_axes_from_contract(monkeypatch):
+    """A developer scanning the catalog sees each model's labeled action axes.
+
+    The registry payload carries axes at contract.action_axes — the human
+    render must surface them (the axes are part of the reward moment: you see
+    what the model actually drives). A model without a contract renders cleanly
+    with no axes fragment. This test exists because the renderer once read a
+    nonexistent top-level "axes" key and the column silently never printed.
+    """
+    exit_code, out, _ = _run([], monkeypatch, models_return=_SAMPLE_MODELS)
+
+    assert exit_code == 0
+    lines = [l for l in out.splitlines() if l.strip()]
+    ft_line = next(l for l in lines if "ft_base_nt0fp3" in l)
+    base_line = next(l for l in lines if l.strip().startswith("base_nt0fp3"))
+
+    assert "axes [" in ft_line, f"axes must render for a model with a contract: {ft_line!r}"
+    assert "shoulder_pan" in ft_line and "gripper" in ft_line, (
+        f"axis labels from contract.action_axes must appear: {ft_line!r}"
+    )
+    assert "axes [" not in base_line, (
+        f"model without a contract must not render an axes fragment: {base_line!r}"
+    )
 
 
 def test_models_one_line_per_model(monkeypatch):
