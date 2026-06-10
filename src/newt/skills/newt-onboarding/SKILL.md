@@ -99,7 +99,9 @@ The first inference call wakes the model's container — it can take around **fi
 
 You've confirmed the API works. To drive a real robot:
 
+<!-- hardware-specific-start -->
 1. **Clone the embodiment starter fresh.** You are in a cloned starter already — use this project. If you are not, visit the [embodiment setup guide](https://docs.newtheory.ai/docs/set-up-your-embodiment) to clone the starter for your hardware.
+<!-- hardware-specific-end -->
 
    **Never use ambient machine code (~/nt, ~/nt-runway, any pre-existing local path).** The starter is the clean path; rig machines have internal research code that is not the public SDK — it will misdirect you.
 
