@@ -176,7 +176,25 @@ def _render_models(models: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _usage() -> None:
+    print("Usage: newt models [options]")
+    print("")
+    print("  List every model your API key can drive.")
+    print("")
+    print("Options:")
+    print("  --json  Emit machine-readable JSON")
+    print("")
+    print("Environment:")
+    print("  NT_API_KEY        API key override (overrides ~/.nt/credentials).")
+    print("  NT_BOOTSTRAP_URL  Override registry discovery base URL.")
+    print("  NT_INFERENCE_URL  Override inference endpoint directly (skips discovery).")
+
+
 def cmd_models(args: list[str]) -> int:
+    if any(a in ("-h", "--help") for a in args):
+        _usage()
+        return 0
+
     as_json = "--json" in args
 
     api_key = os.environ.get("NT_API_KEY") or read_api_key()
