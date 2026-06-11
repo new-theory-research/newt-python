@@ -19,19 +19,15 @@ Canonical docs: `https://newtheory-docs.vercel.app/docs/getting-started`
 
 The finish line for milestone 1 is: **you have communicated with the API and it answered.**
 
-### Step 1 — Install the SDK
+### Step 1 — Install newt
 
 ```bash
-uv pip install "git+ssh://git@github.com/new-theory-research/newt-python.git"
+uv tool install "git+ssh://git@github.com/new-theory-research/newt-python.git"
 ```
 
 Need `uv`? `curl -LsSf https://astral.sh/uv/install.sh | sh` then `source $HOME/.local/bin/env`.
 
-Confirm the import:
-
-```bash
-python -c "import newt; print('newt OK')"
-```
+After install, bare `newt` commands work in any shell — no environment to activate. If `newt` isn't on PATH, run `uv tool update-shell` to add `~/.local/bin`.
 
 ### Step 2 — Log in
 
@@ -53,15 +49,22 @@ Use `newt status` to diagnose auth or connectivity issues — it shows key sourc
 
 ### Step 4 — Connect from Python
 
-```python
-from newt import Robot
+The `newt` Python library installs into a project. Create one if you don't have it:
 
-robot = Robot()
-print(robot)
+```bash
+uv init my-robot
+cd my-robot
+uv add "newt @ git+ssh://git@github.com/new-theory-research/newt-python.git"
+```
+
+Then confirm the API answers:
+
+```bash
+uv run python -c "from newt import Robot; print(Robot())"
 # nt0-fp3 · contract received · (50,8) · 8 labeled axes
 ```
 
-`Robot()` fetches the model contract from the registry — output shape, axis labels. **You've successfully communicated with the API.** Some developers stop here.
+`Robot()` reads the credentials `newt login` created — no second login, no shell export. **You've successfully communicated with the API.** Some developers stop here.
 
 ---
 
@@ -132,11 +135,11 @@ Full embodiment walkthrough: `https://newtheory-docs.vercel.app/docs/set-up-your
 | Symptom | Fix |
 |---|---|
 | `python: command not found` on macOS | Use `uv run python` instead of `python` |
-| `newt: command not found` after install | Activate your venv: `source .venv/bin/activate` or `uv run newt` |
+| `newt: command not found` after install | Run `uv tool update-shell` to add `~/.local/bin` to PATH, then open a new shell |
 | Agent asks you to paste your API key | Stop — run `newt login` instead; key should never transit chat |
 | First `robot.infer()` takes ~50 seconds | Expected cold start; the container is waking. Don't retry. |
 | `newt login` hangs or loops | Run `newt status` to check credential state; re-run `newt login` |
-| SDK out of date | `uv pip install --upgrade "git+ssh://git@github.com/new-theory-research/newt-python.git"` |
+| newt out of date | `uv tool upgrade newt` |
 
 ---
 
