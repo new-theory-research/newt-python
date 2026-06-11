@@ -47,7 +47,6 @@ Public surface:
 
 Internal:
 - `newt._client` — edge client, invariant per tenet T1
-- `newt._translation` — action-format translation layer
 """
 
 from newt._client.robot import (
