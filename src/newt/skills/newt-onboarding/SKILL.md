@@ -9,9 +9,9 @@ description: Walk a developer through the New Theory golden path — install →
 
 This skill walks you through the New Theory golden path from a clean machine to a confirmed API connection, then bridges you to hardware.
 
-**Before running any commands:** fetch the docs index first. Read `https://docs.newtheory.ai/llms.txt` (or append `.md` to any docs page URL for clean markdown). Walk the top-level sections — Getting started, SDK reference, Set up your embodiment — before touching the machine. An agent that reads the nav before issuing commands makes fewer wrong turns.
+**Before running any commands:** fetch the docs index first. Read `https://newtheory-docs.vercel.app/llms.txt` (or append `.md` to any docs page URL for clean markdown). Walk the top-level sections — Getting started, SDK reference, Set up your embodiment — before touching the machine. An agent that reads the nav before issuing commands makes fewer wrong turns.
 
-Canonical docs: `https://docs.newtheory.ai/docs/getting-started`
+Canonical docs: `https://newtheory-docs.vercel.app/docs/getting-started`
 
 ---
 
@@ -100,7 +100,7 @@ The first inference call wakes the model's container — it can take around **fi
 You've confirmed the API works. To drive a real robot:
 
 <!-- hardware-specific-start -->
-1. **Clone the embodiment starter fresh.** You are in a cloned starter already — use this project. If you are not, visit the [embodiment setup guide](https://docs.newtheory.ai/docs/set-up-your-embodiment) to clone the starter for your hardware.
+1. **Clone the embodiment starter fresh.** You are in a cloned starter already — use this project. If you are not, visit the [embodiment setup guide](https://newtheory-docs.vercel.app/docs/set-up-your-embodiment) to clone the starter for your hardware.
 <!-- hardware-specific-end -->
 
    **Never use ambient machine code (~/nt, ~/nt-runway, any pre-existing local path).** The starter is the clean path; rig machines have internal research code that is not the public SDK — it will misdirect you.
@@ -123,7 +123,7 @@ You've confirmed the API works. To drive a real robot:
 
 5. **Follow the starter's README** for hardware-specific steps — arm IP address, camera serial numbers, config fields.
 
-Full embodiment walkthrough: `https://docs.newtheory.ai/docs/set-up-your-embodiment`
+Full embodiment walkthrough: `https://newtheory-docs.vercel.app/docs/set-up-your-embodiment`
 
 ---
 
@@ -142,4 +142,4 @@ Full embodiment walkthrough: `https://docs.newtheory.ai/docs/set-up-your-embodim
 
 ## Maintenance contract
 
-Facts in this skill follow the docs at `https://docs.newtheory.ai/docs/getting-started`. **When the golden path changes, this skill updates in the same PR.** A stale guide is worse than no guide. If you notice a command here that differs from the current docs, the docs are authoritative — follow the docs, then file an issue to update this skill.
+Facts in this skill follow the docs at `https://newtheory-docs.vercel.app/docs/getting-started`. **When the golden path changes, this skill updates in the same PR.** A stale guide is worse than no guide. If you notice a command here that differs from the current docs, the docs are authoritative — follow the docs, then file an issue to update this skill.
