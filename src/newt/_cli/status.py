@@ -42,7 +42,25 @@ def _effective_bootstrap_url() -> str:
     return "https://nt-registry-production.up.railway.app"
 
 
+def _usage() -> None:
+    print("Usage: newt status [options]")
+    print("")
+    print("  Show your current key source, identity, and registry connectivity.")
+    print("")
+    print("Options:")
+    print("  --json  Emit machine-readable JSON")
+    print("")
+    print("Environment:")
+    print("  NT_API_KEY        API key override (overrides ~/.nt/credentials).")
+    print("  NT_BOOTSTRAP_URL  Override registry discovery base URL.")
+    print("  NT_INFERENCE_URL  Override inference endpoint directly (skips discovery).")
+
+
 def cmd_status(args: list[str]) -> int:
+    if any(a in ("-h", "--help") for a in args):
+        _usage()
+        return 0
+
     as_json = "--json" in args
 
     api_key, key_source = _resolve_key()

@@ -31,7 +31,21 @@ def _usage() -> None:
     print("  --json   Emit machine-readable JSON")
 
 
+def _usage_install() -> None:
+    print("Usage: newt skill install [options]")
+    print("")
+    print("  Copy the newt-onboarding guide into .claude/skills/ in the current directory.")
+    print("")
+    print("Options:")
+    print("  --json   Emit machine-readable JSON")
+    print("  -h, --help  Show this message and exit")
+
+
 def _cmd_skill_install(args: list[str]) -> int:
+    if "-h" in args or "--help" in args:
+        _usage_install()
+        return 0
+
     as_json = "--json" in args
 
     try:
