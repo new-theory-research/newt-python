@@ -601,6 +601,116 @@ def _with_verifier_retry(fn: Callable[[], _T]) -> _T:
 
 
 # ---------------------------------------------------------------------------
+# Embodiment validation helpers
+# ---------------------------------------------------------------------------
+# Three rails, all teaching errors (not bare TypeErrors):
+#   1. String → developer thought embodiment= takes a name string.
+#   2. Mutual exclusion → embodiment= combined with read_state= or execute=.
+#   3. Partial object → object exists but is missing one or both methods.
+
+_EMBODIMENT_DOCS = "https://newtheory-docs.vercel.app/docs/api/errors#embodiment"
+
+
+class EmbodimentError(NewTheoryError):
+    """Raised when the value passed to Robot(embodiment=...) is invalid.
+
+    Three sub-cases, each with a teaching message:
+      - embodiment.string_not_object: a string was passed (name-based API hallucination).
+      - embodiment.conflict:          embodiment= combined with read_state= or execute=.
+      - embodiment.missing_method:    object is missing read_state or execute (or both).
+
+    Attributes:
+        code:     4422 (HTTP-convention; client-side construction error, no WS involved).
+        type:     "embodiment.<sub_case>"
+        message:  Human-readable prose explaining what's wrong and how to fix it.
+        context:  Machine-readable specifics.
+        docs:     Stable URL to the embodiment errors reference.
+        trace_id: Empty string (client-side; no server trace).
+    """
+
+    def __init__(self, type: str, message: str, context: dict) -> None:
+        super().__init__(
+            code=4422,
+            type=type,
+            message=message,
+            context=context,
+            docs=_EMBODIMENT_DOCS,
+            trace_id="",
+        )
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def _validate_embodiment(embodiment: Any, read_state: Any, execute: Any) -> tuple:
+    """Validate embodiment= and return (read_state_fn, execute_fn) to wire.
+
+    Raises EmbodimentError on any of the three bad-input cases.
+    Returns the two callables to assign to self._read_state / self._execute.
+    When embodiment is None, the bare read_state/execute kwargs are returned
+    unchanged (None or callable — Robot's existing optional handling applies).
+    """
+    if embodiment is None:
+        return read_state, execute
+
+    # Rail 1: string → teaching error
+    if isinstance(embodiment, str):
+        raise EmbodimentError(
+            type="embodiment.string_not_object",
+            message=(
+                f"Robot(embodiment=) takes your embodiment object, not a name string "
+                f"(got {embodiment!r}). "
+                "Generate one with a starter kit, or implement read_state() and "
+                "execute() on any class. "
+                f"See {_EMBODIMENT_DOCS}"
+            ),
+            context={"got": embodiment},
+        )
+
+    # Rail 2: mutual exclusion
+    conflicts = []
+    if read_state is not None:
+        conflicts.append("read_state=")
+    if execute is not None:
+        conflicts.append("execute=")
+    if conflicts:
+        raise EmbodimentError(
+            type="embodiment.conflict",
+            message=(
+                f"Robot() received both embodiment= and {', '.join(conflicts)}. "
+                "Pick one path: pass embodiment= (an object with read_state() and "
+                "execute()), or pass read_state= and execute= as separate callbacks. "
+                "The two paths are equivalent; embodiment= is convenience shorthand."
+            ),
+            context={"conflict_kwargs": conflicts},
+        )
+
+    # Rail 3: partial object — check both methods, name all missing ones
+    missing = []
+    if not callable(getattr(embodiment, "read_state", None)):
+        missing.append("read_state()")
+    if not callable(getattr(embodiment, "execute", None)):
+        missing.append("execute()")
+    if missing:
+        raise EmbodimentError(
+            type="embodiment.missing_method",
+            message=(
+                f"The object passed as embodiment= is missing: {', '.join(missing)}. "
+                "An embodiment must implement both read_state() -> dict and "
+                "execute(action_chunk) -> None. "
+                f"See {_EMBODIMENT_DOCS}"
+            ),
+            context={
+                "missing": missing,
+                "got_type": type(embodiment).__name__,
+            },
+        )
+
+    # Valid embodiment — extract the two methods as callables
+    return embodiment.read_state, embodiment.execute
+
+
+# ---------------------------------------------------------------------------
 # Robot
 # ---------------------------------------------------------------------------
 
@@ -608,42 +718,46 @@ class Robot:
     """Client handle for a New Theory inference endpoint.
 
     Args:
-        api_key:    NT API key (nt_xxx); sent as Bearer in WS handshake.
-                    Optional — if not provided, the SDK resolves credentials in
-                    order: api_key arg → ~/.nt/credentials → NT_API_KEY env var.
-                    Raises AuthError if none of the three sources yield a key.
-        read_state: callable returning an observation dict. Optional keys:
-                    "state" (float32 ndarray (14,)), "images" (dict of camera
-                    arrays), "prompt" (str). Missing fields are firehose-coerced
-                    by the server — partial dicts are fine.
-        execute:    callable receiving an action chunk ndarray (action_horizon, 14).
-                    Called once per inference cycle in default (non-stream) mode.
-                    Never called in stream mode.
-        model:      Model identifier (UID or tag). The SDK resolves it via
-                    endpoint discovery (GET /v1/models on construction) and also
-                    forwards it in the first obs frame so the server resolves the
-                    checkpoint. None (default) resolves to the default base model.
-                    Power-user escape hatch — most developers should leave this unset.
+        api_key:     NT API key (nt_xxx); sent as Bearer in WS handshake.
+                     Optional — if not provided, the SDK resolves credentials in
+                     order: api_key arg → ~/.nt/credentials → NT_API_KEY env var.
+                     Raises AuthError if none of the three sources yield a key.
+        embodiment:  An object implementing the Embodiment protocol (read_state()
+                     and execute()). Convenience shorthand for passing read_state=
+                     and execute= separately. Mutually exclusive with read_state= /
+                     execute=. Any class with those two methods qualifies — no
+                     inheritance or registration required. Passing a string raises
+                     EmbodimentError with a pointer to the setup guide.
+        read_state:  callable returning an observation dict. Optional keys:
+                     "state" (float32 ndarray (14,)), "images" (dict of camera
+                     arrays), "prompt" (str). Missing fields are firehose-coerced
+                     by the server — partial dicts are fine.
+        execute:     callable receiving an action chunk ndarray (action_horizon, 14).
+                     Called once per inference cycle in default (non-stream) mode.
+                     Never called in stream mode.
+        model:       Model identifier (UID or tag). The SDK resolves it via
+                     endpoint discovery (GET /v1/models on construction) and also
+                     forwards it in the first obs frame so the server resolves the
+                     checkpoint. None (default) resolves to the default base model.
+                     Power-user escape hatch — most developers should leave this unset.
         connect_timeout: Seconds to wait for the WS handshake. Defaults to
-                    120s to tolerate Modal cold-start (scale-down → GPU +
-                    checkpoint-load can take 30–90s).
+                     120s to tolerate Modal cold-start (scale-down → GPU +
+                     checkpoint-load can take 30–90s).
 
     NT_INFERENCE_URL override: if set, endpoint discovery is skipped and this
-                    URL is used directly. Takes highest precedence. Smoke and
-                    golden tests use this to repoint at a specific server without
-                    touching the registry.
+                     URL is used directly. Takes highest precedence. Smoke and
+                     golden tests use this to repoint at a specific server without
+                     touching the registry.
 
-    Default usage (credentials from `newt login` or NT_API_KEY):
+    Embodiment object (preferred for objects you instantiate):
+        from embodiment import TrossenWidowX
+
         robot = newt.Robot(
-            read_state=lambda: {"state": arm.get_joints()},
-            execute=lambda chunk: arm.move_to(chunk[0]),
+            embodiment=TrossenWidowX.from_config(),
         )
-        result = robot.run("pick up the cup", max_duration=30)
-        # result.stop_reason == "max_duration" on pi0.5 today
 
-    Explicit key (testing / CI):
+    Bare callbacks (closures, lambdas — remain forever):
         robot = newt.Robot(
-            api_key=os.environ["NT_API_KEY"],
             read_state=lambda: {"state": arm.get_joints()},
             execute=lambda chunk: arm.move_to(chunk[0]),
         )
@@ -656,11 +770,16 @@ class Robot:
     def __init__(
         self,
         api_key: str | None = None,
+        embodiment: Any = None,
         read_state: Callable[[], dict] | None = None,
         execute: Callable[[np.ndarray], None] | None = None,
         model: str | None = None,
         connect_timeout: float = 120.0,
     ) -> None:
+        # embodiment= is convenience shorthand for read_state= + execute= on one object.
+        # Validate and unpack first; read_state/execute are optional (infer() path).
+        read_state, execute = _validate_embodiment(embodiment, read_state, execute)
+
         # read_state/execute are optional: the one-shot infer() path never uses
         # them, so an API-evaluator can construct Robot(api_key=...) and call
         # infer() with no hardware callbacks. run() requires both and guards for it.
@@ -777,7 +896,7 @@ class Robot:
         if self._read_state is None or self._execute is None:
             raise TypeError(
                 "Robot.run() requires read_state and execute callbacks. "
-                "Construct Robot(api_key, read_state, execute) to drive a robot, "
+                "Construct Robot(api_key, embodiment, read_state, execute) to drive a robot, "
                 "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
             )
         if stream:

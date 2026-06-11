@@ -4,9 +4,15 @@ Importable as `import newt`. Distribution name on PyPI: `newt`.
 
 Public surface:
 - `newt.Robot`                — top-level robot handle
+- `newt.Embodiment`           — typing.Protocol for hardware drivers passed to
+                                 Robot(embodiment=...); any object with read_state()
+                                 and execute() satisfies it — no inheritance required
 - `newt.NewTheoryError`       — base class for all server-emitted errors; six-field
                                  envelope (code, type, message, context, docs, trace_id)
 - `newt.AuthError`            — raised when API key is rejected (WS close 4001 / HTTP 401)
+- `newt.EmbodimentError`      — raised when Robot(embodiment=...) receives an invalid
+                                 value: a string name, a conflict with read_state=/execute=,
+                                 or an object missing one or both required methods
 - `newt.ProtocolError`        — raised when obs frame is malformed or has unknown type
                                  (WS close 4400)
 - `newt.BaseNotDeployableError` — raised when the requested model is a base (lineage anchor)
@@ -51,6 +57,7 @@ from newt._client.robot import (
     ColdStartRetry,
     ContractMismatchError,
     DegradationWarning,
+    EmbodimentError,
     EnvOverrideWarning,
     InferenceResponse,
     ModelNotFoundError,
@@ -64,6 +71,7 @@ from newt._client.robot import (
     VerifierTransientRetry,
     list_models,
 )
+from newt._embodiment import Embodiment
 from newt import fixtures
 
 __all__ = [
@@ -72,6 +80,8 @@ __all__ = [
     "ColdStartRetry",
     "ContractMismatchError",
     "DegradationWarning",
+    "Embodiment",
+    "EmbodimentError",
     "EnvOverrideWarning",
     "InferenceResponse",
     "ModelNotFoundError",
