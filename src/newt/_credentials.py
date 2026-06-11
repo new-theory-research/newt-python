@@ -3,8 +3,13 @@
 The credentials file format is a single line:
     api_key = nt_<hex>
 
-The SDK reads this on Robot() construction (silent fallback from NT_API_KEY).
-`newt login` writes it after pairing with the console.
+**Credential resolution precedence (canonical statement):**
+NT_API_KEY environment variable wins; ~/.nt/credentials file is the fallback.
+In code: ``os.environ.get("NT_API_KEY") or read_api_key()``.
+Every resolution site in the SDK and CLI must follow this order and cite here
+rather than restating the rule.
+
+`newt login` writes the credentials file after pairing with the console.
 """
 from __future__ import annotations
 
