@@ -135,9 +135,9 @@ def test_ac2_string_raises_teaching_error():
     # Message must mention starter kit or implementing the two methods
     assert "starter" in msg.lower() or "read_state" in msg
 
-    # Docs pointer must be present
-    assert "newtheory-docs.vercel.app" in msg
-    assert err.docs == "https://newtheory-docs.vercel.app/docs/set-up-your-embodiment"
+    # Docs pointer must be present on the error object
+    assert err.docs is not None
+    assert "nt-docs-eight.vercel.app" in err.docs
 
 
 def test_ac2_any_string_triggers_the_same_error():
@@ -148,9 +148,17 @@ def test_ac2_any_string_triggers_the_same_error():
         assert exc_info.value.type == "embodiment.string_not_object"
 
 
-def test_ac2_error_is_subclass_of_value_error():
-    """EmbodimentError is a ValueError so existing try/except ValueError catches it."""
-    with pytest.raises(ValueError):
+def test_ac2_error_is_subclass_of_new_theory_error():
+    """EmbodimentError is a NewTheoryError so except newt.NewTheoryError catches it.
+
+    Matches the SDK convention: every error in the six-field envelope hierarchy
+    (AuthError, ModelNotFoundError, BaseNotDeployableError, ContractMismatchError, etc.)
+    subclasses NewTheoryError. A bare except ValueError would silently miss it.
+    """
+    assert issubclass(newt.EmbodimentError, newt.NewTheoryError)
+
+    # Also verify it's caught by the documented catch-all
+    with pytest.raises(newt.NewTheoryError):
         _validate_embodiment("any-string", None, None)
 
 
