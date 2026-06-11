@@ -608,10 +608,10 @@ def _with_verifier_retry(fn: Callable[[], _T]) -> _T:
 #   2. Mutual exclusion → embodiment= combined with read_state= or execute=.
 #   3. Partial object → object exists but is missing one or both methods.
 
-_EMBODIMENT_DOCS = "https://newtheory-docs.vercel.app/docs/set-up-your-embodiment"
+_EMBODIMENT_DOCS = "https://nt-docs-eight.vercel.app/docs/api/errors#embodiment"
 
 
-class EmbodimentError(ValueError):
+class EmbodimentError(NewTheoryError):
     """Raised when the value passed to Robot(embodiment=...) is invalid.
 
     Three sub-cases, each with a teaching message:
@@ -620,22 +620,23 @@ class EmbodimentError(ValueError):
       - embodiment.missing_method:    object is missing read_state or execute (or both).
 
     Attributes:
-        code:     0 (client-side construction error; no WS involved).
+        code:     4422 (HTTP-convention; client-side construction error, no WS involved).
         type:     "embodiment.<sub_case>"
         message:  Human-readable prose explaining what's wrong and how to fix it.
         context:  Machine-readable specifics.
-        docs:     Stable URL to the embodiment setup guide.
+        docs:     Stable URL to the embodiment errors reference.
         trace_id: Empty string (client-side; no server trace).
     """
 
     def __init__(self, type: str, message: str, context: dict) -> None:
-        self.code = 0
-        self.type = type
-        self.message = message
-        self.context = context
-        self.docs = _EMBODIMENT_DOCS
-        self.trace_id = ""
-        super().__init__(message)
+        super().__init__(
+            code=4422,
+            type=type,
+            message=message,
+            context=context,
+            docs=_EMBODIMENT_DOCS,
+            trace_id="",
+        )
 
     def __str__(self) -> str:
         return self.message
