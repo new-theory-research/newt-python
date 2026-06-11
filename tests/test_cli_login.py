@@ -867,3 +867,40 @@ def test_print_mode_new_lines_route_to_stderr(monkeypatch):
     assert "No browser" not in out, (
         f"no-browser line must not appear on stdout: {out!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Golden — narration order: sign-in named BEFORE code-confirmation
+# ---------------------------------------------------------------------------
+
+def test_narration_names_sign_in_before_code_confirmation(monkeypatch):
+    """The CLI narration names sign-in BEFORE code-confirmation.
+
+    AC: "Sign in" (or "sign in") appears earlier in the combined output than
+    "confirm this code". This is the fix for Leo's first-run surprise: the CLI
+    promised a code-match, the browser delivered a login wall, nothing bridged
+    the two. Now the narration names the full journey in order.
+    """
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: None)
+
+    exit_code, out, err = _run([], monkeypatch, urlopen_side_effect=responses)
+
+    combined = out + err
+
+    sign_in_pos = combined.lower().find("sign in")
+    confirm_pos = combined.lower().find("confirm this code")
+
+    assert sign_in_pos != -1, (
+        f"narration must mention 'sign in' somewhere: {combined!r}"
+    )
+    assert confirm_pos != -1, (
+        f"narration must mention 'confirm this code' somewhere: {combined!r}"
+    )
+    assert sign_in_pos < confirm_pos, (
+        f"'sign in' must appear before 'confirm this code' in output "
+        f"(sign_in_pos={sign_in_pos}, confirm_pos={confirm_pos}): {combined!r}"
+    )

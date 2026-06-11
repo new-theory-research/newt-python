@@ -104,9 +104,8 @@ def cmd_login(args: list[str]) -> int:
     else:
         deadline = now + _MAX_WAIT_S
 
-    print(f"\n  Open this URL to authenticate:\n\n    {browser_url}\n", file=out)
-    print(f"  Confirm this code matches what you see in your browser:\n", file=out)
-    print(f"      {user_code}\n", file=out)
+    print(f"\n  {user_code}\n", file=out)
+    print(f"  Sign in (or create an account), then confirm this code:\n    {browser_url}\n", file=out)
 
     # Step 2: attempt browser open (silent failure for SSH/headless rigs)
     try:
