@@ -252,6 +252,38 @@ def test_skill_help_no_install(flag, monkeypatch, tmp_path):
     )
 
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_skill_install_help_exits_zero(flag, monkeypatch, tmp_path):
+    """skill install -h/--help exits 0 without performing any install action."""
+    monkeypatch.chdir(tmp_path)
+    rc, out, err = _capture(cmd_skill, ["install", flag], monkeypatch)
+    assert rc == 0, f"expected exit 0; rc={rc}, stderr={err!r}"
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_skill_install_help_no_directory_created(flag, monkeypatch, tmp_path):
+    """skill install -h/--help must not create .claude/ or write SKILL.md."""
+    monkeypatch.chdir(tmp_path)
+    rc, out, err = _capture(cmd_skill, ["install", flag], monkeypatch)
+    assert rc == 0
+    claude_dir = tmp_path / ".claude"
+    assert not claude_dir.exists(), (
+        f".claude/ must not be created by 'skill install {flag}'; "
+        f"found: {list(tmp_path.iterdir())}"
+    )
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_skill_install_help_prints_usage(flag, monkeypatch, tmp_path):
+    """skill install -h/--help must print usage text mentioning 'install'."""
+    monkeypatch.chdir(tmp_path)
+    rc, out, err = _capture(cmd_skill, ["install", flag], monkeypatch)
+    assert rc == 0
+    assert "install" in out.lower(), (
+        f"'install' must appear in skill install help output: {out!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC3 — global help: bare newt / newt -h / newt --help behavior unchanged
 # ---------------------------------------------------------------------------
