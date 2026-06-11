@@ -27,7 +27,7 @@ on:
       site:
         description: 'Docs site URL override'
         required: false
-        default: 'https://nt-docs-eight.vercel.app'
+        default: 'https://newtheory-docs.vercel.app'
       file_issue:
         description: 'File GitHub issue on hard stops (true/false)'
         required: false
@@ -112,7 +112,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NT_API_KEY: ${{ secrets.NT_API_KEY }}
           HOME: ${{ env.FAKE_HOME }}
-          DOCS_SITE: ${{ github.event.inputs.site || 'https://nt-docs-eight.vercel.app' }}
+          DOCS_SITE: ${{ github.event.inputs.site || 'https://newtheory-docs.vercel.app' }}
           RUNNER_LABEL: "${{ steps.vantage.outputs.runner_label }}"
           IMAGE_OS: "${{ steps.vantage.outputs.image_os }}"
           IMAGE_VERSION: "${{ steps.vantage.outputs.image_version }}"
@@ -127,7 +127,7 @@ jobs:
               '__RUNNER_LABEL__': os.environ.get('RUNNER_LABEL', 'unknown'),
               '__IMAGE_OS__':     os.environ.get('IMAGE_OS', 'unknown'),
               '__IMAGE_VERSION__': os.environ.get('IMAGE_VERSION', 'unknown'),
-              '__DOCS_SITE__':    os.environ.get('DOCS_SITE', 'https://nt-docs-eight.vercel.app'),
+              '__DOCS_SITE__':    os.environ.get('DOCS_SITE', 'https://newtheory-docs.vercel.app'),
               '__REPORT_FILE__':  os.environ.get('REPORT_FILE', '/tmp/friction-report.md'),
           }
           for placeholder, value in replacements.items():

@@ -28,6 +28,6 @@ print(robot)
 
 ## Full guide
 
-**[Getting started →](https://nt-docs-eight.vercel.app/docs/getting-started)** — install, auth, first inference call, no robot required.
+**[Getting started →](https://newtheory-docs.vercel.app/docs/getting-started)** — install, auth, first inference call, no robot required.
 
-For hardware setup, use a [starter kit](https://nt-docs-eight.vercel.app/docs/starters). See [CHANGELOG.md](CHANGELOG.md) for version history.
+For hardware setup, use a [starter kit](https://newtheory-docs.vercel.app/docs/starters). See [CHANGELOG.md](CHANGELOG.md) for version history.
