@@ -119,7 +119,9 @@ You've confirmed the API works. To drive a real robot:
 
    This verifies your config and hardware connectivity before any inference runs.
 
-4. **Follow the starter's README** for hardware-specific steps — arm IP address, camera serial numbers, config fields.
+4. **Wire your hardware through the embodiment class.** The starter ships `embodiment.py`, exporting a named class (`TrossenWidowX` / `YamBimanual`) — it's yours; rename it to match your rig. `run.py` constructs the session with `Robot(embodiment=YourClass.from_config())`. Bare `read_state=`/`execute=` callbacks remain valid for custom hardware. Passing a string to `embodiment=` is rejected with a teaching error that points back to the starters.
+
+5. **Follow the starter's README** for hardware-specific steps — arm IP address, camera serial numbers, config fields.
 
 Full embodiment walkthrough: `https://docs.newtheory.ai/docs/set-up-your-embodiment`
 
