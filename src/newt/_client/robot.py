@@ -608,7 +608,7 @@ def _with_verifier_retry(fn: Callable[[], _T]) -> _T:
 #   2. Mutual exclusion → embodiment= combined with read_state= or execute=.
 #   3. Partial object → object exists but is missing one or both methods.
 
-_EMBODIMENT_DOCS = "https://nt-docs-eight.vercel.app/docs/api/errors#embodiment"
+_EMBODIMENT_DOCS = "https://newtheory-docs.vercel.app/docs/api/errors#embodiment"
 
 
 class EmbodimentError(NewTheoryError):
@@ -896,7 +896,7 @@ class Robot:
         if self._read_state is None or self._execute is None:
             raise TypeError(
                 "Robot.run() requires read_state and execute callbacks. "
-                "Construct Robot(api_key, read_state, execute) to drive a robot, "
+                "Construct Robot(api_key, embodiment, read_state, execute) to drive a robot, "
                 "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
             )
         if stream:

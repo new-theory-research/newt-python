@@ -137,7 +137,7 @@ def test_ac2_string_raises_teaching_error():
 
     # Docs pointer must be present on the error object
     assert err.docs is not None
-    assert "nt-docs-eight.vercel.app" in err.docs
+    assert "newtheory-docs.vercel.app" in err.docs
 
 
 def test_ac2_any_string_triggers_the_same_error():
