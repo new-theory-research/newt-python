@@ -59,4 +59,4 @@ def _usage() -> None:
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials)")
     print("  NT_BOOTSTRAP_URL  Override registry discovery base URL")
     print("  NT_INFERENCE_URL  Override inference endpoint directly (skips discovery)")
-    print("  NT_CONSOLE_URL    Console URL (default: https://console-production-91bb.up.railway.app)")
+    print("  NT_CONSOLE_URL    Console URL (default: https://newtheory-console.vercel.app)")

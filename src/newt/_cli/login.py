@@ -30,7 +30,7 @@ from urllib.request import Request, urlopen
 
 from newt._credentials import write_api_key
 
-_DEFAULT_CONSOLE = "https://console-production-91bb.up.railway.app"
+_DEFAULT_CONSOLE = "https://newtheory-console.vercel.app"
 _POLL_INTERVAL_S = 2.0
 _MAX_WAIT_S = 10 * 60  # 10 minutes, matching server TTL
 _REEMIT_INTERVAL_S = 30.0  # re-print URL+code every ~30s during polling
@@ -68,7 +68,7 @@ def _usage() -> None:
     print("")
     print("Environment:")
     print("  NT_API_KEY     Set this instead of running login (CI, agents, SSH).")
-    print("  NT_CONSOLE_URL Override the console URL (default: https://console-production-91bb.up.railway.app)")
+    print("  NT_CONSOLE_URL Override the console URL (default: https://newtheory-console.vercel.app)")
 
 
 def cmd_login(args: list[str]) -> int:
