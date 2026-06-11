@@ -720,7 +720,7 @@ class Robot:
     Args:
         api_key:     NT API key (nt_xxx); sent as Bearer in WS handshake.
                      Optional — if not provided, the SDK resolves credentials in
-                     order: api_key arg → ~/.nt/credentials → NT_API_KEY env var.
+                     order: api_key arg → NT_API_KEY env var → ~/.nt/credentials.
                      Raises AuthError if none of the three sources yield a key.
         embodiment:  An object implementing the Embodiment protocol (read_state()
                      and execute()). Convenience shorthand for passing read_state=
@@ -784,10 +784,11 @@ class Robot:
         # them, so an API-evaluator can construct Robot(api_key=...) and call
         # infer() with no hardware callbacks. run() requires both and guards for it.
 
-        # Credential resolution: api_key arg → ~/.nt/credentials → NT_API_KEY env var
+        # Credential resolution: api_key arg → NT_API_KEY env var → ~/.nt/credentials file
+        # Precedence defined in newt._credentials module docstring.
         if api_key is None:
             from newt._credentials import read_api_key
-            api_key = read_api_key() or os.environ.get("NT_API_KEY")
+            api_key = os.environ.get("NT_API_KEY") or read_api_key()
         if not api_key:
             raise AuthError(
                 code=401,
