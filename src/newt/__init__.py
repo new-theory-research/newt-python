@@ -44,7 +44,6 @@ Public surface:
 - `newt.list_models`          — fetch available models from the inference server
 - `newt.fixtures`             — real recorded observations (`fixtures.load("cup_stacking")`)
                                  for trying inference without hardware
-- `newt.trossen.WidowX_250`   — vendor-namespaced robot class (planned)
 
 Internal:
 - `newt._client` — edge client, invariant per tenet T1
