@@ -507,7 +507,7 @@ def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: st
             type="model.base_not_deployable",
             message=message,
             context={"model": target, "fine_tunes": deployable_tags},
-            docs="https://nt-docs-eight.vercel.app/docs/api/errors#model-base-not-deployable",
+            docs="https://newtheory-docs.vercel.app/docs/api/errors#model-base-not-deployable",
             trace_id="",
         )
 
