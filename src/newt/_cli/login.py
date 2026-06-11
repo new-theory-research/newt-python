@@ -33,6 +33,7 @@ from newt._credentials import write_api_key
 _DEFAULT_CONSOLE = "https://console-production-91bb.up.railway.app"
 _POLL_INTERVAL_S = 2.0
 _MAX_WAIT_S = 10 * 60  # 10 minutes, matching server TTL
+_REEMIT_INTERVAL_S = 30.0  # re-print URL+code every ~30s during polling
 
 # Single expiry message used for all expiration paths (deadline reached OR
 # server signals expired). Naming NT_API_KEY here is intentional: headless
@@ -114,16 +115,28 @@ def cmd_login(args: list[str]) -> int:
         opened = False
 
     if opened:
-        print("  Browser opened. If nothing appeared, paste the URL above manually.", file=out)
+        print(f"  Browser opened. If nothing appeared, paste this URL manually:\n    {browser_url}", file=out)
     else:
-        print("  (No browser detected — open the URL above on any device.)", file=out)
+        print(f"  No browser detected — open {browser_url} on any device.", file=out)
+        print(
+            "  Scripting or agent? Use `newt login --print` or set NT_API_KEY instead.",
+            file=out,
+        )
 
-    print("\nWaiting for you to confirm in the browser", end="", flush=True, file=out)
+    print(f"\nWaiting for you to confirm at {browser_url} ...", file=out, flush=True)
 
     # Step 3: poll until confirmed, expired, or deadline
+    _reemit_counter = 0  # counts poll iterations; re-emit URL+code every _REEMIT_INTERVAL_S
+    _reemit_every = max(1, int(_REEMIT_INTERVAL_S / _POLL_INTERVAL_S))
     while time.monotonic() < deadline:
         time.sleep(_POLL_INTERVAL_S)
-        print(".", end="", flush=True, file=out)
+        _reemit_counter += 1
+        if _reemit_counter % _reemit_every == 0:
+            print(
+                f"  Still waiting — confirm at {browser_url}  (code: {user_code})",
+                file=out,
+                flush=True,
+            )
 
         try:
             with urlopen(Request(poll_url), timeout=15) as resp:
