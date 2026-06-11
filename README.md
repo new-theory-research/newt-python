@@ -5,8 +5,8 @@ Python SDK for the [New Theory](https://newtheory.ai) inference API. Connects yo
 ## Quickstart
 
 ```bash
-# 1. Install
-uv pip install "git+ssh://git@github.com/new-theory-research/newt-python.git"
+# 1. Install the newt CLI globally (works in every shell — nothing to activate)
+uv tool install "git+ssh://git@github.com/new-theory-research/newt-python.git"
 
 # 2. Log in (one browser confirm; key persists to ~/.nt/credentials)
 newt login
@@ -15,16 +15,17 @@ newt login
 newt models
 ```
 
-```python
-# 4. Connect from Python
-from newt import Robot
+The library installs into a project, exactly when you have Python to write:
 
-robot = Robot()
-print(robot)
+```bash
+# 4. Add the library to a project, then connect from Python
+uv init my-robot && cd my-robot
+uv add "newt @ git+ssh://git@github.com/new-theory-research/newt-python.git"
+uv run python -c "from newt import Robot; print(Robot())"
 # nt0-fp3 · contract received · (50,8) · 8 labeled axes
 ```
 
-`Robot()` fetches the model contract from the registry. `print(robot)` confirms you reached the API — you're done with milestone 1.
+`Robot()` reads the credentials `newt login` created — no second login, no shell export — and fetches the model contract from the registry. That printed line confirms you reached the API; you're done with milestone 1.
 
 ## Full guide
 
