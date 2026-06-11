@@ -646,3 +646,224 @@ def test_print_flag_key_not_saved_note_on_stderr(monkeypatch, tmp_path):
     assert "not saved" in err.lower() or "key not saved" in err.lower(), (
         f"must emit 'key not saved' note on stderr: {err!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# New AC1 — self-contained waiting line: URL present, no "above" reference
+# ---------------------------------------------------------------------------
+
+def test_waiting_line_is_self_contained(monkeypatch):
+    """The 'Waiting' line includes the full confirmation URL so it's readable
+    even if the preceding URL block is hidden (folded terminal, late attach).
+
+    AC: waiting line contains browser_url; no output line anywhere says 'above'.
+    """
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+
+    write_calls: list[str] = []
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: write_calls.append(key))
+
+    exit_code, out, err = _run([], monkeypatch, urlopen_side_effect=responses)
+
+    combined = out + err
+    browser_url = _START_RESPONSE["browser_url"]
+    user_code = _START_RESPONSE["user_code"]
+
+    # Find the waiting line (starts with "Waiting")
+    waiting_lines = [l for l in combined.splitlines() if "Waiting" in l or "waiting" in l.lower()]
+    assert waiting_lines, f"no 'Waiting' line found in output: {combined!r}"
+    waiting_line = waiting_lines[0]
+    assert browser_url in waiting_line, (
+        f"waiting line must contain the full URL; got: {waiting_line!r}"
+    )
+
+    # The URL is present in the waiting line — the code is in the URL as a query param
+    # or in adjacent text; assert that the URL (which carries the code) is self-contained
+    assert user_code in waiting_line or user_code in browser_url, (
+        f"waiting line or URL must reference the user code: {waiting_line!r}"
+    )
+
+    # No line in the entire output should direct the user to look 'above'
+    for line in combined.splitlines():
+        assert "above" not in line.lower(), (
+            f"output must never reference 'above' (stranded output risk): {line!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# New AC2 — periodic re-emit during polling: URL+code re-printed at ~30s cadence
+# ---------------------------------------------------------------------------
+
+def test_periodic_reemit_during_polling(monkeypatch):
+    """While polling, a self-contained URL+code line is re-emitted every ~30 seconds.
+
+    Re-emit protects users whose terminal scrollback was lost after the initial
+    block was printed — they can recover the URL without restarting the flow.
+
+    The test advances a fake monotonic clock and counts re-emit lines without
+    altering the poll call cadence (_POLL_INTERVAL_S unchanged).
+    """
+    from newt._cli.login import _POLL_INTERVAL_S, _REEMIT_INTERVAL_S
+
+    reemit_every = max(1, int(_REEMIT_INTERVAL_S / _POLL_INTERVAL_S))
+
+    # Simulate enough iterations for 2 re-emits, then confirm.
+    # We need at least 2 * reemit_every poll iterations before confirming.
+    total_pending = reemit_every * 2  # triggers re-emit at iteration reemit_every and 2*reemit_every
+
+    # Build monotonic ticks: tick 0 = start, subsequent ticks stay well within deadline
+    tick_values = [0.0] + [float(i) for i in range(1, total_pending + 10)]
+    tick_iter = iter(tick_values)
+    monkeypatch.setattr("newt._cli.login.time.monotonic", lambda: next(tick_iter))
+    monkeypatch.setattr("newt._cli.login.time.sleep", lambda _: None)
+    monkeypatch.setattr("newt._cli.login.webbrowser.open", lambda _: False)
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: None)
+
+    call_count = [0]
+    browser_url = _START_RESPONSE["browser_url"]
+    user_code = _START_RESPONSE["user_code"]
+
+    def fake_urlopen(req, timeout=None):
+        idx = call_count[0]
+        call_count[0] += 1
+        if idx == 0:
+            return _make_response(_START_RESPONSE)
+        # Return pending for the first total_pending polls, then confirmed
+        if idx <= total_pending:
+            return _make_response(_PENDING_RESPONSE)
+        return _make_response(_CONFIRMED_RESPONSE)
+
+    monkeypatch.setattr("newt._cli.login.urlopen", fake_urlopen)
+
+    out = __import__("io").StringIO()
+    err = __import__("io").StringIO()
+    monkeypatch.setattr(__import__("sys"), "stdout", out)
+    monkeypatch.setattr(__import__("sys"), "stderr", err)
+
+    exit_code = __import__("newt._cli.login", fromlist=["cmd_login"]).cmd_login([])
+
+    assert exit_code == 0, f"expected success; stderr={err.getvalue()!r}"
+
+    combined = out.getvalue() + err.getvalue()
+
+    # Count re-emit lines (the "Still waiting" lines)
+    reemit_lines = [l for l in combined.splitlines() if "Still waiting" in l]
+    assert len(reemit_lines) >= 2, (
+        f"expected at least 2 re-emit lines at ~30s cadence; got {len(reemit_lines)}: {reemit_lines}"
+    )
+
+    # Each re-emit line must be self-contained: URL and code both present
+    for line in reemit_lines:
+        assert browser_url in line, f"re-emit line must contain URL: {line!r}"
+        assert user_code in line, f"re-emit line must contain code: {line!r}"
+
+    # Poll call count: 1 (start) + total_pending (pending) + 1 (confirmed) = total_pending + 2
+    expected_polls = total_pending  # poll calls only (start call is index 0)
+    actual_polls = call_count[0] - 1  # subtract the start call
+    assert actual_polls == total_pending + 1, (
+        f"poll timing must be unchanged: expected {total_pending + 1} poll calls, got {actual_polls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New AC3 — no-browser fallback is self-contained with agent signpost
+# ---------------------------------------------------------------------------
+
+def test_no_browser_fallback_self_contained_with_signpost(monkeypatch):
+    """When no browser opens, the fallback message names the URL inline (no
+    'above') and includes the agent signpost mentioning both `newt login --print`
+    and NT_API_KEY.
+    """
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+    monkeypatch.setattr("newt._cli.login.write_api_key", lambda key: None)
+    # webbrowser.open returns False → no-browser branch
+    monkeypatch.setattr("newt._cli.login.webbrowser.open", lambda _: False)
+
+    out = __import__("io").StringIO()
+    err = __import__("io").StringIO()
+    monkeypatch.setattr(__import__("sys"), "stdout", out)
+    monkeypatch.setattr(__import__("sys"), "stderr", err)
+    monkeypatch.setattr("newt._cli.login.time.sleep", lambda _: None)
+
+    call_count = [0]
+    def fake_urlopen(req, timeout=None):
+        idx = call_count[0]
+        call_count[0] += 1
+        if idx == 0:
+            return _make_response(_START_RESPONSE)
+        return _make_response(_CONFIRMED_RESPONSE)
+    monkeypatch.setattr("newt._cli.login.urlopen", fake_urlopen)
+
+    exit_code = __import__("newt._cli.login", fromlist=["cmd_login"]).cmd_login([])
+
+    combined = out.getvalue() + err.getvalue()
+    browser_url = _START_RESPONSE["browser_url"]
+
+    # Find the no-browser line
+    no_browser_lines = [l for l in combined.splitlines() if "No browser" in l]
+    assert no_browser_lines, f"no 'No browser' line found: {combined!r}"
+    no_browser_line = no_browser_lines[0]
+
+    # Must name the URL inline
+    assert browser_url in no_browser_line, (
+        f"no-browser line must contain the URL: {no_browser_line!r}"
+    )
+    # Must not say 'above'
+    assert "above" not in no_browser_line.lower(), (
+        f"no-browser line must not reference 'above': {no_browser_line!r}"
+    )
+
+    # Signpost line must mention both `newt login --print` and NT_API_KEY
+    assert "newt login --print" in combined, (
+        f"signpost must mention `newt login --print`: {combined!r}"
+    )
+    assert "NT_API_KEY" in combined, (
+        f"signpost must mention NT_API_KEY: {combined!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New AC4 — --print mode: new lines route to stderr; stdout stays bare key only
+# ---------------------------------------------------------------------------
+
+def test_print_mode_new_lines_route_to_stderr(monkeypatch):
+    """With --print, the new self-contained waiting line and no-browser signpost
+    must appear on stderr, not stdout. Stdout must remain exactly the bare key.
+    """
+    responses = [
+        _make_response(_START_RESPONSE),
+        _make_response(_CONFIRMED_RESPONSE),
+    ]
+
+    exit_code, out, err = _run(["--print"], monkeypatch, urlopen_side_effect=responses)
+
+    assert exit_code == 0, f"expected success; err={err!r}"
+
+    # stdout: exactly the bare key
+    assert out.strip() == _FAKE_KEY, (
+        f"stdout must be exactly the key in --print mode; got: {out!r}"
+    )
+
+    browser_url = _START_RESPONSE["browser_url"]
+
+    # The waiting line (with URL) and signpost must appear on stderr
+    assert browser_url in err, (
+        f"browser URL must appear on stderr in --print mode: {err!r}"
+    )
+    assert "Waiting" in err, (
+        f"waiting line must appear on stderr in --print mode: {err!r}"
+    )
+
+    # Nothing from our new lines should land on stdout
+    assert "Waiting" not in out, (
+        f"'Waiting' line must not appear on stdout: {out!r}"
+    )
+    assert "No browser" not in out, (
+        f"no-browser line must not appear on stdout: {out!r}"
+    )
