@@ -5,7 +5,10 @@ Wire protocol: portal/wiki/specs/streaming-ws-protocol.md
 from __future__ import annotations
 
 import functools
+import inspect
 import os
+import queue
+import threading
 import time
 import warnings
 from collections.abc import Generator
@@ -141,6 +144,19 @@ class VerifierTransientRetry(UserWarning):
     without a hand-written retry loop. Emitted on the first retry via
     warnings.warn; subsequent retries are silent. A definitively-invalid key
     (AuthError) is never retried.
+    """
+
+
+class RTCBoundarySplicingWarning(UserWarning):
+    """rtc=True was used with a one-arg execute(chunk) — splicing falls back to boundaries.
+
+    Real-Time Chunking's continuous motion needs a preemptible execute so the
+    runtime can swap in a freshly-inpainted chunk mid-play. A one-arg
+    execute(chunk) can't be interrupted, so chunks are spliced only at chunk
+    boundaries — still correct, but with the freeze-resume seam RTC exists to
+    remove. Emitted once per run(rtc=True) via warnings.warn. The upgrade path:
+    accept an optional second parameter, execute(chunk, should_abort), and poll
+    should_abort() between actions, returning early when it's True.
     """
 
 
@@ -642,6 +658,85 @@ class EmbodimentError(NewTheoryError):
         return self.message
 
 
+# RTC additive contract — execute() arity detection.
+#
+# The default contract is execute(chunk) -> None (one positional arg). RTC's
+# Option B (wiki/research/2026-06-12-rtc-feasibility.md §3) adds an OPTIONAL
+# second parameter: execute(chunk, should_abort) -> None, where should_abort is
+# a callable -> bool the runtime polls between actions to preempt mid-chunk.
+#
+# Detection is by signature inspection, not by trying-and-catching:
+#   - 1 required positional (besides self) → legacy one-arg execute. Keeps
+#     working byte-identically; in rtc mode it gets chunk-boundary-only splicing.
+#   - 2 positional-acceptable params       → two-arg execute. Gets the callback
+#     and can preempt mid-chunk.
+#   - anything else (0, 3+, or no positional slot) → teaching error.
+#
+# *args is treated as "accepts two" since execute(*a) can take (chunk, abort).
+
+_EXECUTE_ARITY_ONE = 1
+_EXECUTE_ARITY_TWO = 2
+
+
+def _execute_arity(execute: Callable) -> int:
+    """Return 1 or 2 — how many positional args execute() accepts (chunk, [should_abort]).
+
+    Raises EmbodimentError (embodiment.execute_signature) for any shape that is
+    neither a one-arg nor a two-arg execute — the teaching rail for a three-arg
+    or otherwise malformed execute. Counts only POSITIONAL-acceptable params,
+    excluding a leading `self`/`cls` already bound off a bound method.
+
+    A *args-style execute (e.g. lambda *a: ...) is treated as two-arg: it can
+    absorb (chunk, should_abort). A **kwargs-only or zero-positional execute is
+    rejected — there is no slot for the chunk.
+    """
+    try:
+        sig = inspect.signature(execute)
+    except (ValueError, TypeError):
+        # Builtins / C-callables with no introspectable signature: assume the
+        # legacy one-arg contract rather than reject (fail toward backward-compat).
+        return _EXECUTE_ARITY_ONE
+
+    positional = [
+        p
+        for p in sig.parameters.values()
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    has_var_positional = any(
+        p.kind == p.VAR_POSITIONAL for p in sig.parameters.values()
+    )
+    # Required positional params (no default) — what the caller MUST supply.
+    required = [p for p in positional if p.default is p.empty]
+
+    if has_var_positional:
+        # def execute(self, *actions): can take (chunk, should_abort).
+        return _EXECUTE_ARITY_TWO
+
+    n_positional = len(positional)
+    n_required = len(required)
+
+    if n_positional == _EXECUTE_ARITY_ONE and n_required <= _EXECUTE_ARITY_ONE:
+        return _EXECUTE_ARITY_ONE
+    if n_positional == _EXECUTE_ARITY_TWO and n_required <= _EXECUTE_ARITY_TWO:
+        return _EXECUTE_ARITY_TWO
+
+    # Wrong shape: 0 positional slots, 3+, or 2-positional-but-both-required-plus-
+    # extra-required. Teaching error, not a bare TypeError at call time.
+    raise EmbodimentError(
+        type="embodiment.execute_signature",
+        message=(
+            f"execute() must accept either execute(chunk) or "
+            f"execute(chunk, should_abort) — got a signature with "
+            f"{n_positional} positional parameter(s). "
+            "The one-arg form plays each chunk to completion; the optional "
+            "two-arg form receives should_abort() (a callable -> bool) so the "
+            "runtime can preempt mid-chunk for Real-Time Chunking. "
+            f"See {_EMBODIMENT_DOCS}"
+        ),
+        context={"positional_params": n_positional, "required_params": n_required},
+    )
+
+
 def _validate_embodiment(embodiment: Any, read_state: Any, execute: Any) -> tuple:
     """Validate embodiment= and return (read_state_fn, execute_fn) to wire.
 
@@ -649,6 +744,11 @@ def _validate_embodiment(embodiment: Any, read_state: Any, execute: Any) -> tupl
     Returns the two callables to assign to self._read_state / self._execute.
     When embodiment is None, the bare read_state/execute kwargs are returned
     unchanged (None or callable — Robot's existing optional handling applies).
+
+    Note: execute() arity (one-arg legacy vs. two-arg RTC) is NOT decided here —
+    it's resolved lazily at run-time via _execute_arity() so the infer()-only
+    path (execute=None) never inspects a signature. The teaching rail for a
+    malformed execute signature fires when run() actually needs to call it.
     """
     if embodiment is None:
         return read_state, execute
@@ -697,7 +797,9 @@ def _validate_embodiment(embodiment: Any, read_state: Any, execute: Any) -> tupl
             message=(
                 f"The object passed as embodiment= is missing: {', '.join(missing)}. "
                 "An embodiment must implement both read_state() -> dict and "
-                "execute(action_chunk) -> None. "
+                "execute(action_chunk) -> None. execute may optionally take a "
+                "second parameter, execute(action_chunk, should_abort) -> None, "
+                "to support Real-Time Chunking (run(rtc=True)). "
                 f"See {_EMBODIMENT_DOCS}"
             ),
             context={
@@ -871,6 +973,7 @@ class Robot:
         prompt: str,
         max_duration: float = 30.0,
         stream: bool = False,
+        rtc: bool = False,
     ) -> RunResult | Generator[np.ndarray, None, None]:
         """Run inference.
 
@@ -881,6 +984,16 @@ class Robot:
                           Library still calls read_state() per chunk; execute()
                           is never called. If False (default), drive the loop
                           internally and return RunResult.
+            rtc:          If True, run the Real-Time Chunking loop: a sender/
+                          receiver thread owns the WS while execute() plays from
+                          a continuously-refreshed chunk buffer, so the next chunk
+                          is generated WHILE the current one executes (no full stop
+                          at the chunk boundary). Requires an RTC-mode endpoint —
+                          the loop emits `progress` frames upstream that a
+                          non-RTC server would reject (close 4400). Mutually
+                          exclusive with stream=True. Additive: rtc=False (default)
+                          is byte-identical to the legacy blocking loop. See
+                          wiki/research/2026-06-12-rtc-feasibility.md.
 
         Raises:
             AuthError:             API key rejected by server (WS close 4001).
@@ -900,8 +1013,17 @@ class Robot:
                 "Construct Robot(api_key, embodiment, read_state, execute) to drive a robot, "
                 "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
             )
+        if rtc and stream:
+            raise TypeError(
+                "Robot.run(rtc=True, stream=True) is not supported. rtc=True drives "
+                "execute() internally with overlap; stream=True hands chunks to the "
+                "caller. Pick one: rtc=True for continuous-motion execution, or "
+                "stream=True to receive bare chunks yourself."
+            )
         if stream:
             return self._stream(prompt, max_duration)
+        if rtc:
+            return self._run_rtc(prompt, max_duration)
         return self._run_blocking(prompt, max_duration)
 
     def infer(self, obs: dict, prompt: str | None = None) -> InferenceResponse:
@@ -1147,6 +1269,232 @@ class Robot:
                 pass
         return RunResult(stop_reason=stop_reason)
 
+    # -----------------------------------------------------------------------
+    # Real-Time Chunking (RTC) — rtc=True loop
+    # -----------------------------------------------------------------------
+    # The legacy loop is strict ping-pong: send obs → block on recv → play the
+    # whole chunk → repeat. Nothing overlaps, so the arm fully stops at every
+    # chunk boundary while inference runs (0.8–2.5 s per boundary).
+    #
+    # RTC overlaps generation with execution. The split (per the feasibility
+    # doc — the SDK is sync websockets, no asyncio):
+    #
+    #   WS thread  : owns the socket. Sends obs, blocks on recv, decodes the
+    #                action frame, drops {chunk, prefix_len} into a single-slot
+    #                buffer, immediately reads fresh state and sends the next obs
+    #                so the server is already generating N+1 while the execute
+    #                thread plays N. Also sends `progress` frames upstream.
+    #   main thread: pulls the newest chunk from the buffer and plays it via
+    #                execute(). When a newer chunk lands mid-play, execute()
+    #                preempts (two-arg path) or finishes the current chunk
+    #                (one-arg fallback), then the loop SPLICES to the new chunk.
+    #
+    # ── The splice index math (the load-bearing convention) ──────────────────
+    # When chunk N+1 arrives it carries `prefix_len = p`: the server froze its
+    # first p actions to agree with what the client already executed/has in
+    # flight (the inpainting prefix). Those p actions are NOT replayed.
+    #
+    #   CONVENTION: prefix_len is the RESUME INDEX into the new chunk — execution
+    #   continues at new-chunk index p, i.e. new_chunk[p] is the first action we
+    #   play. We never compute p ourselves from the old index; the server derived
+    #   it from the `progress` frames we sent, so it already encodes how far we
+    #   got. This is the off-by-one's home: if we resumed at p-1 we'd repeat the
+    #   last frozen action (a stutter); if at p+1 we'd skip a fresh action (a
+    #   gap). Resume == prefix_len exactly. prefix_len absent or 0 → resume at 0
+    #   (play the whole new chunk; no inpainting overlap claimed by the server).
+    #
+    # `should_abort()` returns True the instant a newer chunk is buffered, so a
+    # two-arg execute can stop at its current action and hand control back for an
+    # immediate splice. A one-arg execute can't be interrupted, so it plays each
+    # chunk to its end and only then splices at the boundary (coarser, still
+    # correct) — with a one-time warning naming the upgrade path.
+
+    def _run_rtc(self, prompt: str, max_duration: float) -> RunResult:
+        return _with_verifier_retry(
+            lambda: self._run_rtc_once(prompt, max_duration)
+        )
+
+    def _run_rtc_once(self, prompt: str, max_duration: float) -> RunResult:
+        import time as _time
+
+        self._degradation_warned = False
+
+        # Resolve execute() arity once. One-arg → boundary-only splicing + warn.
+        arity = _execute_arity(self._execute)
+        two_arg = arity == _EXECUTE_ARITY_TWO
+        if not two_arg:
+            warnings.warn(
+                RTCBoundarySplicingWarning(
+                    "rtc=True with a one-arg execute(chunk): the runtime cannot "
+                    "preempt a chunk mid-play, so chunks are spliced only at "
+                    "boundaries (no mid-chunk inpainting overlap). Upgrade to "
+                    "execute(chunk, should_abort) — poll should_abort() between "
+                    "actions and return early when it's True — for continuous "
+                    "mid-chunk RTC."
+                ),
+                stacklevel=4,
+            )
+
+        ws = self._ws_connect()
+
+        # Single-slot buffer: the newest {chunk, prefix_len} from the server. A
+        # newer write overwrites an unread older one — we only ever want the
+        # freshest plan (stale chunks are exactly what RTC discards).
+        buffer: "queue.Queue[dict | None]" = queue.Queue(maxsize=1)
+        # Serialize SENDS only (obs from the WS thread, progress from the execute
+        # thread). recv() is owned exclusively by the WS thread and is NOT held
+        # under this lock — websockets.sync allows concurrent send/recv from
+        # different threads, and holding the lock across the ~1.6s blocking recv
+        # would stall the progress frames RTC needs to emit DURING execution.
+        send_lock = threading.Lock()
+        stop_event = threading.Event()
+        ws_error: list[BaseException] = []  # WS-thread exception, surfaced to main
+        stop_reason_box: list[str] = ["error"]
+
+        # action_index is the count of actions the EXECUTE thread has committed
+        # in the current chunk's frame of reference; the WS thread reads it to
+        # stamp `progress` frames. Guarded by its own lock — a plain int write is
+        # atomic in CPython but the lock documents the cross-thread contract.
+        progress_lock = threading.Lock()
+        committed_index = [0]
+
+        def _put_latest(item: dict | None) -> None:
+            # Overwrite-on-full single-slot semantics.
+            try:
+                buffer.put_nowait(item)
+            except queue.Full:
+                try:
+                    buffer.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    buffer.put_nowait(item)
+                except queue.Full:
+                    pass
+
+        def _send_progress(action_index: int) -> None:
+            # `progress` is an rtc-mode-only upstream frame. A non-RTC server
+            # would close 4400 on it — guarded by rtc=True selecting an RTC
+            # endpoint. K-cadence + boundary emission per the wire contract.
+            frame = {"type": "progress", "action_index": int(action_index)}
+            with send_lock:
+                try:
+                    ws.send(_pack(frame))
+                except ConnectionClosed:
+                    stop_event.set()
+
+        def _ws_loop() -> None:
+            first = True
+            try:
+                while not stop_event.is_set():
+                    obs = self._read_state()
+                    frame = _build_obs_frame(
+                        obs, prompt,
+                        max_duration if first else None,
+                        self._model if first else None,
+                    )
+                    first = False
+                    with send_lock:
+                        try:
+                            ws.send(_pack(frame))
+                        except ConnectionClosed:
+                            break
+                    # recv() outside the send lock: it blocks for the full
+                    # inference roundtrip, during which the execute thread must
+                    # still be able to send progress frames.
+                    try:
+                        raw = ws.recv()
+                    except ConnectionClosed as exc:
+                        _check_close_error(exc, self._model)
+                        break
+                    parsed = _unpack(raw)
+                    _check_error_envelope_frame(parsed)
+                    ftype = _str_field(parsed, "type")
+                    if ftype == "action":
+                        if not self._degradation_warned:
+                            self._degradation_warned = True
+                            _maybe_warn_degradation(parsed, self._model)
+                        # prefix_len: optional int on the action frame. Absent or
+                        # non-int → 0 (resume at chunk start; no claimed overlap).
+                        prefix_len = _decode_key(parsed, "prefix_len")
+                        if not isinstance(prefix_len, int) or prefix_len < 0:
+                            prefix_len = 0
+                        _put_latest(
+                            {"chunk": parsed.get("chunk"), "prefix_len": prefix_len}
+                        )
+                    elif ftype == "terminal":
+                        stop_reason_box[0] = (
+                            _str_field(parsed, "stop_reason") or "error"
+                        )
+                        break
+            except BaseException as exc:  # noqa: BLE001 — re-raised on main thread
+                ws_error.append(exc)
+            finally:
+                stop_event.set()
+                _put_latest(None)  # unblock the execute thread's buffer wait
+
+        ws_thread = threading.Thread(target=_ws_loop, name="newt-rtc-ws", daemon=True)
+        ws_thread.start()
+
+        deadline = _time.monotonic() + max_duration
+        try:
+            while not stop_event.is_set():
+                if _time.monotonic() >= deadline:
+                    stop_reason_box[0] = "max_duration"
+                    break
+                try:
+                    item = buffer.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if item is None:  # sentinel — WS thread is done
+                    break
+
+                chunk = item["chunk"]
+                start = item["prefix_len"]  # ← resume index == prefix_len
+                with progress_lock:
+                    committed_index[0] = start
+                # boundary progress frame: report the splice point upstream.
+                _send_progress(start)
+
+                if chunk is None:
+                    continue
+                n = chunk.shape[0] if getattr(chunk, "shape", None) else len(chunk)
+                if start >= n:
+                    # Whole chunk is frozen prefix — nothing fresh to play.
+                    continue
+
+                played = chunk[start:]  # the fresh tail the client actually plays
+
+                if two_arg:
+                    # should_abort fires the instant a newer chunk is buffered.
+                    def _should_abort() -> bool:
+                        return (not buffer.empty()) or stop_event.is_set()
+
+                    # Wrap should_abort so each poll also advances committed_index
+                    # and emits a K-cadence progress frame. The execute() loop
+                    # polls should_abort between actions (the starter already
+                    # polls _check_emergency_stop per action), so this is our
+                    # per-action hook for progress without a second callback.
+                    self._execute(played, _make_rtc_abort(
+                        _should_abort, start, progress_lock, committed_index,
+                        _send_progress,
+                    ))
+                else:
+                    # One-arg execute: plays the whole tail, no preemption.
+                    self._execute(played)
+        finally:
+            stop_event.set()
+            ws_thread.join(timeout=2.0)
+            with send_lock:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        if ws_error:
+            raise ws_error[0]
+        return RunResult(stop_reason=stop_reason_box[0])
+
     def _stream(
         self, prompt: str, max_duration: float
     ) -> Generator[np.ndarray, None, None]:
@@ -1335,6 +1683,51 @@ def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
         ),
         stacklevel=3,
     )
+
+
+# ---------------------------------------------------------------------------
+# RTC progress + abort plumbing
+# ---------------------------------------------------------------------------
+
+_RTC_PROGRESS_K = 5  # emit a progress frame every K actions (plus at each boundary)
+
+
+def _make_rtc_abort(
+    should_abort: Callable[[], bool],
+    start_index: int,
+    progress_lock: "threading.Lock",
+    committed_index: list,
+    send_progress: Callable[[int], None],
+) -> Callable[[], bool]:
+    """Build the should_abort callable handed to a two-arg execute().
+
+    The execute() loop polls this between actions (the same cadence the starter
+    polls _check_emergency_stop). Each poll does three things:
+      1. advance committed_index by one action (we're about to play the next),
+      2. emit a `progress` frame every _RTC_PROGRESS_K actions (the K-cadence
+         half of the wire contract; boundaries are emitted separately),
+      3. return whether execute() should stop early (newer chunk buffered, or
+         the run is ending).
+
+    `start_index` is the new chunk's resume index (== prefix_len) so the reported
+    action_index is in the chunk's own frame of reference. The counter starts at
+    start_index and increments per poll; on the K-th action it sends progress.
+    """
+    # Mutable cell closed over by the inner fn. counter[0] is the current
+    # absolute action index within the new chunk (resume point + actions played).
+    counter = [start_index]
+
+    def _abort() -> bool:
+        idx = counter[0]
+        counter[0] = idx + 1
+        with progress_lock:
+            committed_index[0] = counter[0]
+        # K-cadence emission (boundary frame already sent by the caller at splice).
+        if (counter[0] - start_index) % _RTC_PROGRESS_K == 0:
+            send_progress(counter[0])
+        return should_abort()
+
+    return _abort
 
 
 # ---------------------------------------------------------------------------

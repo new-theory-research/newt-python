@@ -34,6 +34,10 @@ Public surface:
                                  are absent; actions succeed but may be degraded
 - `newt.EnvOverrideWarning`   — warnings.warn'd once per Robot instance when
                                  NT_INFERENCE_URL is set, bypassing /v1/models discovery
+- `newt.RTCBoundarySplicingWarning` — warnings.warn'd once per run(rtc=True) when
+                                 execute() is one-arg; RTC splices at chunk boundaries
+                                 only (no mid-chunk preemption). Upgrade to
+                                 execute(chunk, should_abort) for continuous motion
 - `newt.VerifierTransientRetry` — warnings.warn'd once per call on first retry when the
                                  key verifier is temporarily unavailable (WS close 4503,
                                  type "verifier.unavailable"); SDK retries automatically
@@ -64,6 +68,7 @@ from newt._client.robot import (
     ProtocolError,
     RegistryUnavailable,
     Robot,
+    RTCBoundarySplicingWarning,
     RunResult,
     ServerError,
     VerifierError,
@@ -87,6 +92,7 @@ __all__ = [
     "NewTheoryError",
     "ProtocolError",
     "RegistryUnavailable",
+    "RTCBoundarySplicingWarning",
     "Robot",
     "RunResult",
     "ServerError",
