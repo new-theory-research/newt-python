@@ -284,6 +284,58 @@ def test_rtc_multi_chunk_splice_sequence(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# rtc-enable handshake — the client must TELL the server it's RTC
+# ---------------------------------------------------------------------------
+
+def test_rtc_first_obs_frame_carries_rtc_flag(monkeypatch):
+    """run(rtc=True) MUST stamp rtc=true on the FIRST obs frame.
+
+    WHY (Rule 7): the server's RTC mode is opt-in via this field (or a ?rtc=true
+    query param). If the client never sends either, the server silently runs
+    VANILLA inference — no inpainting, no overlap, the chunk-boundary seam never
+    closes — and nothing errors. That fail-silent gap is exactly what this test
+    pins: the rtc flag must be present on the first frame and absent thereafter
+    (it is a session-open signal, not a per-frame one).
+    """
+    c0 = np.arange(6, dtype=np.float32).reshape(6, 1)
+    c1 = (np.arange(6, dtype=np.float32) + 100).reshape(6, 1)
+    mock = MockWS([
+        _action_frame(c0, prefix_len=0),
+        _action_frame(c1, prefix_len=2),
+        _terminal(),
+    ])
+    robot, _ = _make_robot(monkeypatch, mock)
+    robot._execute = lambda c: None
+
+    robot.run("test", max_duration=5.0, rtc=True)
+
+    obs_frames = [f for f in mock.sent if f.get("type") == "obs"]
+    assert obs_frames, "expected at least one obs frame"
+    # First obs enables RTC; the server reads rtc=true off exactly this frame.
+    assert obs_frames[0].get("rtc") is True, (
+        "first obs frame must carry rtc=true or the server runs vanilla "
+        "(fail-silent: no overlap, seam never closes)"
+    )
+    # Subsequent obs frames don't repeat it (session-open signal, like max_duration).
+    for f in obs_frames[1:]:
+        assert not f.get("rtc"), "rtc flag should only be on the first obs frame"
+
+
+def test_non_rtc_run_never_sends_rtc_flag(monkeypatch):
+    """A normal run() (rtc=False) must NEVER stamp the rtc field — additive-safe."""
+    chunk = np.arange(4, dtype=np.float32).reshape(4, 1)
+    mock = MockWS([_action_frame(chunk), _terminal()])
+    robot, _ = _make_robot(monkeypatch, mock)
+    robot._execute = lambda c: None
+
+    robot.run("test", max_duration=5.0)  # rtc defaults to False
+
+    obs_frames = [f for f in mock.sent if f.get("type") == "obs"]
+    for f in obs_frames:
+        assert "rtc" not in f, "non-RTC run must not send the rtc field"
+
+
+# ---------------------------------------------------------------------------
 # progress-frame emission
 # ---------------------------------------------------------------------------
 

@@ -1392,12 +1392,18 @@ class Robot:
                         obs, prompt,
                         max_duration if first else None,
                         self._model if first else None,
+                        rtc=first,  # enable RTC mode via the first-obs field
                     )
                     first = False
                     with send_lock:
                         try:
                             ws.send(_pack(frame))
-                        except ConnectionClosed:
+                        except ConnectionClosed as exc:
+                            # A clean (1000) close here means the server ended the
+                            # session normally (its own max_duration) while we were
+                            # sending the next obs — the terminal frame raced the
+                            # send. Reflect clean termination, not stop_reason=error.
+                            _note_normal_close(exc, stop_reason_box)
                             break
                     # recv() outside the send lock: it blocks for the full
                     # inference roundtrip, during which the execute thread must
@@ -1406,6 +1412,7 @@ class Robot:
                         raw = ws.recv()
                     except ConnectionClosed as exc:
                         _check_close_error(exc, self._model)
+                        _note_normal_close(exc, stop_reason_box)
                         break
                     parsed = _unpack(raw)
                     _check_error_envelope_frame(parsed)
@@ -1621,7 +1628,11 @@ def list_models(api_key: str, base_url: str | None = None) -> list[dict]:
 
 
 def _build_obs_frame(
-    obs: dict, prompt: str, max_duration: float | None, model: str | None = None
+    obs: dict,
+    prompt: str,
+    max_duration: float | None,
+    model: str | None = None,
+    rtc: bool = False,
 ) -> dict:
     frame = {k: v for k, v in obs.items()}
     frame["type"] = "obs"
@@ -1631,6 +1642,12 @@ def _build_obs_frame(
         frame["max_duration"] = max_duration
     if model is not None:
         frame["model"] = model
+    # rtc=true is read off the FIRST obs frame by the RTC server (the obs-field
+    # enable path; the alternative is a ?rtc=true query param). Only stamped on the
+    # first frame of an RTC session — without it the server runs vanilla and the
+    # chunk-boundary seam never closes (fail-silent), so this is load-bearing.
+    if rtc:
+        frame["rtc"] = True
     return frame
 
 
@@ -1782,6 +1799,25 @@ def _check_error_envelope_frame(parsed: dict) -> None:
     NewTheoryError.__init__(inst, code=code, type=type_, message=message,
                             context=context, docs=docs, trace_id=trace_id)
     raise inst
+
+
+_WS_CLOSE_NORMAL = 1000  # RFC 6455 normal closure — server ended the session cleanly.
+
+
+def _note_normal_close(exc: ConnectionClosed, stop_reason_box: list) -> None:
+    """Mark a clean (1000) server close as a normal max_duration stop.
+
+    In the RTC loop the server enforces its OWN max_duration: it sends a terminal
+    frame then closes with code 1000. If that close races a client send/recv, the
+    terminal frame may not be read first, leaving stop_reason at its "error"
+    default. A 1000 close is a NORMAL end-of-session — surface it as "max_duration"
+    (the server's deadline) rather than a spurious error. Only upgrades the default;
+    a real terminal frame's reason (already set) is never overwritten.
+    """
+    rcvd = getattr(exc, "rcvd", None)
+    code = getattr(rcvd, "code", None) if rcvd else None
+    if code == _WS_CLOSE_NORMAL and stop_reason_box[0] == "error":
+        stop_reason_box[0] = "max_duration"
 
 
 def _check_close_error(exc: ConnectionClosed, model: str | None = None) -> None:
