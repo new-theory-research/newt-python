@@ -498,6 +498,91 @@ def test_rtc_run_requires_callbacks(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# on_chunk instrumentation hook (brief-304 v2) — surfaces the RAW prefix_len
+# ---------------------------------------------------------------------------
+
+def test_on_chunk_reports_raw_and_used_prefix_len(monkeypatch):
+    """on_chunk sees both the raw wire prefix_len and the value the SDK resumes at."""
+    chunk = np.arange(10, dtype=np.float32).reshape(10, 1)
+    mock = MockWS([_action_frame(chunk, prefix_len=3), _terminal()])
+    robot, _ = _make_robot(monkeypatch, mock)
+    robot._execute = lambda c: None
+
+    seen = []
+    robot.run("test", max_duration=5.0, rtc=True, on_chunk=lambda d: seen.append(d))
+
+    assert len(seen) == 1
+    assert seen[0]["prefix_len_raw"] == 3
+    assert seen[0]["prefix_len_used"] == 3
+    assert seen[0]["chunk_len"] == 10
+
+
+def test_on_chunk_absent_prefix_len_is_none_not_zero(monkeypatch):
+    """A MISSING prefix_len reaches on_chunk as raw=None — absence is data, not 0.
+
+    WHY (Rule 10): the wire makes prefix_len optional. The SDK clamps absence to
+    0 for execution, but instrumentation must be able to DISTINGUISH "server sent
+    0" from "server sent nothing" — the clamp must not erase that signal.
+    """
+    chunk = np.arange(4, dtype=np.float32).reshape(4, 1)
+    mock = MockWS([_action_frame(chunk), _terminal()])  # no prefix_len
+    robot, _ = _make_robot(monkeypatch, mock)
+    robot._execute = lambda c: None
+
+    seen = []
+    robot.run("test", max_duration=5.0, rtc=True, on_chunk=lambda d: seen.append(d))
+
+    assert len(seen) == 1
+    assert seen[0]["prefix_len_raw"] is None      # absent — NOT silently 0
+    assert seen[0]["prefix_len_used"] == 0         # what the SDK actually resumed at
+
+
+def test_on_chunk_anomalous_prefix_len_surfaced_unclamped(monkeypatch):
+    """prefix_len >= chunk_len reaches on_chunk as the raw out-of-range value.
+
+    The analyzer flags this loudly; the SDK must not hide it behind the clamp.
+    """
+    chunk = np.arange(5, dtype=np.float32).reshape(5, 1)
+    mock = MockWS([_action_frame(chunk, prefix_len=7), _terminal()])  # 7 >= 5
+    robot, _ = _make_robot(monkeypatch, mock)
+    robot._execute = lambda c: None
+
+    seen = []
+    robot.run("test", max_duration=5.0, rtc=True, on_chunk=lambda d: seen.append(d))
+
+    assert len(seen) == 1
+    assert seen[0]["prefix_len_raw"] == 7   # out-of-range value preserved
+    assert seen[0]["chunk_len"] == 5        # caller can detect 7 >= 5
+
+
+def test_on_chunk_callback_fault_never_breaks_run(monkeypatch):
+    """A raising on_chunk must not break the inference loop (diagnostics-only)."""
+    chunk = np.arange(4, dtype=np.float32).reshape(4, 1)
+    mock = MockWS([_action_frame(chunk), _terminal()])
+    robot, _ = _make_robot(monkeypatch, mock)
+    robot._execute = lambda c: None
+
+    def _boom(d):
+        raise RuntimeError("instrumentation should never take down the run")
+
+    result = robot.run("test", max_duration=5.0, rtc=True, on_chunk=_boom)
+    assert result.stop_reason == "max_duration"
+
+
+def test_on_chunk_none_is_default_no_behavior_change(monkeypatch):
+    """on_chunk defaults to None and the run behaves exactly as before."""
+    chunk = np.arange(6, dtype=np.float32).reshape(6, 1)
+    mock = MockWS([_action_frame(chunk, prefix_len=2), _terminal()])
+    robot, _ = _make_robot(monkeypatch, mock)
+
+    played = []
+    robot._execute = lambda c: played.append(c)
+    robot.run("test", max_duration=5.0, rtc=True)  # no on_chunk
+
+    np.testing.assert_array_equal(played[0], chunk[2:])
+
+
+# ---------------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------------
 

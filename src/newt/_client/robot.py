@@ -974,12 +974,22 @@ class Robot:
         max_duration: float = 30.0,
         stream: bool = False,
         rtc: bool = False,
+        on_chunk: Callable[[dict], None] | None = None,
     ) -> RunResult | Generator[np.ndarray, None, None]:
         """Run inference.
 
         Args:
             prompt:       Language instruction for the model.
             max_duration: Wall-clock time limit in seconds.
+            on_chunk:     Optional callback invoked once per action frame received
+                          in the rtc=True loop, BEFORE the SDK clamps prefix_len.
+                          Receives a dict {"prefix_len_raw": <decoded value, may be
+                          None/non-int/negative/≥len>, "prefix_len_used": <int the
+                          SDK actually resumes at>, "chunk_len": <int>}. It exists
+                          so instrumentation can SEE the raw wire value — including
+                          a missing or out-of-range prefix_len the SDK would
+                          otherwise clamp to 0 silently. None (default) = no
+                          callback, no behavior change. Ignored unless rtc=True.
             stream:       If True, return a generator yielding action chunks.
                           Library still calls read_state() per chunk; execute()
                           is never called. If False (default), drive the loop
@@ -1023,7 +1033,7 @@ class Robot:
         if stream:
             return self._stream(prompt, max_duration)
         if rtc:
-            return self._run_rtc(prompt, max_duration)
+            return self._run_rtc(prompt, max_duration, on_chunk)
         return self._run_blocking(prompt, max_duration)
 
     def infer(self, obs: dict, prompt: str | None = None) -> InferenceResponse:
@@ -1309,12 +1319,22 @@ class Robot:
     # chunk to its end and only then splices at the boundary (coarser, still
     # correct) — with a one-time warning naming the upgrade path.
 
-    def _run_rtc(self, prompt: str, max_duration: float) -> RunResult:
+    def _run_rtc(
+        self,
+        prompt: str,
+        max_duration: float,
+        on_chunk: Callable[[dict], None] | None = None,
+    ) -> RunResult:
         return _with_verifier_retry(
-            lambda: self._run_rtc_once(prompt, max_duration)
+            lambda: self._run_rtc_once(prompt, max_duration, on_chunk)
         )
 
-    def _run_rtc_once(self, prompt: str, max_duration: float) -> RunResult:
+    def _run_rtc_once(
+        self,
+        prompt: str,
+        max_duration: float,
+        on_chunk: Callable[[dict], None] | None = None,
+    ) -> RunResult:
         import time as _time
 
         self._degradation_warned = False
@@ -1423,11 +1443,30 @@ class Robot:
                             _maybe_warn_degradation(parsed, self._model)
                         # prefix_len: optional int on the action frame. Absent or
                         # non-int → 0 (resume at chunk start; no claimed overlap).
-                        prefix_len = _decode_key(parsed, "prefix_len")
+                        prefix_len_raw = _decode_key(parsed, "prefix_len")
+                        prefix_len = prefix_len_raw
                         if not isinstance(prefix_len, int) or prefix_len < 0:
                             prefix_len = 0
+                        chunk = parsed.get("chunk")
+                        # Surface the RAW wire value to instrumentation BEFORE the
+                        # clamp above hides a missing/out-of-range prefix_len.
+                        # Never let a callback fault break the inference loop.
+                        if on_chunk is not None:
+                            chunk_len = (
+                                chunk.shape[0]
+                                if getattr(chunk, "shape", None)
+                                else (len(chunk) if chunk is not None else 0)
+                            )
+                            try:
+                                on_chunk({
+                                    "prefix_len_raw": prefix_len_raw,
+                                    "prefix_len_used": prefix_len,
+                                    "chunk_len": chunk_len,
+                                })
+                            except Exception:
+                                pass
                         _put_latest(
-                            {"chunk": parsed.get("chunk"), "prefix_len": prefix_len}
+                            {"chunk": chunk, "prefix_len": prefix_len}
                         )
                     elif ftype == "terminal":
                         stop_reason_box[0] = (
