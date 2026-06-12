@@ -9,7 +9,7 @@ Protocol design: portal/wiki/specs/embodiment-noun.md
 """
 from __future__ import annotations
 
-from typing import Any, runtime_checkable
+from typing import runtime_checkable
 
 import numpy as np
 
