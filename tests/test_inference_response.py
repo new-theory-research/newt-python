@@ -23,7 +23,7 @@ _NT0_AXES = ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]
 _FAKE_REGISTRY = [
     {
         "uid": "ft_base_nt0fp3",
-        "tags": ["nt0-fp3"],
+        "tags": ["nt0", "nt0-fp3"],
         "type": "base",
         "base": None,
         "endpoint": "wss://example/stream",
@@ -59,7 +59,7 @@ def test_repr_shows_shape_labels_and_latency():
     This is the exact string the brief promises a developer evaluating the API sees.
     """
     resp = InferenceResponse(
-        np.zeros((50, 8), dtype=np.float32), _NT0_AXES, 261.0, model="nt0-fp3"
+        np.zeros((50, 8), dtype=np.float32), _NT0_AXES, 261.0, model="nt0"
     )
     assert repr(resp) == (
         "action_chunk (50, 8): x, y, z, qw, qx, qy, qz, gripper | latency 261ms"
@@ -79,7 +79,8 @@ def test_action_chunk_is_canonical_no_regression():
 def test_registry_resolves_labels_for_base_tag_and_finetune():
     """Labels resolve by default-UID, by tag, and for inherited fine-tune contracts."""
     assert _resolve_action_axes(_FAKE_REGISTRY, None) == _NT0_AXES  # default UID
-    assert _resolve_action_axes(_FAKE_REGISTRY, "nt0-fp3") == _NT0_AXES  # base tag
+    assert _resolve_action_axes(_FAKE_REGISTRY, "nt0") == _NT0_AXES  # primary base tag
+    assert _resolve_action_axes(_FAKE_REGISTRY, "nt0-fp3") == _NT0_AXES  # legacy alias still resolves (T1)
     assert _resolve_action_axes(_FAKE_REGISTRY, "clean_table") == _NT0_AXES  # ft tag
 
 

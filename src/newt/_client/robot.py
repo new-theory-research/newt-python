@@ -1041,7 +1041,7 @@ class Robot:
             if self._cold_start_retry_consumed:
                 raise
             self._cold_start_retry_consumed = True
-            model_str = self._model or "nt0-fp3"
+            model_str = self._model or "nt0"
             warnings.warn(
                 ColdStartRetry(
                     f"Cold-start retry for model={model_str!r} "
@@ -1326,7 +1326,7 @@ def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
     if not missing:
         return
     missing_strs = [c.decode() if isinstance(c, bytes) else c for c in missing]
-    model_str = model or "nt0-fp3"
+    model_str = model or "nt0"
     warnings.warn(
         DegradationWarning(
             f"Model {model_str!r} expected cameras not all present. "

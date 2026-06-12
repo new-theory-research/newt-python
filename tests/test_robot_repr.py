@@ -2,7 +2,7 @@
 
 Why these matter:
   The public docs' milestone-1 finish line shows an exact string:
-      nt0-fp3 · contract received · (50,8) · 8 labeled axes
+      nt0 · contract received · (50,8) · 8 labeled axes
   Before this brief, print(Robot()) emitted the default Python object repr —
   making the documented receipt a lie. These tests pin the string so the docs
   can't drift silently.
@@ -19,7 +19,7 @@ _NT0_AXES = [
 _FULL_REGISTRY = [
     {
         "uid": "ft_base_nt0fp3",
-        "tags": ["nt0-fp3"],
+        "tags": ["nt0", "nt0-fp3"],
         "type": "fine_tune",
         "base": "base_nt0fp3",
         "endpoint": "wss://example/stream",
@@ -50,29 +50,31 @@ def test_repr_full_contract_matches_docs_receipt():
     guide silently lies to every new developer.
     """
     robot = _make_robot(_FULL_REGISTRY)
-    expected = "nt0-fp3 · contract received · (50,8) · 8 labeled axes"
+    expected = "nt0 · contract received · (50,8) · 8 labeled axes"
     assert repr(robot) == expected
     assert str(robot) == expected  # AC 3: __str__ == __repr__
 
 
 def test_repr_uses_tag_over_uid():
-    """Display name is the first tag (nt0-fp3), not the raw UID (ft_base_nt0fp3).
+    """Display name is the primary (first) tag nt0, not the raw UID (ft_base_nt0fp3)
+    and not the legacy alias nt0-fp3.
 
     The docs example uses the human-friendly tag. A raw UID in the repr would
-    confuse developers who typed the tag in their code.
+    confuse developers who typed the tag in their code. startswith pins the
+    primary tag specifically — the alias nt0-fp3 would fail this assert.
     """
     robot = _make_robot(_FULL_REGISTRY)
-    assert "nt0-fp3" in repr(robot)
+    assert repr(robot).startswith("nt0 ")
     assert "ft_base_nt0fp3" not in repr(robot)
 
 
 def test_repr_explicit_model_arg():
-    """Robot(model='nt0-fp3') resolves the same display string as Robot().
+    """Robot(model='nt0') resolves the same display string as Robot().
 
     model=None falls back to _DEFAULT_MODEL_UID which resolves to the same entry.
     """
     robot_default = _make_robot(_FULL_REGISTRY, model=None)
-    robot_explicit = _make_robot(_FULL_REGISTRY, model="nt0-fp3")
+    robot_explicit = _make_robot(_FULL_REGISTRY, model="nt0")
     assert repr(robot_default) == repr(robot_explicit)
 
 
@@ -102,7 +104,7 @@ def test_repr_contract_missing_axes_degrades():
     registry_no_axes = [
         {
             "uid": "ft_base_nt0fp3",
-            "tags": ["nt0-fp3"],
+            "tags": ["nt0", "nt0-fp3"],
             "endpoint": "wss://example/stream",
             "contract": {"action_shape": [50, 8]},  # axes missing
         }
@@ -110,7 +112,7 @@ def test_repr_contract_missing_axes_degrades():
     robot = _make_robot(registry_no_axes)
     result = repr(robot)
     assert "contract received" not in result
-    assert "nt0-fp3" in result  # still shows the model name
+    assert "nt0" in result  # still shows the model name
     assert isinstance(result, str)
 
 
@@ -119,7 +121,7 @@ def test_repr_contract_missing_shape_degrades():
     registry_no_shape = [
         {
             "uid": "ft_base_nt0fp3",
-            "tags": ["nt0-fp3"],
+            "tags": ["nt0", "nt0-fp3"],
             "endpoint": "wss://example/stream",
             "contract": {"action_axes": _NT0_AXES},  # shape missing
         }
