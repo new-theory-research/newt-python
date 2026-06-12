@@ -117,7 +117,7 @@ You've confirmed the API works. To drive a real robot:
 3. **Run the hardware check.**
 
    ```bash
-   python run.py --check
+   python3 run.py --check
    ```
 
    This verifies your config and hardware connectivity before any inference runs.
