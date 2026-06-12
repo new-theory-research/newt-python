@@ -14,7 +14,11 @@ from __future__ import annotations
 import numpy as np
 
 import newt
-from newt._client.robot import InferenceResponse, _resolve_action_axes
+from newt._client.robot import (
+    InferenceResponse,
+    _resolve_action_axes,
+    _resolve_model_endpoint,
+)
 
 _NT0_AXES = ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]
 
@@ -82,6 +86,24 @@ def test_registry_resolves_labels_for_base_tag_and_finetune():
     assert _resolve_action_axes(_FAKE_REGISTRY, "nt0") == _NT0_AXES  # primary base tag
     assert _resolve_action_axes(_FAKE_REGISTRY, "nt0-fp3") == _NT0_AXES  # legacy alias still resolves (T1)
     assert _resolve_action_axes(_FAKE_REGISTRY, "clean_table") == _NT0_AXES  # ft tag
+
+
+def test_golden_legacy_fp3_alias_resolves_to_same_endpoint():
+    """A stale install still works: model="nt0-fp3" routes to the same endpoint as "nt0".
+
+    This is the non-breaking promise (T1) behind the rename. A cloned starter or an
+    old install that hardcoded model="nt0-fp3" keeps resolving — the legacy alias and
+    the customer-facing tag both land on the one base endpoint. The day the alias
+    stops resolving, every stale client breaks silently; this golden guards that day.
+    Sunset date for the alias is recorded in the brief closeout.
+    """
+    primary = _resolve_model_endpoint(_FAKE_REGISTRY, "nt0", "https://reg.example")
+    legacy = _resolve_model_endpoint(_FAKE_REGISTRY, "nt0-fp3", "https://reg.example")
+
+    assert legacy == primary == "wss://example/stream", (
+        f"legacy alias must resolve to the same endpoint as the primary tag: "
+        f"primary={primary!r} legacy={legacy!r}"
+    )
 
 
 def test_registry_returns_none_when_no_labels():

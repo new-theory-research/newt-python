@@ -42,11 +42,14 @@ def _run(args: list[str], monkeypatch, models_return=None, side_effect=None):
     return exit_code, captured_out.getvalue(), captured_err.getvalue()
 
 
-# Real 7-model registry payload (structure matches live API)
+# Real 7-model registry payload (structure mirrors the live API, which mirrors
+# model_registry.yaml). Post brief-253a: customer-facing `nt0` tags lead; the
+# `nt0-fp3` legacy aliases are retained AFTER them so stale installs keep
+# resolving (T1) but never surface in human output.
 _REAL_7_MODELS = [
     {
         "uid": "ft_base_nt0fp3",
-        "tags": ["nt0-fp3"],
+        "tags": ["nt0", "nt0-fp3"],
         "type": "base",
         "base": None,
         "contract": {
@@ -55,21 +58,21 @@ _REAL_7_MODELS = [
     },
     {
         "uid": "ft_4hn40z6a",
-        "tags": ["nt0-fp3-pour-coffee-beans", "pour-coffee-beans"],
+        "tags": ["nt0-pour-coffee-beans", "nt0-fp3-pour-coffee-beans", "pour-coffee-beans"],
         "type": "fine_tune",
         "base": "ft_base_nt0fp3",
         "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
     },
     {
         "uid": "ft_6d0cfd51_e63fbb",
-        "tags": ["nt0-fp3-clean-table"],
+        "tags": ["nt0-clean-table", "nt0-fp3-clean-table"],
         "type": "fine_tune",
         "base": "ft_base_nt0fp3",
         "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
     },
     {
         "uid": "ft_6d0cfd51_c9d8ba",
-        "tags": ["nt0-fp3-pour-coffee-beans-wm"],
+        "tags": ["nt0-pour-coffee-beans-wm", "nt0-fp3-pour-coffee-beans-wm"],
         "type": "fine_tune",
         "base": "ft_base_nt0fp3",
         "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
@@ -117,17 +120,18 @@ def test_grouped_layout_three_families():
 
 
 def test_grouped_layout_base_names_lead():
-    """Base display names lead each family group — nt0-fp3 / molmoact2 / pi05_aloha.
+    """Base display names lead each family group — nt0 / molmoact2 / pi05_aloha.
 
     The human name (primary tag) should appear first on the base line, not the
-    opaque uid. A developer picking a model should find it by name.
+    opaque uid. A developer picking a model should find it by name. Post-253a the
+    customer-facing name is `nt0`, never the `nt0-fp3` legacy alias.
     """
     output = _render_models(_REAL_7_MODELS)
     lines = output.splitlines()
     # Base lines are the non-indented ones
     base_lines = [l for l in lines if l and not l.startswith("    ")]
     names = [l.split()[0] for l in base_lines]
-    assert names == ["nt0-fp3", "molmoact2", "pi05_aloha"], (
+    assert names == ["nt0", "molmoact2", "pi05_aloha"], (
         f"base display names must lead each group in order: {names!r}"
     )
 
@@ -146,8 +150,8 @@ def test_grouped_layout_fine_tunes_indented():
     )
 
 
-def test_axes_appear_once_on_nt0fp3_base_only():
-    """Action axes appear exactly once: on the nt0-fp3 base line.
+def test_axes_appear_once_on_nt0_base_only():
+    """Action axes appear exactly once: on the nt0 base line.
 
     Fine-tunes inherit axes — repeating them on every fine-tune line was noise.
     molmoact2 and pi05_aloha have no action_axes so they get none. This test
@@ -162,9 +166,9 @@ def test_axes_appear_once_on_nt0fp3_base_only():
         f"axes fragment must appear exactly once, got {len(axes_lines)}: {axes_lines!r}"
     )
 
-    # That one line must be the nt0-fp3 base line
-    assert "nt0-fp3" in axes_lines[0], (
-        f"axes line must be the nt0-fp3 base, got: {axes_lines[0]!r}"
+    # That one line must be the nt0 base line (display name leads it)
+    assert axes_lines[0].split()[0] == "nt0", (
+        f"axes line must be the nt0 base, got: {axes_lines[0]!r}"
     )
 
     # All axes present on that line
@@ -192,12 +196,14 @@ def test_axes_absent_on_contract_less_bases():
 
 
 def test_name_derivation_task_tags():
-    """Fine-tune task names derive correctly from tags, not raw uids.
+    """Fine-tune task names derive from the PRIMARY tag, prefix stripped — never an alias.
 
-    pour-coffee-beans — shortest non-prefixed tag wins.
-    clean-table — single base-prefixed tag, strip prefix.
-    pour-coffee-beans-wm — strip prefix, only candidate.
-    bimanual-yam — all tags share molmoact2- prefix; strip + take longest.
+    Each label is tags[0] with the base prefix removed:
+    pour-coffee-beans — nt0-pour-coffee-beans → strip nt0-.
+    clean-table — nt0-clean-table → strip nt0- (the legacy alias nt0-fp3-clean-table
+        sits at tags[1] and must NOT win; that was the fp3-leak this brief kills).
+    pour-coffee-beans-wm — nt0-pour-coffee-beans-wm → strip nt0-.
+    yam — molmoact2-yam → strip molmoact2- (primary tag, not the longer alias).
     """
     output = _render_models(_REAL_7_MODELS)
     lines = output.splitlines()
@@ -207,7 +213,7 @@ def test_name_derivation_task_tags():
     assert "pour-coffee-beans" in task_names, f"task names: {task_names!r}"
     assert "clean-table" in task_names, f"task names: {task_names!r}"
     assert "pour-coffee-beans-wm" in task_names, f"task names: {task_names!r}"
-    assert "bimanual-yam" in task_names, f"task names: {task_names!r}"
+    assert "yam" in task_names, f"task names: {task_names!r}"
 
 
 def test_fine_tune_uids_visible():
@@ -234,7 +240,7 @@ def test_uid_alignment_within_family():
     in_nt0 = False
     for line in lines:
         if line and not line.startswith("    "):
-            in_nt0 = "nt0-fp3" in line
+            in_nt0 = line.split()[0] == "nt0"
         elif in_nt0 and line.startswith("    "):
             nt0_fts.append(line)
 
@@ -312,7 +318,7 @@ def test_orphan_renders_at_top_level_before_families():
         },
         {
             "uid": "ft_base_nt0fp3",
-            "tags": ["nt0-fp3"],
+            "tags": ["nt0", "nt0-fp3"],
             "type": "base",
             "base": None,
             "contract": {"action_axes": ["x", "y", "z"]},
@@ -323,7 +329,7 @@ def test_orphan_renders_at_top_level_before_families():
     non_empty = [l for l in lines if l.strip()]
     # Orphan must come before any family
     orphan_idx = next(i for i, l in enumerate(non_empty) if "ft_orphan_abc123" in l)
-    base_idx = next(i for i, l in enumerate(non_empty) if "nt0-fp3" in l)
+    base_idx = next(i for i, l in enumerate(non_empty) if l.split()[0] == "nt0")
     assert orphan_idx < base_idx, "orphan must appear before family groups"
     # Orphan line is not indented
     orphan_line = non_empty[orphan_idx]
@@ -361,9 +367,9 @@ def test_models_renders_axes_from_contract(monkeypatch):
 
     assert exit_code == 0
     lines = out.splitlines()
-    nt0_base_line = next(l for l in lines if "nt0-fp3" in l and not l.startswith("    "))
+    nt0_base_line = next(l for l in lines if l.split() and l.split()[0] == "nt0")
 
-    assert "axes" in nt0_base_line, f"axes must render on the nt0-fp3 base line: {nt0_base_line!r}"
+    assert "axes" in nt0_base_line, f"axes must render on the nt0 base line: {nt0_base_line!r}"
     assert "gripper" in nt0_base_line, f"axis labels must appear: {nt0_base_line!r}"
 
     # Fine-tune lines must NOT repeat axes
@@ -410,6 +416,54 @@ def test_models_json_unchanged_by_renderer(monkeypatch):
     # Must parse to the original list with no modification
     parsed = json.loads(out)
     assert parsed == _REAL_7_MODELS, "json output must be the raw models list, unmodified"
+
+
+# ---------------------------------------------------------------------------
+# Golden (brief-253a): no human-facing CLI text contains "fp3"
+# ---------------------------------------------------------------------------
+
+def test_golden_no_fp3_in_human_facing_output():
+    """A developer reading `newt models` never SEES "fp3" — the rename's whole point.
+
+    "FP3" is a training-run designation that leaked into the product name. The
+    legacy `nt0-fp3-*` alias tags stay in the registry so stale installs keep
+    resolving (T1), but they must never surface to a human. UIDs are exempt by
+    design — `ft_base_nt0fp3` is an immutable handle, renamed separately under
+    the design-gated brief-253c — so we mask the uids out before scanning, which
+    is exactly the carve-out the brief declares ("JSON/UID surfaces exempt").
+
+    This golden is the verification gate for the renderer fix: with the old
+    longest-stripped-remainder logic it printed "fp3-clean-table" and failed here.
+    """
+    output = _render_models(_REAL_7_MODELS)
+
+    # Mask uids — the one place "fp3" is allowed to appear (immutable handle).
+    scrubbed = output
+    for uid in (m["uid"] for m in _REAL_7_MODELS):
+        scrubbed = scrubbed.replace(uid, "")
+
+    assert "fp3" not in scrubbed.lower(), (
+        f"fp3 leaked into human-facing model names (uids masked out): {scrubbed!r}"
+    )
+
+
+def test_golden_no_fp3_via_cmd_models_render_path(monkeypatch):
+    """The same guarantee through the real `newt models` command, not just the renderer.
+
+    Exercises cmd_models end-to-end (non-json path) so the gate covers what a
+    developer actually runs, not only the internal helper. Uids masked per the
+    same exemption.
+    """
+    exit_code, out, err = _run([], monkeypatch, models_return=_REAL_7_MODELS)
+    assert exit_code == 0, f"expected exit 0, got {exit_code}; stderr={err!r}"
+
+    scrubbed = out
+    for uid in (m["uid"] for m in _REAL_7_MODELS):
+        scrubbed = scrubbed.replace(uid, "")
+
+    assert "fp3" not in scrubbed.lower(), (
+        f"fp3 leaked into `newt models` output (uids masked out): {scrubbed!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

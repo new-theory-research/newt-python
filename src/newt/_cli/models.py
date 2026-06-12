@@ -37,23 +37,22 @@ def _display_name(model: dict[str, Any]) -> str:
 def _task_name(fine_tune: dict[str, Any], base_display: str) -> str:
     """Short task label for a fine-tune line.
 
-    Prefer a tag that does NOT start with '{base_display}-' (most readable).
-    If all tags share the base prefix, strip it and return the longest result
-    (more descriptive > shorter). Falls back to uid.
+    Derived from the PRIMARY (first) tag, mirroring `_display_name`'s tags[0]
+    semantics. The registry lists the customer-facing tag first and legacy
+    aliases after (e.g. ["nt0-clean-table", "nt0-fp3-clean-table"]), so taking
+    tags[0] guarantees an alias can never surface in human output. Strips the
+    base-display prefix when present so the label reads as just the task.
+    Falls back to uid when untagged.
     """
     tags = [t for t in (fine_tune.get("tags") or []) if t]
     if not tags:
         return fine_tune.get("uid") or "—"
 
+    primary = tags[0]
     prefix = base_display + "-"
-    non_base_tags = [t for t in tags if not t.startswith(prefix)]
-    if non_base_tags:
-        # Pick shortest among tags that already stand alone as task names
-        return min(non_base_tags, key=len)
-
-    # All tags share the base prefix — strip it, return the longest remainder
-    stripped = [t[len(prefix):] for t in tags]
-    return max(stripped, key=len)
+    if primary.startswith(prefix):
+        return primary[len(prefix):]
+    return primary
 
 
 # ---------------------------------------------------------------------------
