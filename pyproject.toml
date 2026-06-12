@@ -26,6 +26,16 @@ hardware = [
     "lerobot @ git+ssh://git@github.com/new-theory-research/lerobot.git@50168c2a16dd4c67275f9918bf327c1513380061",
 ]
 
+# Recording deps — for newt.recording.Session + `newt record` + `newt episodes`.
+# Heavy and hardware-adjacent on purpose: kept OUT of core so `import newt` stays
+# featherweight (brief-252 purity golden). Imported lazily; absent = a lantern
+# naming this extra. Install: pip install "newt[recording]"
+recording = [
+    "mcap>=1.1,<2.0",
+    "protobuf>=4.25,<6.0",
+    "opencv-python>=4.8,<5.0",
+]
+
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.4"]
 
