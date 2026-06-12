@@ -201,13 +201,13 @@ def cmd_login(args: list[str]) -> int:
             else:
                 write_api_key(key)
                 prefix = key[:12] if len(key) > 12 else key
-                print(f"\n\nLogged in successfully.")
-                print(f"  Key written to:  ~/.nt/credentials  (mode 0600)")
+                print("\n\nLogged in successfully.")
+                print("  Key written to:  ~/.nt/credentials  (mode 0600)")
                 print(f"  Key prefix:      {prefix}…")
                 print(f"  Device:          {device}")
-                print(f"\nThe SDK will read this key automatically. No NT_API_KEY needed.")
-                print(f"To revoke this key, visit the console key management page.")
-                print(f"\nUsing Claude Code? Run `newt skill install` to equip it with the onboarding guide.")
+                print("\nThe SDK will read this key automatically. No NT_API_KEY needed.")
+                print("To revoke this key, visit the console key management page.")
+                print("\nUsing Claude Code? Run `newt skill install` to equip it with the onboarding guide.")
             return 0
 
         # Unknown status — escalate rather than silently retry
