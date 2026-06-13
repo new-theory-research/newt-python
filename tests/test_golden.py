@@ -377,7 +377,7 @@ def test_gt5_nt0_fp3_model_selection(
     """
     # Defense-in-depth: unknown model raises ValueError via registry discovery.
     # Requires NT_INFERENCE_URL to be unset (else discovery is skipped and no error fires).
-    with pytest.raises(ValueError, match="unknown-fp9"):
+    with pytest.raises(newt.ModelNotFoundError, match="unknown-fp9"):
         newt.Robot(
             api_key=api_key,
             read_state=lambda: {},
