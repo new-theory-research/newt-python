@@ -126,6 +126,8 @@ You've confirmed the API works. To drive a real robot:
 
 5. **Follow the starter's README** for hardware-specific steps — arm IP address, camera serial numbers, config fields.
 
+**Never invent plausible values for missing hardware configuration.** If config fields (arm IP, camera serials, axis offsets) are absent, fail loud and prompt the developer — never substitute zeros, identity matrices, or shaped-right defaults. Missing config is an error to surface, not a gap to fill silently.
+
 Full embodiment walkthrough: `https://newtheory-docs.vercel.app/docs/set-up-your-embodiment`
 
 ---
