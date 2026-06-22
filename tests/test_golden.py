@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import time
 import types
+import warnings
 
 import httpx
 import numpy as np
@@ -362,16 +363,23 @@ def test_gt5_nt0_fp3_model_selection(
     model is the one trained on 11 tasks; the developer doesn't see anything about
     rot6d, normalization, or 50-step diffusion — those live behind the wire.
 
-    NT0-FP3 wire requirement (brief-205-cont-b): read_state() must return depth_maps +
-    intrinsics + extrinsics so the server's UnprojectPoints transform produces the
-    point clouds the ReFP3 encoder requires. Absent depth fields = degraded (not failed)
-    connections per the firehose spec (streaming-ws-protocol.md §Depth + camera matrices).
+    NT0-FP3 geometry contract (brief-258b — warn, don't block): NT0-FP3 declares
+    depth_maps + intrinsics + extrinsics as `expected` in contract.depth_fields. The
+    server's UnprojectPoints transform builds the point clouds the ReFP3 encoder
+    conditions on from those fields. When they are ABSENT (the David case), the server
+    does NOT fail — it identity/zero-fills and attaches a structured degradation warning
+    to the first action chunk; the SDK raises a DegradationWarning naming the missing
+    fields per camera and the quality impact. The connection completes and actions return.
+    This test asserts that SHIPPED behavior, not the aspiration: a run with NO geometry
+    must (a) emit exactly that DegradationWarning and (b) still return 8D chunks.
 
-    Assert: read_state invoked >= 1 time; execute invoked >= 1 time with ndarray chunk;
-    each chunk timestep is 8-dimensional (verifying NT0-FP3 wire format, not pi05-aloha's);
-    result.stop_reason in valid set; on NT0-FP3 baseline today (no learned stop token),
-    expect "max_duration". Wall time <= max_duration + 5s overhead (endpoint is warm;
-    warmup_modal_nt0_fp3 fixture ensures that before the test body runs).
+    Assert: a DegradationWarning fires naming depth_maps/intrinsics/extrinsics and the
+    quality impact (brief-258b legibility bar); read_state invoked >= 1 time; execute
+    invoked >= 1 time with ndarray chunk; each chunk timestep is 8-dimensional (verifying
+    NT0-FP3 wire format, not pi05-aloha's); result.stop_reason in valid set; on NT0-FP3
+    baseline today (no learned stop token), expect "max_duration". Wall time <=
+    max_duration + 5s overhead (endpoint is warm; warmup_modal_nt0_fp3 fixture ensures
+    that before the test body runs).
     Also verifies: model="unknown-fp9" raises ValueError via discovery (defense-in-depth,
     runs when NT_INFERENCE_URL is unset; C7 promotes to ModelNotFoundError).
     """
@@ -392,17 +400,13 @@ def test_gt5_nt0_fp3_model_selection(
     read_state_calls = 0
     execute_calls: list[np.ndarray] = []
 
-    _NT0_CAMERA_KEYS = ["right-wrist-camera", "surrounding1", "surrounding2"]
-
+    # brief-258b: omit the geometry fields entirely — this is the David case the warn-
+    # not-block behavior exists for. read_state returns only `state`, no depth_maps /
+    # intrinsics / extrinsics. The server must identity/zero-fill, warn, and continue.
     def read_state() -> dict:
         nonlocal read_state_calls
         read_state_calls += 1
-        return {
-            "state": np.zeros(8, dtype=np.float32),
-            "depth_maps": {cam: np.zeros((240, 320), dtype=np.float32) for cam in _NT0_CAMERA_KEYS},
-            "intrinsics":  {cam: np.eye(3, dtype=np.float32) for cam in _NT0_CAMERA_KEYS},
-            "extrinsics":  {cam: np.eye(4, dtype=np.float32) for cam in _NT0_CAMERA_KEYS},
-        }
+        return {"state": np.zeros(8, dtype=np.float32)}
 
     robot = newt.Robot(
         api_key=api_key,
@@ -412,8 +416,31 @@ def test_gt5_nt0_fp3_model_selection(
     )
 
     t0 = time.monotonic()
-    result = robot.run("clean_table", max_duration=max_duration)
+    # The run with no geometry must emit the structured DegradationWarning and STILL
+    # complete with actions (warn, not block). Capture warnings around the whole run.
+    with warnings.catch_warnings(record=True) as _wrec:
+        warnings.simplefilter("always")
+        result = robot.run("clean_table", max_duration=max_duration)
     elapsed = time.monotonic() - t0
+
+    # brief-258b legibility bar: a DegradationWarning fired, and it names the missing
+    # geometry fields AND the quality impact. Asserting the shipped truth, not the
+    # absent-aspiration: missing depth no longer fails mysteriously, it warns loudly.
+    _deg = [w for w in _wrec if issubclass(w.category, newt.DegradationWarning)]
+    assert _deg, (
+        "running NT0-FP3 with no depth_maps/intrinsics/extrinsics must emit a "
+        "DegradationWarning (brief-258b warn-not-block); got none"
+    )
+    _deg_text = " ".join(str(w.message) for w in _deg)
+    for _field in ("depth_maps", "intrinsics", "extrinsics"):
+        assert _field in _deg_text, (
+            f"DegradationWarning must name the missing field {_field!r} "
+            f"(legibility bar); got: {_deg_text!r}"
+        )
+    assert "degraded" in _deg_text, (
+        "DegradationWarning must carry the quality-impact sentence (legibility bar); "
+        f"got: {_deg_text!r}"
+    )
 
     assert read_state_calls >= 1, "read_state() must be called at least once"
     assert len(execute_calls) >= 1, "execute() must be called at least once (>= 1 action chunk)"

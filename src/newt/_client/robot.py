@@ -102,11 +102,20 @@ class AuthError(NewTheoryError):
 
 
 class DegradationWarning(UserWarning):
-    """Server reports that one or more expected cameras were absent from the obs frame.
+    """Server reports that the model ran on substituted (not real) inputs.
 
-    The connection succeeds and actions are returned; missing cameras were zero-filled
-    by the server. Actions may be degraded relative to the model's trained distribution.
-    Emitted at most once per Robot.run() call via warnings.warn.
+    The connection succeeds and actions are returned, but one or more inputs the
+    model expects were absent and the server filled them, so actions may be
+    degraded relative to the model's trained distribution. Three causes, all on the
+    same first-action-chunk `warnings` channel (brief-258b):
+      - an expected camera was absent and zero-filled;
+      - declared geometry fields (depth_maps / intrinsics / extrinsics) were
+        identity/zero-filled — the warning names which fields per camera and the
+        expected quality impact;
+      - a garbled/absent state frame AFTER the first was coerced rather than
+        silently zero-filled (mid-session; fires per affected frame).
+    Camera + geometry warnings fire at most once per Robot.run(); the mid-session
+    warning fires once per affected frame. Emitted via warnings.warn.
     """
 
 
@@ -974,6 +983,7 @@ class Robot:
                     )
 
                 _maybe_warn_degradation(parsed, self._model)
+                _maybe_warn_mid_session(parsed, self._model)
                 chunk = parsed.get("chunk")
                 axes = self._action_axes_for(chunk)
                 return InferenceResponse(
@@ -1136,6 +1146,9 @@ class Robot:
                     if not self._degradation_warned:
                         self._degradation_warned = True
                         _maybe_warn_degradation(parsed, self._model)
+                    # Mid-session degradation fires per-frame, not once: each garbled
+                    # obs after the first gets its own warning (brief-258b).
+                    _maybe_warn_mid_session(parsed, self._model)
                     self._execute(chunk)
                 elif ftype == "terminal":
                     stop_reason = _str_field(parsed, "stop_reason") or "error"
@@ -1214,6 +1227,8 @@ class Robot:
                     if not self._degradation_warned:
                         self._degradation_warned = True
                         _maybe_warn_degradation(parsed, self._model)
+                    # Mid-session degradation fires per-frame, not once (brief-258b).
+                    _maybe_warn_mid_session(parsed, self._model)
                     yield parsed.get("chunk")
                 elif ftype == "terminal":
                     return
@@ -1310,28 +1325,106 @@ def _decode_key(d: dict, key: str, default=None):
     return default
 
 
-def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
-    """Emit DegradationWarning if the first action frame carries missing_expected_cameras.
+def _coerce_str(v):
+    """msgpack may hand back bytes for string values — normalize to str."""
+    return v.decode() if isinstance(v, bytes) else v
 
-    Called once per run() on the first action frame. Does nothing when the
-    warnings field is absent or empty (the happy path has no overhead).
-    """
+
+def _warnings_dict(parsed: dict) -> dict | None:
+    """Extract the action frame's `warnings` dict, accepting str/bytes keys."""
     warnings_field = _decode_key(parsed, "warnings")
-    if not isinstance(warnings_field, dict):
+    return warnings_field if isinstance(warnings_field, dict) else None
+
+
+def _get_either(d: dict, key: str):
+    """Read a key from a msgpack dict, trying both str and bytes forms."""
+    if key in d:
+        return d[key]
+    return d.get(key.encode())
+
+
+def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
+    """Emit DegradationWarning for first-frame degradation signals.
+
+    Called once per run() on the first action frame. Surfaces two server signals
+    that ride the same `warnings` dict (brief-258b):
+      - missing_expected_cameras : a camera the model expects was zero-filled.
+      - missing_depth_fields     : declared geometry fields (depth_maps/intrinsics/
+                                    extrinsics) were identity/zero-filled, per camera,
+                                    carrying the server's quality-impact sentence.
+    Does nothing when the warnings field is absent or empty (happy path, no overhead).
+    """
+    wfield = _warnings_dict(parsed)
+    if wfield is None:
         return
-    missing = (
-        warnings_field.get("missing_expected_cameras")
-        or warnings_field.get(b"missing_expected_cameras")
-    )
-    if not missing:
+    model_str = model or "nt0-fp3"
+
+    # 1. Missing expected cameras (pre-258b signal, unchanged shape).
+    missing_cams = _get_either(wfield, "missing_expected_cameras")
+    if missing_cams:
+        missing_strs = [_coerce_str(c) for c in missing_cams]
+        warnings.warn(
+            DegradationWarning(
+                f"Model {model_str!r} expected cameras not all present. "
+                f"Missing: {missing_strs}. "
+                "Missing cameras zero-filled; actions may be degraded."
+            ),
+            stacklevel=3,
+        )
+
+    # 2. Missing declared geometry fields (depth_maps/intrinsics/extrinsics),
+    #    per camera, with the server's quality-impact sentence (brief-258b).
+    depth_payload = _get_either(wfield, "missing_depth_fields")
+    if isinstance(depth_payload, dict):
+        ctx = _get_either(depth_payload, "context")
+        per_cam = _get_either(ctx, "missing_expected_fields") if isinstance(ctx, dict) else None
+        impact = _coerce_str(_get_either(depth_payload, "impact")) or ""
+        # Render per-camera field list legibly: "right-wrist-camera: depth_maps,
+        # intrinsics, extrinsics".
+        parts = []
+        for item in (per_cam or []):
+            if not isinstance(item, dict):
+                continue
+            cam = _coerce_str(_get_either(item, "camera"))
+            fields = [_coerce_str(f) for f in (_get_either(item, "fields") or [])]
+            parts.append(f"{cam}: {', '.join(fields)}")
+        detail = "; ".join(parts) if parts else "geometry inputs"
+        warnings.warn(
+            DegradationWarning(
+                f"Model {model_str!r} ran without all declared geometry inputs. "
+                f"Missing per camera — {detail}. {impact}"
+            ),
+            stacklevel=3,
+        )
+
+
+def _maybe_warn_mid_session(parsed: dict, model: str | None) -> None:
+    """Emit DegradationWarning when an action frame reports mid-session degradation.
+
+    Unlike _maybe_warn_degradation (once per run, first frame), this fires on EVERY
+    action frame that carries a mid_session_degradation payload — each garbled obs
+    frame after the first produces its own warning so the developer sees how many
+    frames were affected, not just that it happened once (brief-258b every-frame
+    coverage). No-op when the signal is absent.
+    """
+    wfield = _warnings_dict(parsed)
+    if wfield is None:
         return
-    missing_strs = [c.decode() if isinstance(c, bytes) else c for c in missing]
+    payload = _get_either(wfield, "mid_session_degradation")
+    if not isinstance(payload, dict):
+        return
+    ctx = _get_either(payload, "context")
+    ctx = ctx if isinstance(ctx, dict) else {}
+    frame_idx = _get_either(ctx, "frame_index")
+    got_shape = _get_either(ctx, "got_shape")
+    exp_shape = _get_either(ctx, "expected_shape")
+    impact = _coerce_str(_get_either(payload, "impact")) or ""
     model_str = model or "nt0-fp3"
     warnings.warn(
         DegradationWarning(
-            f"Model {model_str!r} expected cameras not all present. "
-            f"Missing: {missing_strs}. "
-            "Missing cameras zero-filled; actions may be degraded."
+            f"Model {model_str!r} received garbled state on obs frame {frame_idx} "
+            f"(expected shape {exp_shape}, got {got_shape}); the server coerced it "
+            f"rather than silently zero-filling. {impact}"
         ),
         stacklevel=3,
     )
