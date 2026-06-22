@@ -30,8 +30,12 @@ Public surface:
                                  (network error, 5xx, or malformed JSON)
 - `newt.ColdStartRetry`       — warnings.warn'd once per Robot instance on first-connect
                                  timeout; SDK retried with 180s timeout (Modal cold-start)
-- `newt.DegradationWarning`   — warnings.warn'd once per run() when expected cameras
-                                 are absent; actions succeed but may be degraded
+- `newt.DegradationWarning`   — warnings.warn'd when the model ran on substituted
+                                 inputs: an absent expected camera, absent declared
+                                 geometry fields (depth_maps/intrinsics/extrinsics,
+                                 named per camera with quality impact), or a garbled
+                                 mid-session state frame. Actions succeed but may be
+                                 degraded (brief-258b)
 - `newt.EnvOverrideWarning`   — warnings.warn'd once per Robot instance when
                                  NT_INFERENCE_URL is set, bypassing /v1/models discovery
 - `newt.VerifierTransientRetry` — warnings.warn'd once per call on first retry when the
