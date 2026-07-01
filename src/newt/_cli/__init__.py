@@ -35,6 +35,14 @@ def main() -> None:
         from newt._cli.skill import cmd_skill
         sys.exit(cmd_skill(args[1:]))
 
+    if cmd == "record":
+        from newt._cli.record import cmd_record
+        sys.exit(cmd_record(args[1:]))
+
+    if cmd == "episodes":
+        from newt._cli.episodes import cmd_episodes
+        sys.exit(cmd_episodes(args[1:]))
+
     print(f"newt: unknown command '{cmd}'", file=sys.stderr)
     print("Run 'newt --help' for usage.", file=sys.stderr)
     sys.exit(1)
@@ -49,9 +57,12 @@ def _usage() -> None:
     print("  models   List every model your key can drive")
     print("  status   Show your current key, identity, and registry connectivity")
     print("  skill    Manage built-in skills (try: newt skill install)")
+    print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
+    print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
     print("")
     print("Options:")
-    print("  --json   Emit machine-readable JSON (supported by logout, models, status)")
+    print("  --json   Emit machine-readable JSON (supported by logout, models, status,")
+    print("           record, episodes)")
     print("  --print  (login only) Print the key to stdout; do not write credentials.")
     print("           Compose with: KEY=$(newt login --print)")
     print("")
@@ -59,4 +70,4 @@ def _usage() -> None:
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials)")
     print("  NT_BOOTSTRAP_URL  Override registry discovery base URL")
     print("  NT_INFERENCE_URL  Override inference endpoint directly (skips discovery)")
-    print("  NT_CONSOLE_URL    Console URL (default: https://console-production-91bb.up.railway.app)")
+    print("  NT_CONSOLE_URL    Console URL (default: https://newtheory-console.vercel.app)")

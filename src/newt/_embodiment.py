@@ -9,9 +9,10 @@ Protocol design: portal/wiki/specs/embodiment-noun.md
 """
 from __future__ import annotations
 
-from typing import Any, runtime_checkable
+from typing import TYPE_CHECKING, runtime_checkable
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 try:
     from typing import Protocol

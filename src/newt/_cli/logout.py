@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 from newt._credentials import CREDENTIALS_DIR, CREDENTIALS_PATH
 
@@ -67,7 +66,7 @@ def cmd_logout(args: list[str]) -> int:
         return 0
 
     if credentials_existed:
-        print(f"Logged out.")
+        print("Logged out.")
         print(f"  Removed:  {CREDENTIALS_PATH}")
         print(f"  The key itself remains valid — revoke it at {_console_url()}/keys")
     else:

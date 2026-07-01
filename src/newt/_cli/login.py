@@ -30,7 +30,7 @@ from urllib.request import Request, urlopen
 
 from newt._credentials import write_api_key
 
-_DEFAULT_CONSOLE = "https://console-production-91bb.up.railway.app"
+_DEFAULT_CONSOLE = "https://newtheory-console.vercel.app"
 _POLL_INTERVAL_S = 2.0
 _MAX_WAIT_S = 10 * 60  # 10 minutes, matching server TTL
 _REEMIT_INTERVAL_S = 30.0  # re-print URL+code every ~30s during polling
@@ -68,7 +68,7 @@ def _usage() -> None:
     print("")
     print("Environment:")
     print("  NT_API_KEY     Set this instead of running login (CI, agents, SSH).")
-    print("  NT_CONSOLE_URL Override the console URL (default: https://console-production-91bb.up.railway.app)")
+    print("  NT_CONSOLE_URL Override the console URL (default: https://newtheory-console.vercel.app)")
 
 
 def cmd_login(args: list[str]) -> int:
@@ -123,9 +123,8 @@ def cmd_login(args: list[str]) -> int:
     else:
         deadline = now + _MAX_WAIT_S
 
-    print(f"\n  Open this URL to authenticate:\n\n    {browser_url}\n", file=out)
-    print(f"  Confirm this code matches what you see in your browser:\n", file=out)
-    print(f"      {user_code}\n", file=out)
+    print(f"\n  {user_code}\n", file=out)
+    print(f"  Sign in (or create an account), then confirm this code:\n    {browser_url}\n", file=out)
 
     # Step 2: attempt browser open (silent failure for SSH/headless rigs)
     try:
@@ -202,13 +201,13 @@ def cmd_login(args: list[str]) -> int:
             else:
                 write_api_key(key)
                 prefix = key[:12] if len(key) > 12 else key
-                print(f"\n\nLogged in successfully.")
-                print(f"  Key written to:  ~/.nt/credentials  (mode 0600)")
+                print("\n\nLogged in successfully.")
+                print("  Key written to:  ~/.nt/credentials  (mode 0600)")
                 print(f"  Key prefix:      {prefix}…")
                 print(f"  Device:          {device}")
-                print(f"\nThe SDK will read this key automatically. No NT_API_KEY needed.")
-                print(f"To revoke this key, visit the console key management page.")
-                print(f"\nUsing Claude Code? Run `newt skill install` to equip it with the onboarding guide.")
+                print("\nThe SDK will read this key automatically. No NT_API_KEY needed.")
+                print("To revoke this key, visit the console key management page.")
+                print("\nUsing Claude Code? Run `newt skill install` to equip it with the onboarding guide.")
             return 0
 
         # Unknown status — escalate rather than silently retry

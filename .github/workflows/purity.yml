@@ -1,0 +1,74 @@
+name: purity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  closure-check:
+    name: "Installing newt never drags in someone else's robot"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install in fresh venv
+        run: |
+          python -m venv .purity-venv
+          .purity-venv/bin/pip install . -q
+
+      - name: Dependency closure — denylist check
+        run: |
+          INSTALLED=$(.purity-venv/bin/pip list --format=freeze)
+          # Hardware/embodiment packages: pyrealsense2, dynamixel-sdk, lerobot, torch*, opencv*
+          # Serve-stack packages trimmed from core deps: modal, fastapi, uvicorn, sshtunnel, ml-collections
+          # Vendor prefixes: trossen-*, interbotix-*
+          DENY="^(pyrealsense2|dynamixel-sdk|lerobot|torch|torchvision|torchaudio|modal|fastapi|uvicorn|sshtunnel|ml-collections|opencv-python|opencv-python-headless)==|^(trossen|interbotix)"
+          HITS=$(printf '%s\n' "$INSTALLED" | grep -Ei "$DENY" || true)
+          if [ -n "$HITS" ]; then
+            echo "Denylisted packages found in closure — SDK must not pull in hardware or serve-stack deps:"
+            printf '%s\n' "$HITS"
+            exit 1
+          fi
+          echo "PASS: dependency closure is clean"
+          echo "--- installed packages ---"
+          .purity-venv/bin/pip list
+
+      - name: The client stays a client — import check
+        run: |
+          .purity-venv/bin/python -c "import newt; print('PASS: import newt OK')"
+
+  embodiment-purity:
+    name: "Embodiment protocol carries only the contract"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Minimal env (typing-extensions only)
+        run: |
+          python -m venv .proto-venv
+          .proto-venv/bin/pip install typing-extensions -q
+
+      - name: Embodiment module imports only stdlib/typing at runtime
+        run: |
+          .proto-venv/bin/python - <<'EOF'
+          # Load _embodiment.py directly (bypass __init__.py) to isolate it from the
+          # rest of the package's deps. Only stdlib + typing-extensions are available.
+          import sys, importlib.util, pathlib
+          spec = importlib.util.spec_from_file_location(
+              "_embodiment", pathlib.Path("src/newt/_embodiment.py")
+          )
+          mod = importlib.util.module_from_spec(spec)
+          try:
+              spec.loader.exec_module(mod)
+              print('PASS: Embodiment protocol is pure stdlib/typing at runtime')
+          except ImportError as e:
+              print(f'FAIL: _embodiment.py has non-stdlib imports at runtime: {e}')
+              sys.exit(1)
+          EOF
