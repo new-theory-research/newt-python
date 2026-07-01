@@ -4,15 +4,10 @@ version = "0.0.1"
 description = "Python SDK for the New Theory inference API"
 requires-python = ">=3.11"
 dependencies = [
-    "modal>=0.66",
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
     "msgpack>=1.0",
     "numpy>=1.26",
-    "ml_collections>=0.1.1",
     "httpx>=0.25",
     "websockets>=12.0",
-    "sshtunnel>=0.4.0",
     "pillow>=10.0",
 ]
 
@@ -29,10 +24,12 @@ test = ["pytest>=8.0"]
 # Install: pip install ".[hardware]"
 hardware = [
     "lerobot @ git+ssh://git@github.com/new-theory-research/lerobot.git@50168c2a16dd4c67275f9918bf327c1513380061",
+    "sshtunnel>=0.4.0",
+    "ml_collections>=0.1.1",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "ruff>=0.4", "deptry>=0.20"]
 
 [build-system]
 requires = ["hatchling"]
@@ -44,3 +41,16 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/newt"]
+
+[tool.deptry]
+# Scan tests too (default excludes them) — httpx/pytest are used there, not in src/.
+exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py"]
+known_first_party = ["newt"]
+
+[tool.deptry.per_rule_ignores]
+# lerobot/sshtunnel/ml_collections: declared in the [hardware] extra for the
+# robot-path integration; not imported by any current src/ or test code.
+DEP002 = ["lerobot", "sshtunnel", "ml_collections"]
+# typing_extensions: pre-existing Python<3.8 fallback import in _embodiment.py;
+# not a declared dependency, out of scope for brief-306.
+DEP003 = ["typing_extensions"]
