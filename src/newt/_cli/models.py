@@ -70,7 +70,6 @@ def _group_models(models: list[dict[str, Any]]) -> tuple[
     Bases with no fine-tunes produce an empty list.
     Family order follows first appearance of each base in the payload.
     """
-    by_uid: dict[str, dict[str, Any]] = {m["uid"]: m for m in models if m.get("uid")}
     bases: list[dict[str, Any]] = []
     base_seen: set[str] = set()
 

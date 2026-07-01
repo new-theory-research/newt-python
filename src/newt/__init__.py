@@ -42,8 +42,9 @@ Public surface:
 - `newt.InferenceResponse`    — returned by Robot.infer() (one-shot); wraps the raw
                                  action chunk with semantic axis labels + latency
 - `newt.list_models`          — fetch available models from the inference server
-- `newt.fixtures`             — real recorded observations (`fixtures.load("cup_stacking")`)
+- `newt.snapshots`            — real recorded observations (`snapshots.load("cup_stacking")`)
                                  for trying inference without hardware
+- `newt.fixtures`             — deprecated alias for `newt.snapshots`; emits DeprecationWarning
 
 Internal:
 - `newt._client` — edge client, invariant per tenet T1
@@ -70,7 +71,7 @@ from newt._client.robot import (
     list_models,
 )
 from newt._embodiment import Embodiment
-from newt import fixtures
+from newt import snapshots
 
 __all__ = [
     "AuthError",
@@ -91,6 +92,6 @@ __all__ = [
     "ServerError",
     "VerifierError",
     "VerifierTransientRetry",
-    "fixtures",
+    "snapshots",
     "list_models",
 ]
