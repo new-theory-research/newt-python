@@ -37,7 +37,7 @@ recording = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "ruff>=0.4", "deptry>=0.20"]
 
 [build-system]
 requires = ["hatchling"]
@@ -49,3 +49,20 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/newt"]
+
+[tool.deptry]
+# Scan tests too (default excludes them) — httpx/pytest are used there, not in src/.
+exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py"]
+known_first_party = ["newt"]
+
+[tool.deptry.per_rule_ignores]
+# lerobot: declared in the [hardware] extra for the robot-path integration;
+# not imported by any current src/ or test code. sshtunnel/ml_collections were
+# dropped entirely in brief-306: their only consumers (run_robot_client.py,
+# imitation_mirror/) were deleted by brief-246.
+# mcap/protobuf/opencv-python: [recording] extra, loaded via the lazy require()
+# lantern in newt.recording (brief-267) — real usage deptry's static scan can't see.
+DEP002 = ["lerobot", "mcap", "protobuf", "opencv-python"]
+# typing_extensions: pre-existing Python<3.8 fallback import in _embodiment.py;
+# not a declared dependency, out of scope for brief-306.
+DEP003 = ["typing_extensions"]

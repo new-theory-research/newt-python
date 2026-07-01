@@ -19,8 +19,10 @@ jobs:
       - name: Install uv
         run: pip install uv
       - name: Install
-        run: uv pip install --system -e . ruff pytest
+        run: uv pip install --system -e . ruff pytest deptry
       - name: Lint
         run: ruff check src/
+      - name: Dependency check
+        run: deptry .
       - name: Test
         run: pytest
