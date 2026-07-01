@@ -24,8 +24,6 @@ test = ["pytest>=8.0"]
 # Install: pip install ".[hardware]"
 hardware = [
     "lerobot @ git+ssh://git@github.com/new-theory-research/lerobot.git@50168c2a16dd4c67275f9918bf327c1513380061",
-    "sshtunnel>=0.4.0",
-    "ml_collections>=0.1.1",
 ]
 
 [dependency-groups]
@@ -48,9 +46,11 @@ exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py"]
 known_first_party = ["newt"]
 
 [tool.deptry.per_rule_ignores]
-# lerobot/sshtunnel/ml_collections: declared in the [hardware] extra for the
-# robot-path integration; not imported by any current src/ or test code.
-DEP002 = ["lerobot", "sshtunnel", "ml_collections"]
+# lerobot: declared in the [hardware] extra for the robot-path integration;
+# not imported by any current src/ or test code. sshtunnel/ml_collections were
+# dropped entirely in brief-306: their only consumers (run_robot_client.py,
+# imitation_mirror/) were deleted by brief-246.
+DEP002 = ["lerobot"]
 # typing_extensions: pre-existing Python<3.8 fallback import in _embodiment.py;
 # not a declared dependency, out of scope for brief-306.
 DEP003 = ["typing_extensions"]
