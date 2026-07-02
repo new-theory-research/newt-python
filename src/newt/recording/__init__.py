@@ -10,6 +10,11 @@ The public surface:
 - ``StateDescriptor``  — the static shape of a state stream (arms, channels, joints).
 - ``JointState``       — one synchronized joint snapshot.
 - ``SimulatedSource``  — a hardware-free source for ``--simulate`` and tests.
+- ``Sink``             — the seam protocol a destination implements (``deliver``);
+                          what a Session hands a committed episode directory to.
+- ``LocalSink``        — today's local-disk destination behind ``Sink``; the
+                          writer already commits into ``output_dir``, so this
+                          sink only verifies place, never moves or copies.
 - ``CameraSpec``       — a configured RGB camera (lazy; needs the extra).
 - ``validate``         — validate an NT v0.0.3 episode directory (lazy; needs the extra).
 
@@ -32,15 +37,18 @@ from newt.recording._seam import (
     StateDescriptor,
 )
 from newt.recording._session import DEFAULT_STATE_HZ, Session, SessionStatus
+from newt.recording._sink import LocalSink, Sink
 
 __all__ = [
     "BIMANUAL_DESCRIPTOR",
     "CameraSpec",
     "DEFAULT_STATE_HZ",
     "JointState",
+    "LocalSink",
     "RecordingExtraMissing",
     "RecordingSource",
     "SINGLE_ARM_DESCRIPTOR",
+    "Sink",
     "SimulatedSource",
     "Session",
     "SessionStatus",
