@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from newt.recording._seam import RecordingSource, StateDescriptor
+from newt.recording._sink import LocalSink, Sink
 
 # Community-native rate: Molmo extraction is 30fps/30Hz; this is the spec
 # state_frequency default. Override per Session for a different rig.
@@ -69,6 +70,7 @@ class Session:
         license: str | None = None,
         camera_stub_reason: str | None = None,
         target: int | None = None,
+        sink: Sink | None = None,
     ) -> None:
         if not hasattr(source, "read_state") or not hasattr(source, "descriptor"):
             raise TypeError(
@@ -82,6 +84,7 @@ class Session:
         self._period_s = 1.0 / state_hz
         self._target = target
         self._camera_stub_reason = camera_stub_reason
+        self._sink = sink if sink is not None else LocalSink(self._dest)
 
         # Camera specs (CameraSpec instances) are accepted but state-only capture
         # is the default; the writer imports lazily, so we hold raw specs here.
@@ -260,6 +263,7 @@ class Session:
 
         duration_s = writer.state_count * self._period_s
         path = writer.keep(duration_s)
+        self._sink.deliver(path)
         self._kept += 1
         return path
 
