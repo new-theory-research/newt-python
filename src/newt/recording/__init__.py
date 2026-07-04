@@ -15,6 +15,9 @@ The public surface:
 - ``LocalSink``        — today's local-disk destination behind ``Sink``; the
                           writer already commits into ``output_dir``, so this
                           sink only verifies place, never moves or copies.
+- ``NTCloudSink``      — uploads a committed episode to the developer's NT
+                          cloud namespace via a server-minted signed URL per
+                          file; never holds the GCS write credential.
 - ``CameraSpec``       — a configured RGB camera (lazy; needs the extra).
 - ``validate``         — validate an NT v0.0.3 episode directory (lazy; needs the extra).
 
@@ -36,6 +39,7 @@ from newt.recording._seam import (
     SimulatedSource,
     StateDescriptor,
 )
+from newt.recording._cloud_sink import NTCloudSink
 from newt.recording._session import DEFAULT_STATE_HZ, Session, SessionStatus
 from newt.recording._sink import LocalSink, Sink
 
@@ -45,6 +49,7 @@ __all__ = [
     "DEFAULT_STATE_HZ",
     "JointState",
     "LocalSink",
+    "NTCloudSink",
     "RecordingExtraMissing",
     "RecordingSource",
     "SINGLE_ARM_DESCRIPTOR",
