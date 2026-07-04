@@ -41,6 +41,9 @@ def _usage() -> None:
     print("  --task TEXT     Language task prompt recorded in every episode (required).")
     print("  --dest DIR      Episode output directory (default: ./episodes).")
     print("  --simulate      Record from a fake joint stream, no hardware.")
+    print("  --source SPEC   Load a developer RecordingSource, MODULE:FACTORY")
+    print("                  (e.g. mypkg.rig:make_source). Mutually exclusive")
+    print("                  with --simulate.")
     print("  --bimanual      (simulate) Drive a 2-arm leader/follower stream.")
     print("  --target N      Stop after N kept episodes.")
     print("  --hz N          State sample rate (default: 30).")
@@ -57,6 +60,7 @@ def _parse(args: list[str]) -> dict:
         "task": None,
         "dest": "episodes",
         "simulate": False,
+        "source": None,
         "bimanual": False,
         "target": None,
         "hz": 30,
@@ -70,6 +74,7 @@ def _parse(args: list[str]) -> dict:
     valued = {
         "--task": ("task", str),
         "--dest": ("dest", str),
+        "--source": ("source", str),
         "--target": ("target", int),
         "--hz": ("hz", int),
         "--author": ("author", str),
@@ -93,11 +98,50 @@ def _parse(args: list[str]) -> dict:
     return opts
 
 
+def _load_source(spec: str):
+    """Import a developer's ``RecordingSource`` from a ``module:factory`` spec
+    and construct it. The factory is called with no arguments — it owns
+    producing a fully formed source (descriptor included) for whatever rig it
+    wraps; the CLI never guesses at embodiment shape.
+
+    Every failure point names the spec and what went wrong (Rule 10) — no
+    silent fallback to simulate. Raises; the caller (``cmd_record``) renders
+    the message and exits, the same loud-not-traced path used for the missing-
+    extra lantern today."""
+    import importlib
+
+    if ":" not in spec:
+        raise ValueError(
+            f"--source {spec!r} is not MODULE:FACTORY shaped — expected e.g. "
+            "'mypkg.rig:make_source'"
+        )
+    module_name, _, factory_name = spec.partition(":")
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"--source {spec!r}: failed to import module {module_name!r}: {exc}"
+        ) from exc
+    try:
+        factory = getattr(module, factory_name)
+    except AttributeError:
+        raise RuntimeError(
+            f"--source {spec!r}: module {module_name!r} has no attribute {factory_name!r}"
+        ) from None
+    try:
+        return factory()
+    except Exception as exc:
+        raise RuntimeError(
+            f"--source {spec!r}: factory {factory_name!r} raised while constructing "
+            f"the source: {exc}"
+        ) from exc
+
+
 def _build_session(opts: dict):
-    """Build the Session the frontend drives. Today this wires the simulated
-    source (no hardware on this surface yet); a live embodiment is passed by a
-    user constructing Session directly, or by a future ``--embodiment`` selector.
-    All of it is library construction — no behavior."""
+    """Build the Session the frontend drives. ``--source`` loads a developer-
+    supplied RecordingSource; ``--simulate`` wires the bundled SimulatedSource
+    (unchanged, byte-identical); neither refuses loudly rather than guessing a
+    rig. All of it is library construction — no behavior."""
     from newt.recording import (
         BIMANUAL_DESCRIPTOR,
         SINGLE_ARM_DESCRIPTOR,
@@ -105,22 +149,28 @@ def _build_session(opts: dict):
         SimulatedSource,
     )
 
-    if not opts["simulate"]:
-        # The hardware path is the embodiment owner's: they construct Session with
-        # their own RecordingSource. The CLI refuses loudly rather than guessing a rig.
+    if opts["source"] and opts["simulate"]:
+        raise ValueError("--source and --simulate are mutually exclusive — pick one.")
+
+    if opts["source"]:
+        source = _load_source(opts["source"])
+    elif opts["simulate"]:
+        descriptor = BIMANUAL_DESCRIPTOR if opts["bimanual"] else SINGLE_ARM_DESCRIPTOR
+        source = SimulatedSource(descriptor, drop_every=opts["drop_every"])
+    else:
+        # The hardware path needs a --source; the CLI refuses loudly rather
+        # than guessing a rig.
         print(
             "[newt record] No embodiment wired for live capture from the CLI yet.",
             file=sys.stderr,
         )
         print(
-            "        Fix: run with --simulate to exercise the rhythm, or construct\n"
-            "        newt.recording.Session(your_source, ...) directly in code.",
+            "        Fix: run with --simulate to exercise the rhythm, or point\n"
+            "        --source at your own MODULE:FACTORY (e.g. mypkg.rig:make_source).",
             file=sys.stderr,
         )
         return None
 
-    descriptor = BIMANUAL_DESCRIPTOR if opts["bimanual"] else SINGLE_ARM_DESCRIPTOR
-    source = SimulatedSource(descriptor, drop_every=opts["drop_every"])
     return Session(
         source,
         task=opts["task"],
