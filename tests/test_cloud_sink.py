@@ -191,6 +191,119 @@ def test_no_api_key_raises_with_actionable_message(monkeypatch, tmp_path):
         NTCloudSink("grasp-cup")
 
 
+def test_finalize_writes_manifest_after_all_episodes(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "grasp-cup"
+    calls, signed_paths = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    sink.deliver(_make_episode_dir(tmp_path, "episode_aaaaaaaa"))
+    sink.deliver(_make_episode_dir(tmp_path, "episode_bbbbbbbb"))
+
+    manifest_calls_before = [c for c in calls if c[1].endswith("/manifest.json?sig=fake")]
+    assert manifest_calls_before == []  # not written before finalize()
+
+    sink.finalize()
+
+    assert signed_paths[-1] == "manifest.json"
+    manifest_uploads = [c for c in calls if not c[1].endswith("/api/uploads/sign")]
+    manifest_put = manifest_uploads[-1]
+    assert manifest_put[0] == "PUT"
+    assert f"/{_NAMESPACE}/{dataset}/manifest.json" in manifest_put[1]
+
+
+def test_finalize_manifest_body_matches_v0_minimal_fields(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "grasp-cup"
+    put_bodies: dict[str, bytes] = {}
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/api/uploads/sign"):
+            body = json.loads(req.data)
+            return _FakeHTTPResp(_sign_response(dataset, body["path"]))
+        put_bodies[req.full_url] = req.data
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+    sink.deliver(_make_episode_dir(tmp_path, "episode_aaaaaaaa", task="pick up the cup"))
+    sink.finalize()
+
+    manifest_body = next(
+        body for url, body in put_bodies.items() if url.endswith("/manifest.json?sig=fake")
+    )
+    manifest = json.loads(manifest_body)
+    assert manifest["format_version"] == "0.0.3"
+    assert manifest["task"] == "pick up the cup"
+    assert manifest["episode_count"] == 1
+    assert manifest["attribution"] == _NAMESPACE
+    assert "created_at" in manifest
+
+
+def test_finalize_before_any_deliver_raises_without_writing(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "grasp-cup"
+    calls, _signed_paths = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    with pytest.raises(RuntimeError, match="no episodes were delivered"):
+        sink.finalize()
+
+    assert calls == []  # never even attempted to sign a manifest upload
+
+
+def test_interrupted_dataset_never_gets_a_manifest(monkeypatch, tmp_path):
+    """Simulates a mid-dataset crash: the second episode's upload fails, the
+    recording session propagates the error and never calls finalize(). No
+    manifest.json request is ever made."""
+    from newt.recording import NTCloudSink
+
+    dataset = "grasp-cup"
+    calls, _signed_paths = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    sink.deliver(_make_episode_dir(tmp_path, "episode_aaaaaaaa"))
+
+    def failing_urlopen(req, timeout=None):
+        raise URLError("connection reset")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", failing_urlopen)
+    with pytest.raises(RuntimeError, match="connection reset"):
+        sink.deliver(_make_episode_dir(tmp_path, "episode_bbbbbbbb"))
+
+    # A real caller would stop here and never call finalize(); confirm no
+    # manifest request was ever issued up to the point of the crash.
+    assert not any(c[1].endswith("/manifest.json?sig=fake") for c in calls)
+
+
+def test_finalize_manifest_uses_same_content_type_as_episode_uploads(monkeypatch, tmp_path):
+    """The signed URL binds Content-Type into the signature (see module
+    docstring) — the manifest PUT must reuse the same octet-stream type as
+    episode file uploads, not switch to application/json."""
+    from newt.recording import NTCloudSink
+
+    dataset = "grasp-cup"
+    put_headers: dict[str, str] = {}
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/api/uploads/sign"):
+            body = json.loads(req.data)
+            return _FakeHTTPResp(_sign_response(dataset, body["path"]))
+        put_headers[req.full_url] = req.get_header("Content-type")
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+    sink.deliver(_make_episode_dir(tmp_path, "episode_aaaaaaaa"))
+    sink.finalize()
+
+    manifest_url = next(url for url in put_headers if url.endswith("/manifest.json?sig=fake"))
+    assert put_headers[manifest_url] == "application/octet-stream"
+
+
 def test_end_to_end_via_session_delivers_real_episode(monkeypatch, tmp_path):
     """Drives a real Session + SimulatedSource episode through NTCloudSink,
     same as the LocalSink protocol-seam test, to prove NTCloudSink is a real
