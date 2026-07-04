@@ -77,6 +77,13 @@ class NTCloudSink:
     writer's own rename-last commit, so a partially-uploaded episode never
     looks complete in the cloud either. A failed upload raises (Rule 10); the
     episode is never touched or removed locally, so nothing is lost.
+
+    ``finalize`` writes the dataset-level ``manifest.json`` — call it once,
+    explicitly, after every episode for the dataset has been delivered. It is
+    not part of the ``Sink`` protocol and ``Session`` never calls it, so a
+    recording run that dies mid-dataset (and never reaches ``finalize``)
+    leaves no manifest behind — the completeness sentinel data-flywheel.md §9
+    requires.
     """
 
     def __init__(
@@ -143,9 +150,41 @@ class NTCloudSink:
 
         self._episode_count += 1
 
+    def finalize(self) -> None:
+        """Write the dataset-level ``manifest.json`` — the completeness
+        sentinel (data-flywheel.md §9): its existence means every
+        ``episode_count`` episode has landed and the dataset is safe to read.
+
+        Call this once, after the recording session that owns this sink is
+        done delivering episodes. Raises (Rule 10) if no episode was ever
+        delivered, rather than writing a manifest claiming a dataset that
+        doesn't exist.
+        """
+        if self._episode_count == 0:
+            raise RuntimeError(
+                "NTCloudSink.finalize: no episodes were delivered to this sink; "
+                "refusing to write a manifest.json for an empty dataset."
+            )
+        manifest = {
+            "format_version": self._format_version,
+            "task": self._task,
+            "episode_count": self._episode_count,
+            "attribution": self._namespace,
+            "created_at": _rfc3339_now(),
+        }
+        self._put(
+            json.dumps(manifest).encode(),
+            "manifest.json",
+            failure_note=(
+                "manifest.json was not written; the "
+                f"{self._episode_count} already-uploaded episode(s) remain in "
+                "place — safe to retry finalize() once the API is reachable."
+            ),
+        )
+
     # --- signed-URL + upload plumbing ---------------------------------------
 
-    def _sign(self, remote_path: str) -> dict:
+    def _sign(self, remote_path: str, *, failure_note: str) -> dict:
         req = Request(
             f"{self._console_url}/api/uploads/sign",
             data=json.dumps({"dataset": self._dataset, "path": remote_path}).encode(),
@@ -161,22 +200,29 @@ class NTCloudSink:
         except HTTPError as exc:
             raise RuntimeError(
                 f"NTCloudSink: failed to get a signed upload URL for {remote_path!r} "
-                f"({exc.code} {exc.reason}); episode remains on local disk, untouched."
+                f"({exc.code} {exc.reason}); {failure_note}"
             ) from exc
         except URLError as exc:
             raise RuntimeError(
                 f"NTCloudSink: cannot reach {self._console_url} to sign "
-                f"{remote_path!r}: {exc.reason}; episode remains on local disk, untouched."
+                f"{remote_path!r}: {exc.reason}; {failure_note}"
             ) from exc
 
     def _upload(self, local_path: Path, remote_path: str) -> None:
-        signed = self._sign(remote_path)
+        self._put(
+            local_path.read_bytes(),
+            remote_path,
+            failure_note="episode remains on local disk, untouched.",
+        )
+
+    def _put(self, data: bytes, remote_path: str, *, failure_note: str) -> None:
+        signed = self._sign(remote_path, failure_note=failure_note)
         if self._namespace is None:
             self._namespace = _namespace_from_object_path(signed["objectPath"], self._dataset)
 
         req = Request(
             signed["url"],
-            data=local_path.read_bytes(),
+            data=data,
             headers={"Content-Type": _UPLOAD_CONTENT_TYPE},
             method="PUT",
         )
@@ -186,10 +232,9 @@ class NTCloudSink:
         except HTTPError as exc:
             raise RuntimeError(
                 f"NTCloudSink: upload failed for {remote_path!r} ({exc.code} {exc.reason}); "
-                "episode remains on local disk, untouched."
+                f"{failure_note}"
             ) from exc
         except URLError as exc:
             raise RuntimeError(
-                f"NTCloudSink: upload failed for {remote_path!r}: {exc.reason}; "
-                "episode remains on local disk, untouched."
+                f"NTCloudSink: upload failed for {remote_path!r}: {exc.reason}; {failure_note}"
             ) from exc
