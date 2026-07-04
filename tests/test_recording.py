@@ -333,6 +333,187 @@ def test_sigkill_mid_episode_leaves_no_committed_episode(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# --source — the live-hardware loading path (capture-003)
+# ---------------------------------------------------------------------------
+
+
+def _base_opts(tmp_path, **overrides):
+    opts = {
+        "task": "pick up the cup",
+        "dest": str(tmp_path),
+        "simulate": False,
+        "source": None,
+        "bimanual": False,
+        "target": None,
+        "hz": 30,
+        "author": None,
+        "license": None,
+        "drop_every": 0,
+        "json": False,
+    }
+    opts.update(overrides)
+    return opts
+
+
+def test_load_source_rejects_a_spec_with_no_colon():
+    """A --source value that isn't MODULE:FACTORY shaped fails immediately,
+    naming the spec and the expected shape — not a bare traceback."""
+    from newt._cli.record import _load_source
+
+    with pytest.raises(ValueError, match="MODULE:FACTORY"):
+        _load_source("not-a-valid-spec")
+
+
+def test_load_source_names_the_module_on_import_failure():
+    """An unimportable module in --source names the module and the import
+    error, not a bare ModuleNotFoundError."""
+    from newt._cli.record import _load_source
+
+    with pytest.raises(RuntimeError, match="no_such_module_xyz"):
+        _load_source("no_such_module_xyz:make_source")
+
+
+def test_load_source_names_the_missing_factory():
+    """A real module with no such attribute names both, not an AttributeError
+    with no context."""
+    from newt._cli.record import _load_source
+
+    with pytest.raises(RuntimeError, match="no_such_factory"):
+        _load_source("newt.recording:no_such_factory")
+
+
+def test_source_and_simulate_are_mutually_exclusive():
+    """--source and --simulate together is a grammar collision, not a silent
+    pick-one — refuse loudly instead of guessing which the developer meant."""
+    from newt._cli.record import _build_session
+
+    opts = _base_opts("/tmp/unused", simulate=True, source="tests.fixtures.fake_source:make_source")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _build_session(opts)
+
+
+@needs_extra
+def test_simulate_path_unchanged_by_the_new_source_flag(tmp_path):
+    """--simulate takes the exact branch it always did — adding --source must
+    not perturb its output. Same source_kind, same descriptor, same channels,
+    a validate()-passing episode, byte-identical to pre-brief behavior."""
+    from newt._cli.record import _build_session
+    from newt.recording import SINGLE_ARM_DESCRIPTOR, SimulatedSource, validate
+
+    session = _build_session(_base_opts(tmp_path, simulate=True))
+    try:
+        report = session.preflight()
+        assert report["source_kind"] == SimulatedSource(SINGLE_ARM_DESCRIPTOR).source_kind
+        assert report["channels"] == ["robot_state/sim-arm"]
+        session.start_episode()
+        time.sleep(0.15)
+        path = session.end_episode(keep=True)
+    finally:
+        session.close()
+    assert validate(path)["valid"]
+
+
+@needs_extra
+def test_cli_source_loads_fake_hardware_and_validates(tmp_path):
+    """A developer's RecordingSource, loaded via --source MODULE:FACTORY,
+    drives `newt record` exactly as --simulate would — the CLI never knows
+    it's a fake. This is the live-hardware door: one kept episode, valid, and
+    the kill-switch (disable_all) fires on the fake source through the
+    unchanged, source-agnostic kill path.
+    """
+    from newt.recording import validate
+
+    commands = "\n".join(
+        [
+            json.dumps({"cmd": "start"}),
+            json.dumps({"cmd": "stop", "keep": True}),
+        ]
+    ) + "\n"
+
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "newt", "record",
+            "--source", "tests.fixtures.fake_source:make_source",
+            "--json",
+            "--task", "wipe the table",
+            "--dest", str(tmp_path),
+            "--target", "1",
+        ],
+        input=commands,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(_SRC.parent)},
+        timeout=60,
+    )
+    assert proc.returncode == 0, f"--source record failed: {proc.stderr}"
+
+    events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    kinds = [e["event"] for e in events]
+    assert "preflight" in kinds
+    assert "target_reached" in kinds
+
+    episodes = sorted(tmp_path.glob("episode_*"))
+    assert len(episodes) == 1, f"one keep -> one dir; found {episodes}"
+    assert validate(episodes[0])["valid"]
+
+
+def test_cli_source_raising_factory_produces_loud_runnable_error(tmp_path):
+    """A --source factory that raises on construction produces a clear,
+    runnable CLI error naming the spec and the failure — no silent fallback
+    to simulate, and no episode is ever created (Rule 10).
+    """
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "newt", "record",
+            "--source", "tests.fixtures.fake_source:make_raising_source",
+            "--json",
+            "--task", "t",
+            "--dest", str(tmp_path),
+        ],
+        input="",
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(_SRC.parent)},
+        timeout=30,
+    )
+    assert proc.returncode == 1, f"expected a refusal exit code; got stdout={proc.stdout!r}"
+    assert "make_raising_source" in proc.stderr
+    assert "fake hardware initialization failure" in proc.stderr
+    assert sorted(tmp_path.glob("episode_*")) == [], "a raising factory must never leave an episode dir"
+
+
+def test_cli_source_kill_switch_disables_the_loaded_source(tmp_path, monkeypatch):
+    """Ctrl+H's kill path (Session.kill() -> disable_all()) fires for a
+    --source-loaded RecordingSource exactly as it does for SimulatedSource —
+    no new mechanism, no type-based branching (recording.md's safety-parity
+    requirement between simulate and live sources). A standalone module (not
+    the `newt` package) proves `_load_source` really imports the developer's
+    own module rather than something bundled.
+    """
+    from newt._cli.record import _load_source
+    from newt.recording import Session
+
+    fixture_dir = tmp_path / "fixture_mod"
+    fixture_dir.mkdir()
+    (fixture_dir / "kill_switch_fixture.py").write_text(
+        "from newt.recording import SINGLE_ARM_DESCRIPTOR, SimulatedSource\n"
+        "def make_source():\n"
+        "    return SimulatedSource(SINGLE_ARM_DESCRIPTOR)\n"
+    )
+    monkeypatch.syspath_prepend(str(fixture_dir))
+
+    output_dir = tmp_path / "episodes"
+    source = _load_source("kill_switch_fixture:make_source")
+    session = Session(source, task="t", output_dir=output_dir)
+    session.start_episode()
+    time.sleep(0.15)
+    session.kill()
+
+    assert source.disabled is True, "kill must torque off the --source-loaded source via disable_all"
+    assert sorted(output_dir.glob("episode_*")) == [], "kill must leave no episode dir"
+
+
+# ---------------------------------------------------------------------------
 # --json agent driving — same Session, stdin commands -> events
 # ---------------------------------------------------------------------------
 
