@@ -10,6 +10,9 @@ Public surface:
 - `newt.NewTheoryError`       — base class for all server-emitted errors; six-field
                                  envelope (code, type, message, context, docs, trace_id)
 - `newt.AuthError`            — raised when API key is rejected (WS close 4001 / HTTP 401)
+- `newt.EndpointUnavailableError` — raised when the WS upgrade is rejected at the HTTP
+                                 layer for a non-auth reason (404 = endpoint not deployed /
+                                 stale registry URL; 5xx = service down). Never an API-key issue.
 - `newt.EmbodimentError`      — raised when Robot(embodiment=...) receives an invalid
                                  value: a string name, a conflict with read_state=/execute=,
                                  or an object missing one or both required methods
@@ -57,6 +60,7 @@ from newt._client.robot import (
     ContractMismatchError,
     DegradationWarning,
     EmbodimentError,
+    EndpointUnavailableError,
     EnvOverrideWarning,
     InferenceResponse,
     ModelNotFoundError,
@@ -81,6 +85,7 @@ __all__ = [
     "DegradationWarning",
     "Embodiment",
     "EmbodimentError",
+    "EndpointUnavailableError",
     "EnvOverrideWarning",
     "InferenceResponse",
     "ModelNotFoundError",

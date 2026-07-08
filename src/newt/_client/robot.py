@@ -101,6 +101,19 @@ class AuthError(NewTheoryError):
     """
 
 
+class EndpointUnavailableError(NewTheoryError):
+    """The inference endpoint rejected the WS upgrade at the HTTP layer (not auth).
+
+    Distinct from AuthError on purpose: a 404 (or 5xx) during the WebSocket
+    handshake means nothing is serving at the URL the registry handed us — the
+    model isn't deployed, the service is down, or the registry endpoint is stale.
+    The API key is irrelevant to this failure: a rejected key surfaces as
+    AuthError / WS close 4001 *after* the upgrade succeeds, never as an HTTP 404.
+    `code` carries the HTTP status; branch on `exc.type` (`endpoint.not_found`,
+    `endpoint.unavailable`).
+    """
+
+
 class DegradationWarning(UserWarning):
     """Server reports that one or more expected cameras were absent from the obs frame.
 
@@ -1062,14 +1075,47 @@ class Robot:
             self._cold_start_retry_consumed = True
             status = getattr(exc, "response", None)
             http_code = getattr(status, "status_code", 0) if status else 0
-            raise AuthError(
-                code=4001,
-                type="auth.invalid_key",
-                message=(
-                    f"Authentication failed during WS upgrade (HTTP {http_code}). "
-                    "Check your API key and rotate it in the NT console if needed."
-                ),
-                context={},
+            # Any HTTP-status rejection of the WS *upgrade* is an endpoint/transport
+            # problem, never an NT-API-key problem. The key is validated AFTER the
+            # socket is accepted: serve_nt0.py accepts, checks the Bearer token, then
+            # closes with WS code 4001 (handled in the recv loop, raised as AuthError
+            # there). So a rejected key never reaches this branch. The old code mapped
+            # every InvalidStatus to "Authentication failed — check your API key",
+            # which sent a tester to rotate a working key over a 404 outage (T10 lie,
+            # 2026-06-29). Observed upgrade codes: 404 = Modal edge, app/function not
+            # deployed; 403 = Starlette, no WebSocket route at this path; 5xx = up but
+            # erroring.
+            if http_code == 404:
+                err_type = "endpoint.not_found"
+                message = (
+                    f"Inference endpoint not found (HTTP 404): nothing is serving at "
+                    f"{self._url}. This is not an API-key problem — the model may not be "
+                    "deployed, or the registry is pointing at a stale URL. Check the NT "
+                    "status page; if it persists, contact New Theory."
+                )
+            elif http_code in (401, 403):
+                err_type = "endpoint.unavailable"
+                message = (
+                    f"Inference endpoint rejected the WebSocket upgrade (HTTP {http_code}) "
+                    f"at {self._url}. This is not an NT API-key problem — your key is "
+                    "checked after the connection opens, not at the upgrade. The URL "
+                    "likely isn't exposing a WebSocket route, or an upstream proxy "
+                    "blocked it. If you set NT_INFERENCE_URL, verify it; otherwise "
+                    "contact New Theory."
+                )
+            else:
+                err_type = "endpoint.unavailable"
+                message = (
+                    f"Inference endpoint unavailable (HTTP {http_code}) at {self._url}. "
+                    "This is not an API-key problem — the service is down or erroring. "
+                    "Retry shortly; if it persists, contact New Theory."
+                )
+            raise EndpointUnavailableError(
+                code=http_code,
+                type=err_type,
+                message=message,
+                context={"url": self._url, "http_status": http_code},
+                docs="https://newtheory-docs.vercel.app/docs/api/errors",
             ) from exc
 
     def _run_blocking(self, prompt: str, max_duration: float) -> RunResult:
