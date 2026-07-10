@@ -461,3 +461,71 @@ def test_upload_directory_rerun_export_rejects_missing_directory(tmp_path):
     sink = NTCloudSink("minigolf", api_key=_FAKE_KEY)
     with pytest.raises(RuntimeError, match="not a directory"):
         sink.upload_directory(tmp_path / "does_not_exist")
+
+
+# --------------------------------------------------------------------------- #
+# capture-005-cont task 2 — placeholder-task refusal, coordinated with
+# training/intake's own check (portal repo, ft-002). meta/tasks.parquet is the
+# real LeRobot v3.0 task-storage format (meta/tasks.jsonl is legacy) — see
+# training/intake/intake.py::load_task_records.
+# --------------------------------------------------------------------------- #
+
+def _write_tasks_parquet(export_dir: Path, task_texts: list[str]) -> None:
+    """Write meta/tasks.parquet in the real LeRobot v3.0 shape — a
+    task-text-indexed table with an int task_index column, matching
+    training/intake/intake.py's write_task_records (portal repo)."""
+    pq = pytest.importorskip("pyarrow.parquet")
+    import pyarrow as pa
+
+    table = pa.table(
+        {"task": task_texts, "task_index": list(range(len(task_texts)))}
+    )
+    pq.write_table(table, export_dir / "meta" / "tasks.parquet")
+
+
+def test_upload_directory_rerun_export_refuses_placeholder_only_tasks(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    calls, _signed_paths = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    _write_tasks_parquet(export_dir, ["task"])
+
+    with pytest.raises(RuntimeError, match="placeholder"):
+        sink.upload_directory(export_dir)
+
+    # Refused before any file was uploaded — no partial upload.
+    assert calls == []
+
+
+def test_upload_directory_rerun_export_allows_real_task_labels(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    _write_tasks_parquet(export_dir, ["putt the ball"])
+
+    sink.upload_directory(export_dir)  # does not raise
+
+    assert sink.namespace == _NAMESPACE
+
+
+def test_upload_directory_rerun_export_only_refuses_if_every_task_is_placeholder(monkeypatch, tmp_path):
+    """Mirrors training/intake/validators.py::validate_task_requirement's
+    `all(...)` semantics — a dataset with a mix of placeholder and real task
+    strings is not refused, only an all-placeholder dataset is."""
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    _write_tasks_parquet(export_dir, ["task", "putt the ball"])
+
+    sink.upload_directory(export_dir)  # does not raise

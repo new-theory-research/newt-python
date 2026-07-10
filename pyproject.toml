@@ -34,6 +34,7 @@ recording = [
     "mcap>=1.1,<2.0",
     "protobuf>=4.25,<6.0",
     "opencv-python>=4.8,<5.0",
+    "pyarrow>=14,<21",
 ]
 
 [dependency-groups]
@@ -60,9 +61,10 @@ known_first_party = ["newt"]
 # not imported by any current src/ or test code. sshtunnel/ml_collections were
 # dropped entirely in brief-306: their only consumers (run_robot_client.py,
 # imitation_mirror/) were deleted by brief-246.
-# mcap/protobuf/opencv-python: [recording] extra, loaded via the lazy require()
-# lantern in newt.recording (brief-267) — real usage deptry's static scan can't see.
-DEP002 = ["lerobot", "mcap", "protobuf", "opencv-python"]
+# mcap/protobuf/opencv-python/pyarrow: [recording] extra, loaded via the lazy
+# require() lantern in newt.recording (brief-267) — real usage deptry's static
+# scan can't see.
+DEP002 = ["lerobot", "mcap", "protobuf", "opencv-python", "pyarrow"]
 # typing_extensions: pre-existing Python<3.8 fallback import in _embodiment.py;
 # not a declared dependency, out of scope for brief-306.
 DEP003 = ["typing_extensions"]

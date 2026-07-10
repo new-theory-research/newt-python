@@ -27,10 +27,22 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from newt._credentials import read_api_key
+from newt.recording._lantern import require
 
 # Matches newt._cli.login._DEFAULT_CONSOLE — kept as a separate literal rather
 # than importing the CLI package (recording must not depend on the CLI layer).
 _DEFAULT_CONSOLE_URL = "https://newtheory-console.vercel.app"
+
+# The Rerun exporter's literal placeholder task string, stamped on every frame
+# when no --task is given at capture time. Mirrors
+# training/intake/validators.py::PLACEHOLDER_TASK (portal repo, ft-002) — that
+# module owns the single definition of "what counts as a placeholder task";
+# this is a disclosed copy of the same literal value, not an independent
+# definition (coordinate-don't-duplicate, capture-005-cont). newt-python and
+# portal are separate repos with no shared package today, so a literal import
+# isn't possible — if intake's definition ever needs to diverge from this one,
+# that's an escalation, not a silent drift.
+_PLACEHOLDER_TASK = "task"
 
 # GCS v4 signed URLs bind the content-type into the signature itself
 # (apps/console/lib/episodes-storage.ts signs with "application/octet-stream").
@@ -61,6 +73,27 @@ def _namespace_from_object_path(object_path: str, dataset: str) -> str:
             f"{object_path!r}"
         )
     return segments[1]
+
+
+def _read_task_texts(export_dir: Path) -> list[str] | None:
+    """Read task strings from ``meta/tasks.parquet``, or ``None`` if absent.
+
+    ``meta/tasks.parquet`` (a task-text-indexed table with an int
+    ``task_index`` column — ``lerobot.datasets.io_utils.load_tasks``) is the
+    real LeRobot v3.0 task-storage format; ``meta/tasks.jsonl`` is legacy,
+    written only by the v2.1->v3.0 migration script and never present on a
+    real v3.0 export (confirmed against ``training/intake/intake.py``'s own
+    ``load_task_records``, portal repo). Absence isn't refused here —
+    ``upload_directory`` also accepts directories that aren't LeRobot-v3
+    exports, so a missing ``meta/tasks.parquet`` just means this check has
+    nothing to check, not that the upload is invalid.
+    """
+    tasks_path = export_dir / "meta" / "tasks.parquet"
+    if not tasks_path.is_file():
+        return None
+    pq = require("pyarrow.parquet", "pyarrow")
+    table = pq.read_table(tasks_path, columns=["task"])
+    return table.column("task").to_pylist()
 
 
 class NTCloudSink:
@@ -202,7 +235,13 @@ class NTCloudSink:
         a forked mechanism.
 
         Raises (Rule 10) if the directory doesn't exist or is empty, or if
-        any file's sign/PUT fails — no silent partial upload.
+        any file's sign/PUT fails — no silent partial upload. Also raises,
+        before any file is uploaded, if every task string in
+        ``meta/tasks.parquet`` is the literal Rerun-exporter placeholder —
+        coordinated with (not a fork of) ``training/intake``'s own refusal,
+        which applies the same check later at training intake. Catching it
+        here means a developer isn't told "your data is fine" at upload and
+        "your task string is broken" only later at train.
         """
         export_dir = Path(export_dir)
         if not export_dir.is_dir():
@@ -218,6 +257,18 @@ class NTCloudSink:
         if not files:
             raise RuntimeError(
                 f"NTCloudSink.upload_directory: no files found under {export_dir}"
+            )
+
+        task_texts = _read_task_texts(export_dir)
+        if task_texts and all(text == _PLACEHOLDER_TASK for text in task_texts):
+            raise RuntimeError(
+                f"NTCloudSink.upload_directory: {export_dir}'s task strings in "
+                f"meta/tasks.parquet are only the placeholder {_PLACEHOLDER_TASK!r} "
+                "— refusing to upload an unlabeled dataset (Rule 10: no silent "
+                "placeholder passthrough). Fix: re-export from Rerun with --task, "
+                "or run training/intake/intake.py --dataset-dir "
+                f"{export_dir} --task \"<your task>\" to inject a real label into "
+                "meta/tasks.parquet, then re-run this upload."
             )
 
         for rel in files:
