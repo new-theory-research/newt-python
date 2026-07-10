@@ -39,6 +39,10 @@ def main() -> None:
         from newt._cli.record import cmd_record
         sys.exit(cmd_record(args[1:]))
 
+    if cmd == "finetune":
+        from newt._cli.finetune import cmd_finetune
+        sys.exit(cmd_finetune(args[1:]))
+
     if cmd == "episodes":
         from newt._cli.episodes import cmd_episodes
         sys.exit(cmd_episodes(args[1:]))
@@ -59,10 +63,11 @@ def _usage() -> None:
     print("  skill    Manage built-in skills (try: newt skill install)")
     print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
+    print("  finetune Launch a training run on NT's GPUs and watch it (try: newt finetune --dataset <name>)")
     print("")
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status,")
-    print("           record, episodes)")
+    print("           record, episodes, finetune)")
     print("  --print  (login only) Print the key to stdout; do not write credentials.")
     print("           Compose with: KEY=$(newt login --print)")
     print("")
