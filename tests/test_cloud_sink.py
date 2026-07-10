@@ -333,3 +333,131 @@ def test_end_to_end_via_session_delivers_real_episode(monkeypatch, tmp_path):
     assert len(upload_calls) == 2
     for _, url in upload_calls:
         assert f"/{_NAMESPACE}/{dataset}/{path.name}/" in url
+
+
+# --------------------------------------------------------------------------- #
+# capture-005-cont — upload_directory: the Rerun-exported-directory hand-off.
+# Takes an arbitrary already-exported directory (LeRobot-v3, as Rerun
+# produces it) as given — no episode.json parsing, no format assumptions —
+# and reuses the same sign/PUT plumbing deliver()/finalize() use.
+# --------------------------------------------------------------------------- #
+
+def _make_rerun_export_dir(tmp_path: Path, name: str = "minigolf_export") -> Path:
+    """A LeRobot-v3-shaped export tree — not an NT episode.json shape at all,
+    proving upload_directory takes the directory as given rather than
+    expecting NT's own episode format."""
+    export = tmp_path / name
+    (export / "meta").mkdir(parents=True)
+    (export / "data" / "chunk-000").mkdir(parents=True)
+    (export / "videos" / "chunk-000").mkdir(parents=True)
+    (export / "meta" / "info.json").write_text(json.dumps({"codebase_version": "v3.0"}))
+    (export / "meta" / "tasks.jsonl").write_text(json.dumps({"task_index": 0, "task": "putt the ball"}) + "\n")
+    (export / "data" / "chunk-000" / "episode_000000.parquet").write_bytes(b"fake-parquet-bytes")
+    (export / "videos" / "chunk-000" / "episode_000000.mp4").write_bytes(b"fake-mp4-bytes")
+    return export
+
+
+def test_upload_directory_rerun_export_uploads_every_file_under_namespace(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    calls, signed_paths = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    upload_calls = [c for c in calls if not c[1].endswith("/api/uploads/sign")]
+    # 4 export files + manifest.json written last.
+    assert len(upload_calls) == 5
+    for _, url in upload_calls:
+        assert f"/{_NAMESPACE}/{dataset}/" in url
+    # Relative paths preserved under the dataset prefix, no NT episode.json assumed.
+    assert "meta/info.json" in signed_paths
+    assert "data/chunk-000/episode_000000.parquet" in signed_paths
+    assert signed_paths[-1] == "manifest.json"
+
+
+def test_upload_directory_rerun_export_writes_manifest_last(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    calls, signed_paths = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    manifest_uploads = [c for c in calls if not c[1].endswith("/api/uploads/sign")]
+    manifest_put = manifest_uploads[-1]
+    assert manifest_put[0] == "PUT"
+    assert f"/{_NAMESPACE}/{dataset}/manifest.json" in manifest_put[1]
+    assert sink.namespace == _NAMESPACE
+
+
+def test_upload_directory_rerun_export_manifest_does_not_invent_episode_fields(monkeypatch, tmp_path):
+    """The export isn't NT's episode.json shape, so the manifest must not
+    claim NT-episode fields (format_version="0.0.3", episode_count) it has no
+    basis for (Rule 10) — it records what's actually known about this upload."""
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    put_bodies: dict[str, bytes] = {}
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/api/uploads/sign"):
+            body = json.loads(req.data)
+            return _FakeHTTPResp(_sign_response(dataset, body["path"]))
+        put_bodies[req.full_url] = req.data
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    manifest_body = next(
+        body for url, body in put_bodies.items() if url.endswith("/manifest.json?sig=fake")
+    )
+    manifest = json.loads(manifest_body)
+    assert manifest["source_format"] == "lerobot-v3"
+    assert manifest["file_count"] == 4
+    assert manifest["attribution"] == _NAMESPACE
+    assert "created_at" in manifest
+    assert "format_version" not in manifest
+    assert "episode_count" not in manifest
+
+
+def test_upload_directory_rerun_export_raises_and_preserves_on_upload_failure(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    _install_fake_urlopen(monkeypatch, dataset, upload_error=URLError("connection reset"))
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    with pytest.raises(RuntimeError, match="upload failed"):
+        sink.upload_directory(export_dir)
+
+    # Loud failure never touches the local export directory.
+    assert export_dir.exists()
+    assert (export_dir / "meta" / "info.json").exists()
+
+
+def test_upload_directory_rerun_export_rejects_empty_directory(tmp_path):
+    from newt.recording import NTCloudSink
+
+    sink = NTCloudSink("minigolf", api_key=_FAKE_KEY)
+    empty_dir = tmp_path / "empty_export"
+    empty_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="no files found"):
+        sink.upload_directory(empty_dir)
+
+
+def test_upload_directory_rerun_export_rejects_missing_directory(tmp_path):
+    from newt.recording import NTCloudSink
+
+    sink = NTCloudSink("minigolf", api_key=_FAKE_KEY)
+    with pytest.raises(RuntimeError, match="not a directory"):
+        sink.upload_directory(tmp_path / "does_not_exist")

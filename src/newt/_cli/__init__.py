@@ -43,6 +43,10 @@ def main() -> None:
         from newt._cli.episodes import cmd_episodes
         sys.exit(cmd_episodes(args[1:]))
 
+    if cmd == "upload":
+        from newt._cli.upload import cmd_upload
+        sys.exit(cmd_upload(args[1:]))
+
     print(f"newt: unknown command '{cmd}'", file=sys.stderr)
     print("Run 'newt --help' for usage.", file=sys.stderr)
     sys.exit(1)
@@ -59,10 +63,11 @@ def _usage() -> None:
     print("  skill    Manage built-in skills (try: newt skill install)")
     print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
+    print("  upload   Upload an exported directory (e.g. Rerun LeRobot-v3) to your cloud namespace")
     print("")
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status,")
-    print("           record, episodes)")
+    print("           record, episodes, upload)")
     print("  --print  (login only) Print the key to stdout; do not write credentials.")
     print("           Compose with: KEY=$(newt login --print)")
     print("")

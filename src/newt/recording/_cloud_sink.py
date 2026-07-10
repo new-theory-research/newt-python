@@ -113,6 +113,13 @@ class NTCloudSink:
         self._task: str | None = None
         self._format_version: str | None = None
 
+    @property
+    def namespace(self) -> str | None:
+        """The namespace this sink's uploads landed under, read from the
+        server's sign response (capture-004) — never recomputed client-side.
+        ``None`` until the first file has been signed."""
+        return self._namespace
+
     def deliver(self, episode_dir: Path) -> None:
         episode_dir = Path(episode_dir)
         if not episode_dir.exists():
@@ -179,6 +186,56 @@ class NTCloudSink:
                 "manifest.json was not written; the "
                 f"{self._episode_count} already-uploaded episode(s) remain in "
                 "place — safe to retry finalize() once the API is reachable."
+            ),
+        )
+
+    def upload_directory(self, export_dir: Path) -> None:
+        """Upload every file under an already-exported directory (e.g. a
+        Rerun-exported LeRobot-v3 directory, capture-005-cont) to this sink's
+        dataset, then write the dataset manifest last.
+
+        Unlike ``deliver()``, which parses NT's own per-episode
+        ``episode.json``, this takes the directory's contents as given: no
+        format assumptions, no conversion — the export is uploaded as-is,
+        preserving its relative paths under the dataset prefix. It reuses the
+        same signed-URL upload plumbing (``_upload``/``_put``/``_sign``), not
+        a forked mechanism.
+
+        Raises (Rule 10) if the directory doesn't exist or is empty, or if
+        any file's sign/PUT fails — no silent partial upload.
+        """
+        export_dir = Path(export_dir)
+        if not export_dir.is_dir():
+            raise RuntimeError(
+                f"NTCloudSink.upload_directory: not a directory: {export_dir}"
+            )
+
+        files = sorted(
+            p.relative_to(export_dir).as_posix()
+            for p in export_dir.rglob("*")
+            if p.is_file()
+        )
+        if not files:
+            raise RuntimeError(
+                f"NTCloudSink.upload_directory: no files found under {export_dir}"
+            )
+
+        for rel in files:
+            self._upload(export_dir / rel, rel)
+
+        manifest = {
+            "source_format": "lerobot-v3",
+            "file_count": len(files),
+            "attribution": self._namespace,
+            "created_at": _rfc3339_now(),
+        }
+        self._put(
+            json.dumps(manifest).encode(),
+            "manifest.json",
+            failure_note=(
+                "manifest.json was not written; the "
+                f"{len(files)} already-uploaded file(s) remain in place — "
+                "safe to retry once the API is reachable."
             ),
         )
 
