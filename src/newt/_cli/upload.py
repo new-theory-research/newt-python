@@ -75,15 +75,34 @@ def cmd_upload(args: list[str]) -> int:
 
         sink = NTCloudSink(dataset)
         sink.upload_directory(export_dir)
+        # Read the server back: the objectively-checkable proof the hand-off
+        # landed, attributed. A missing file (or a namespace mismatch) raises
+        # here rather than letting a partial upload be reported as success.
+        listing = sink.verify_listing()
     except Exception as exc:
-        # Missing key, sign/PUT failure, or a bad directory — surface it, don't trace.
+        # Missing key, sign/PUT failure, a bad directory, or a verification
+        # failure — surface it, don't trace.
         print(f"[newt upload] {exc}", file=sys.stderr)
         return 1
 
     namespace = sink.namespace
+    verified_count = listing["count"]
     if as_json:
-        print(json.dumps({"dataset": dataset, "namespace": namespace}))
+        print(
+            json.dumps(
+                {
+                    "dataset": dataset,
+                    "namespace": namespace,
+                    "verified_count": verified_count,
+                    "objects": [obj["path"] for obj in listing["objects"]],
+                }
+            )
+        )
     else:
         print(f"[newt upload] {export_dir} -> dataset {dataset!r} landed under namespace {namespace}")
+        print(
+            f"[newt upload] verified: {verified_count} object(s) listed under "
+            f"{namespace}/{dataset}"
+        )
 
     return 0

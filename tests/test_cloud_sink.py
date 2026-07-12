@@ -45,14 +45,33 @@ def _sign_response(dataset: str, path: str) -> bytes:
 
 def _install_fake_urlopen(monkeypatch, dataset: str, *, upload_error: Exception | None = None):
     """Every /api/uploads/sign call succeeds; every upload PUT succeeds unless
-    `upload_error` is given, in which case every PUT raises it. Returns the list
-    of (method, url) calls in order, plus `signed_paths` — the `path` field
-    sent to /api/uploads/sign, in the order it was requested."""
+    `upload_error` is given, in which case every PUT raises it. A GET
+    /api/uploads/list returns whatever has been successfully PUT so far (the
+    read-side mirror capture-006 shipped), so verify_listing() sees exactly the
+    objects the upload landed. Returns the list of (method, url) calls in order,
+    plus `signed_paths` — the `path` field sent to /api/uploads/sign, in the
+    order it was requested."""
     calls: list[tuple[str, str]] = []
     signed_paths: list[str] = []
+    uploaded: list[str] = []
 
     def fake_urlopen(req, timeout=None):
         calls.append((req.get_method(), req.full_url))
+        if "/api/uploads/list" in req.full_url:
+            objects = [
+                {
+                    "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/{p}",
+                    "path": f"{dataset}/{p}",
+                    "size": 1,
+                    "updated": "2026-07-11T00:00:00.000Z",
+                }
+                for p in uploaded
+            ]
+            return _FakeHTTPResp(
+                json.dumps(
+                    {"namespace": _NAMESPACE, "count": len(objects), "objects": objects}
+                ).encode()
+            )
         if req.full_url.endswith("/api/uploads/sign"):
             body = json.loads(req.data)
             signed_paths.append(body["path"])
@@ -60,6 +79,9 @@ def _install_fake_urlopen(monkeypatch, dataset: str, *, upload_error: Exception 
         # This is the "upload" PUT to the signed URL.
         if upload_error is not None:
             raise upload_error
+        # Record the landed object so a later /api/uploads/list reflects it.
+        # signed_paths[-1] is the path just signed for this PUT.
+        uploaded.append(signed_paths[-1])
         return _FakeHTTPResp(b"")
 
     monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
@@ -529,3 +551,140 @@ def test_upload_directory_rerun_export_only_refuses_if_every_task_is_placeholder
     _write_tasks_parquet(export_dir, ["task", "putt the ball"])
 
     sink.upload_directory(export_dir)  # does not raise
+
+
+# --------------------------------------------------------------------------- #
+# capture-005-cont task 3 — verify_listing: read the server back to prove the
+# hand-off landed, attributed. Consumes capture-006's GET /api/uploads/list.
+# --------------------------------------------------------------------------- #
+
+def test_verify_listing_confirms_every_uploaded_file_is_listed(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    calls, _signed = _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    listing = sink.verify_listing()
+
+    # It GETs the list route, scoped to this dataset.
+    list_calls = [c for c in calls if "/api/uploads/list" in c[1]]
+    assert len(list_calls) == 1
+    assert list_calls[0][0] == "GET"
+    assert f"dataset={dataset}" in list_calls[0][1]
+
+    # Attribution proven from the server response — the 4 export files + manifest.
+    assert listing["namespace"] == _NAMESPACE
+    assert listing["count"] == 5
+    listed = {obj["path"] for obj in listing["objects"]}
+    assert f"{dataset}/meta/info.json" in listed
+    assert f"{dataset}/manifest.json" in listed
+
+
+def test_verify_listing_reads_namespace_from_server_not_recomputed(monkeypatch, tmp_path):
+    """The verified namespace comes from the listing response, the same server
+    source the sign response used — never recomputed from the raw key
+    (capture-004). A server that reports a DIFFERENT namespace than the upload
+    landed under is a mismatch, refused loud, not silently trusted."""
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    signed_paths: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        if "/api/uploads/list" in req.full_url:
+            # Server reports a namespace that disagrees with the sign responses.
+            return _FakeHTTPResp(
+                json.dumps({"namespace": "ffff0000", "count": 0, "objects": []}).encode()
+            )
+        if req.full_url.endswith("/api/uploads/sign"):
+            body = json.loads(req.data)
+            signed_paths.append(body["path"])
+            return _FakeHTTPResp(_sign_response(dataset, body["path"]))
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    with pytest.raises(RuntimeError, match="does not match the namespace"):
+        sink.verify_listing()
+
+
+def test_verify_listing_fails_loud_when_an_uploaded_file_is_missing(monkeypatch, tmp_path):
+    """A file that uploaded but does NOT appear in the listing means the
+    hand-off did not fully land — verify_listing refuses to report success
+    (Rule 10), rather than let a partial upload look complete."""
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+
+    def fake_urlopen(req, timeout=None):
+        if "/api/uploads/list" in req.full_url:
+            # Listing is missing manifest.json — a partial landing.
+            objects = [
+                {
+                    "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/meta/info.json",
+                    "path": f"{dataset}/meta/info.json",
+                    "size": 1,
+                    "updated": "2026-07-11T00:00:00.000Z",
+                }
+            ]
+            return _FakeHTTPResp(
+                json.dumps(
+                    {"namespace": _NAMESPACE, "count": len(objects), "objects": objects}
+                ).encode()
+            )
+        if req.full_url.endswith("/api/uploads/sign"):
+            body = json.loads(req.data)
+            return _FakeHTTPResp(_sign_response(dataset, body["path"]))
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    with pytest.raises(RuntimeError, match="missing from the server listing"):
+        sink.verify_listing()
+
+
+def test_verify_listing_before_upload_raises(monkeypatch, tmp_path):
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    _install_fake_urlopen(monkeypatch, dataset)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+
+    with pytest.raises(RuntimeError, match="nothing has been uploaded yet"):
+        sink.verify_listing()
+
+
+def test_verify_listing_surfaces_list_route_failure_loud(monkeypatch, tmp_path):
+    """A failing list route (e.g. 503 listing_unavailable) surfaces as a clean
+    RuntimeError, not a traceback."""
+    from newt.recording import NTCloudSink
+
+    dataset = "minigolf"
+    signed_paths: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        if "/api/uploads/list" in req.full_url:
+            raise HTTPError(req.full_url, 503, "listing_unavailable", None, None)
+        if req.full_url.endswith("/api/uploads/sign"):
+            body = json.loads(req.data)
+            signed_paths.append(body["path"])
+            return _FakeHTTPResp(_sign_response(dataset, body["path"]))
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    sink = NTCloudSink(dataset, api_key=_FAKE_KEY)
+    export_dir = _make_rerun_export_dir(tmp_path)
+    sink.upload_directory(export_dir)
+
+    with pytest.raises(RuntimeError, match="failed to list dataset"):
+        sink.verify_listing()

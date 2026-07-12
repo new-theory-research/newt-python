@@ -24,6 +24,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from newt._credentials import read_api_key
@@ -145,6 +146,7 @@ class NTCloudSink:
         self._namespace: str | None = None
         self._task: str | None = None
         self._format_version: str | None = None
+        self._uploaded_paths: list[str] | None = None
 
     @property
     def namespace(self) -> str | None:
@@ -290,6 +292,66 @@ class NTCloudSink:
             ),
         )
 
+        # Every remote path this call landed, in upload order (manifest last) —
+        # the expected set verify_listing() checks the server's listing against.
+        self._uploaded_paths = [*files, "manifest.json"]
+
+    def verify_listing(self) -> dict:
+        """Confirm — by reading the server back — that the files this sink
+        uploaded actually landed under the developer's namespace, attributed.
+
+        This is the objectively-checkable proof the hand-off completed
+        (capture-005-cont task 3): it GETs ``/api/uploads/list?dataset=...``
+        (the read-side mirror of the sign route, capture-006) and asserts every
+        path ``upload_directory`` uploaded appears in the server's listing. The
+        namespace is the one the server reports, cross-checked against the one
+        the sign responses reported during upload — both come from the server
+        (capture-004), neither is recomputed here.
+
+        Returns the parsed listing (``{"namespace", "count", "objects"}``).
+        Raises (Rule 10) if nothing was uploaded to verify, if the server
+        reports a different namespace than the upload landed under, or if any
+        uploaded file is missing from the listing — a missing file means the
+        hand-off did NOT fully land, and that must fail loud, never be reported
+        as success.
+        """
+        if self._uploaded_paths is None:
+            raise RuntimeError(
+                "NTCloudSink.verify_listing: nothing has been uploaded yet; "
+                "call upload_directory() before verifying the listing."
+            )
+
+        listing = self._list(self._dataset)
+
+        # The listing's namespace and the upload's namespace both come from the
+        # server (capture-004); if they disagree, the read-side and write-side
+        # resolved different identities — surface it rather than trust either.
+        listed_namespace = listing.get("namespace")
+        if self._namespace is not None and listed_namespace != self._namespace:
+            raise RuntimeError(
+                f"NTCloudSink.verify_listing: listing namespace {listed_namespace!r} "
+                f"does not match the namespace the upload landed under "
+                f"{self._namespace!r} — refusing to report a mismatched attribution."
+            )
+
+        # The listing's `path` is <dataset>/<relative-path> (namespace stripped,
+        # apps/console/app/api/uploads/list/route.ts) — match against the same
+        # <dataset>/<rel> shape our uploads landed at.
+        listed_paths = {obj["path"] for obj in listing.get("objects", [])}
+        missing = [
+            rel for rel in self._uploaded_paths
+            if f"{self._dataset}/{rel}" not in listed_paths
+        ]
+        if missing:
+            raise RuntimeError(
+                f"NTCloudSink.verify_listing: {len(missing)} uploaded file(s) are "
+                f"missing from the server listing for dataset {self._dataset!r} "
+                f"(e.g. {missing[0]!r}) — the hand-off did not fully land; "
+                "refusing to report success."
+            )
+
+        return listing
+
     # --- signed-URL + upload plumbing ---------------------------------------
 
     def _sign(self, remote_path: str, *, failure_note: str) -> dict:
@@ -314,6 +376,30 @@ class NTCloudSink:
             raise RuntimeError(
                 f"NTCloudSink: cannot reach {self._console_url} to sign "
                 f"{remote_path!r}: {exc.reason}; {failure_note}"
+            ) from exc
+
+    def _list(self, dataset: str) -> dict:
+        """GET ``/api/uploads/list?dataset=...`` — the read-side mirror of
+        ``_sign`` (capture-006). Same Bearer-key auth; the server derives the
+        namespace from the key's owner and scopes the listing to it (the SDK
+        can't name another identity's namespace). Returns the parsed JSON."""
+        req = Request(
+            f"{self._console_url}/api/uploads/list?dataset={quote(dataset, safe='')}",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            method="GET",
+        )
+        try:
+            with urlopen(req, timeout=self._timeout) as resp:
+                return json.loads(resp.read())
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"NTCloudSink: failed to list dataset {dataset!r} to verify the "
+                f"upload landed ({exc.code} {exc.reason})."
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(
+                f"NTCloudSink: cannot reach {self._console_url} to list "
+                f"dataset {dataset!r}: {exc.reason}."
             ) from exc
 
     def _upload(self, local_path: Path, remote_path: str) -> None:
