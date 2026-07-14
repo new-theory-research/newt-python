@@ -168,6 +168,126 @@ def test_handle_reattaches_without_launching(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Success surfaces the Robot snippet (the tag is useless without the call)
+# ---------------------------------------------------------------------------
+
+def test_success_prints_robot_snippet(monkeypatch):
+    """On success the exact `Robot(model="<tag>")` call is printed — the tag alone
+    doesn't tell a developer how to point at their new model."""
+    rc, out, _ = _run(
+        ["--dataset", "d"], monkeypatch, launch=_HANDLE, statuses=[_SUCCEEDED]
+    )
+    assert rc == 0
+    assert 'Robot(model="ft-placeholder-9f2a")' in out
+
+
+def test_pending_tag_prints_no_snippet():
+    """A finished run with no tag yet must not print a Robot() call around a fake tag."""
+    text, code = _render_terminal(
+        {"status": "succeeded", "gate": None, "tag": None, "report_card": None}
+    )
+    assert code == 0
+    assert "Robot(model=" not in text
+
+
+# ---------------------------------------------------------------------------
+# Launch breadcrumbs — watch page + one-shot --status hint
+# ---------------------------------------------------------------------------
+
+def test_launch_prints_watch_page_and_status_hint(monkeypatch):
+    """Launch must print the console watch page (/runs/<handle>) and the copy-paste
+    one-shot check — the two ways a developer re-finds a run after closing the CLI."""
+    rc, out, _ = _run(
+        ["--dataset", "my-task"], monkeypatch, launch=_HANDLE, statuses=[_SUCCEEDED]
+    )
+    assert rc == 0
+    assert "/runs/fc-abc123" in out, "the console watch-page URL must be printed at launch"
+    assert "--handle fc-abc123 --status" in out, "the one-shot re-check must be printed"
+
+
+# ---------------------------------------------------------------------------
+# --status one-shot: fetch once, print, exit — no blocking poll
+# ---------------------------------------------------------------------------
+
+def test_status_one_shot_succeeded_exits_zero_polls_once(monkeypatch):
+    """`--handle X --status` fetches state exactly once and exits 0, surfacing the tag
+    and Robot snippet — no watch loop."""
+    calls = {"n": 0}
+    def _poll(*a, **k):
+        calls["n"] += 1
+        return _SUCCEEDED
+    monkeypatch.setattr(ft, "_poll_status", _poll)
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+
+    rc = cmd_finetune(["--handle", "fc-abc123", "--status"])
+    assert rc == 0
+    assert calls["n"] == 1, "one-shot status must poll exactly once, never loop"
+    assert 'Robot(model="ft-placeholder-9f2a")' in out.getvalue()
+
+
+def test_status_one_shot_running_exits_zero(monkeypatch):
+    """A run still in progress: --status reports the state and exits 0 (the fetch
+    succeeded) — it does not block waiting for a terminal state."""
+    running = {"status": "running", "gate": None, "tag": None, "report_card": None}
+    calls = {"n": 0}
+    def _poll(*a, **k):
+        calls["n"] += 1
+        return running
+    monkeypatch.setattr(ft, "_poll_status", _poll)
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+
+    rc = cmd_finetune(["--handle", "fc-abc123", "--status"])
+    assert rc == 0
+    assert calls["n"] == 1
+    assert "running" in out.getvalue()
+
+
+def test_status_one_shot_json_is_clean(monkeypatch):
+    """`--status --json` emits a single JSON object with the current state — clean
+    stdout, scriptable."""
+    running = {"status": "running", "gate": None, "tag": None, "report_card": None}
+    monkeypatch.setattr(ft, "_poll_status", lambda *a, **k: running)
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+
+    rc = cmd_finetune(["--handle", "fc-abc123", "--status", "--json"])
+    assert rc == 0
+    parsed = json.loads(out.getvalue())
+    assert parsed["job_handle"] == "fc-abc123"
+    assert parsed["status"] == "running"
+
+
+def test_status_requires_handle(monkeypatch):
+    """`--status` without `--handle` is an error — there's no run to check."""
+    rc, out, err = _run(["--dataset", "d", "--status"], monkeypatch)
+    assert rc == 1
+    assert "handle" in err.lower()
+
+
+def test_status_one_shot_404_exits_nonzero(monkeypatch):
+    """An unknown handle fails the fetch itself — exit non-zero, name the handle."""
+    def _not_found(*a, **k):
+        raise HTTPError("url", 404, "Not Found", {}, None)
+    monkeypatch.setattr(ft, "_poll_status", _not_found)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+
+    rc = cmd_finetune(["--handle", "fc-missing", "--status"])
+    assert rc == 1
+    assert "fc-missing" in err.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # Argument + auth guards
 # ---------------------------------------------------------------------------
 
