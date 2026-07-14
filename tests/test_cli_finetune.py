@@ -343,6 +343,7 @@ def test_status_404_reports_unknown_handle(monkeypatch):
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")  # reach the poll, not the key guard
 
     rc = cmd_finetune(["--handle", "fc-missing"])
     assert rc == 1
