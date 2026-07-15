@@ -2,6 +2,7 @@
 
     newt finetune --dataset ./my-folder  upload a local dataset folder, then launch
     newt finetune --dataset <name>       launch on an already-staged dataset name
+    newt finetune --dataset <name> --steps 20000   set total training steps
     newt finetune --handle <job>         re-attach to a run already launched
     newt finetune --handle <job> --status   print the run's state ONCE and exit
     newt finetune --dataset <name> --json   machine-readable handle + terminal state
@@ -132,6 +133,37 @@ def _opt_value(args: list[str], name: str) -> str | None:
     return None
 
 
+def _steps_raw(args: list[str]) -> str | None:
+    """Raw string value for ``--steps`` (space or ``=`` form), or None when the flag is
+    absent. Unlike ``_opt_value`` this does NOT reject a leading ``-``: a negative like
+    ``-5`` must reach validation to be rejected with a named error, never silently read
+    as a missing value. A present-but-empty flag returns ``""`` (also a named error)."""
+    for i, a in enumerate(args):
+        if a == "--steps":
+            return args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith("--steps="):
+            return a[len("--steps=") :]
+    return None
+
+
+def _validate_steps(raw: str | None) -> tuple[int | None, str | None]:
+    """``(steps, error)`` for the ``--steps`` value. ``raw is None`` (flag absent) →
+    ``(None, None)``: no override, the server picks its default. Otherwise the value
+    must be a positive whole number — ``0``, negatives, and non-numeric are rejected
+    with a NAMED error and no coercion (Rule 10). The server enforces the min/max
+    bounds; this is only the shape check that keeps a garbage value off the wire."""
+    if raw is None:
+        return None, None
+    text = raw.strip()
+    try:
+        value = int(text)
+    except ValueError:
+        return None, f"--steps must be a whole number of training steps, got {raw!r}."
+    if value <= 0:
+        return None, f"--steps must be a positive number of training steps, got {value}."
+    return value, None
+
+
 def _usage() -> None:
     print("Usage: newt finetune (--dataset <path|name> | --handle <job> | --list) [--status] [--json]")
     print("")
@@ -144,6 +176,8 @@ def _usage() -> None:
     print("                         ./my-export) to upload it and launch on it, or a")
     print("                         staged dataset name to launch on it directly. The")
     print("                         CLI prints which it detected before it acts.")
+    print("  --steps <int>          Total training steps for this run (with --dataset).")
+    print("                         Omit to use the server default.")
     print("  --handle <job>         Re-attach to a run already launched (poll only).")
     print("  --status               With --handle: print the run's current state once")
     print("                         and exit — a one-shot check, no blocking watch.")
@@ -163,10 +197,23 @@ def _usage() -> None:
 # HTTP round-trips (one each) — split out so tests exercise the orchestration and
 # rendering without a network.
 # ---------------------------------------------------------------------------
-def _launch(console: str, api_key: str, dataset: str, *, timeout: float = 30.0) -> dict:
+def _launch(
+    console: str,
+    api_key: str,
+    dataset: str,
+    *,
+    steps: int | None = None,
+    timeout: float = 30.0,
+) -> dict:
+    # `steps` rides only when the developer set it (--steps); absent, the field is
+    # omitted entirely so the server applies its own default — never a client-fabricated
+    # step count (Rule 10).
+    payload: dict = {"dataset": dataset}
+    if steps is not None:
+        payload["steps"] = steps
     req = Request(
         f"{console}/api/finetune",
-        data=json.dumps({"dataset": dataset}).encode(),
+        data=json.dumps(payload).encode(),
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
@@ -238,7 +285,10 @@ def _render_terminal(status: dict) -> tuple[str, int]:
     return _c(_RED, f"Fine-tune ended in an unexpected state: {status!r}"), 1
 
 
-def _terminal_json(job_handle: str, status: dict) -> str:
+def _terminal_json(job_handle: str, status: dict, *, steps: int | None = None) -> str:
+    # `steps` is the effective total-steps for this run: the value the developer set
+    # with --steps, or null when they didn't (the server default is in force). Null is
+    # honest here — the CLI never invents the server's default to fill it (Rule 10).
     return json.dumps(
         {
             "job_handle": job_handle,
@@ -246,6 +296,7 @@ def _terminal_json(job_handle: str, status: dict) -> str:
             "gate": status.get("gate"),
             "tag": status.get("tag"),
             "report_card": status.get("report_card"),
+            "steps": steps,
         }
     )
 
@@ -466,6 +517,11 @@ def cmd_finetune(args: list[str]) -> int:
     dataset = _opt_value(args, "--dataset")
     handle = _opt_value(args, "--handle")
 
+    # --steps is a launch-only, client-validated override for total training steps.
+    # Validated here BEFORE any network so a bad value never reaches the console.
+    steps, steps_err = _validate_steps(_steps_raw(args))
+    steps_present = _steps_raw(args) is not None
+
     # Instructional/progress output goes to stderr in --json mode so stdout carries
     # nothing but the final JSON object (composable with $(...) / jq).
     out = sys.stderr if as_json else sys.stdout
@@ -476,6 +532,16 @@ def cmd_finetune(args: list[str]) -> int:
         return 1
     if dataset and handle:
         print("newt finetune: pass --dataset OR --handle, not both.", file=sys.stderr)
+        return 1
+    if steps_err:
+        print(f"newt finetune: {steps_err}", file=sys.stderr)
+        print("        Fix: newt finetune --dataset <name> --steps 20000", file=sys.stderr)
+        return 1
+    if steps_present and not dataset:
+        # --steps sets the step count for a NEW launch; on --handle/--list there's
+        # nothing to apply it to. Refuse loudly rather than silently ignore it (Rule 10).
+        print("newt finetune: --steps only applies when launching with --dataset.", file=sys.stderr)
+        print("        Fix: newt finetune --dataset <name> --steps 20000", file=sys.stderr)
         return 1
     if as_status and not handle:
         print("newt finetune: --status needs --handle <job> — the run to check on.", file=sys.stderr)
@@ -516,7 +582,7 @@ def cmd_finetune(args: list[str]) -> int:
             return 1  # bad path / malformed export / failed upload — already surfaced
 
         try:
-            launched = _launch(console, api_key, dataset)
+            launched = _launch(console, api_key, dataset, steps=steps)
         except HTTPError as exc:
             _explain_launch_http_error(exc, dataset)
             return 1
@@ -531,6 +597,8 @@ def cmd_finetune(args: list[str]) -> int:
             return 1
 
         print(f"Launched fine-tune on dataset {dataset!r}.", file=out)
+        if steps is not None:
+            print(f"  steps:        {steps}", file=out)
         print(f"  job handle:   {_c(_GRAY, job_handle)}", file=out)
         print(f"  watch page:   {console}/runs/{job_handle}", file=out)
         print(f"  check later:  newt finetune --handle {job_handle} --status", file=out)
@@ -553,7 +621,9 @@ def cmd_finetune(args: list[str]) -> int:
         return 1  # error already surfaced by _watch
 
     if as_json:
-        print(_terminal_json(job_handle, status))
+        # steps is the effective override this launch carried (None on a --handle
+        # re-attach, where the CLI didn't set it).
+        print(_terminal_json(job_handle, status, steps=steps))
         return 0 if status.get("status") == "succeeded" else 1
 
     text, code = _render_terminal(status)
