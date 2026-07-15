@@ -324,6 +324,133 @@ def test_dataset_flag_with_no_value_is_caught(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# --steps: an optional, client-validated total-training-steps override (ft-020)
+# ---------------------------------------------------------------------------
+
+def test_validate_steps_pure_shape():
+    """The client-side shape check: absent → no override; a positive int passes; 0,
+    negatives, and non-numeric are rejected with a NAMED error (never coerced)."""
+    assert ft._validate_steps(None) == (None, None)
+    assert ft._validate_steps("20000") == (20000, None)
+    assert ft._validate_steps("  15000 ") == (15000, None)  # whitespace tolerated
+
+    v, e = ft._validate_steps("0")
+    assert v is None and "--steps" in e and "positive" in e.lower()
+    v, e = ft._validate_steps("-5")
+    assert v is None and "--steps" in e and "positive" in e.lower()
+    v, e = ft._validate_steps("abc")
+    assert v is None and "--steps" in e and "whole number" in e.lower()
+    v, e = ft._validate_steps("3.5")
+    assert v is None and "--steps" in e  # a float is not a whole number
+    v, e = ft._validate_steps("")  # --steps with no value
+    assert v is None and "--steps" in e
+
+
+def test_steps_forwards_to_launch(monkeypatch):
+    """`--dataset X --steps 20000` reaches the console launch as steps=20000."""
+    captured = {}
+
+    def fake_launch(console, api_key, dataset, *, steps=None, **k):
+        captured["steps"] = steps
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    rc, out, err = _run(["--dataset", "d", "--steps", "20000"], monkeypatch, statuses=[_SUCCEEDED])
+    assert rc == 0
+    assert captured["steps"] == 20000
+    assert "steps:        20000" in out  # echoed to the human on launch
+
+
+def test_steps_equals_form_forwards_to_launch(monkeypatch):
+    captured = {}
+
+    def fake_launch(console, api_key, dataset, *, steps=None, **k):
+        captured["steps"] = steps
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    rc, out, err = _run(["--dataset", "d", "--steps=15000"], monkeypatch, statuses=[_SUCCEEDED])
+    assert rc == 0
+    assert captured["steps"] == 15000
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "3.5"])
+def test_steps_bad_value_rejected_before_any_network(bad, monkeypatch):
+    """A garbage --steps value is rejected with a named error and NO launch — the bad
+    value never reaches the wire (Rule 10)."""
+    calls = []
+    monkeypatch.setattr(ft, "_launch", lambda *a, **k: calls.append(1) or _HANDLE)
+    rc, out, err = _run(["--dataset", "d", "--steps", bad], monkeypatch)
+    assert rc == 1
+    assert "--steps" in err
+    assert calls == []  # never launched
+
+
+def test_steps_requires_dataset(monkeypatch):
+    """`--steps` sets a NEW launch's step count; on --handle re-attach there's nothing
+    to apply it to, so it's refused loudly rather than silently ignored."""
+    calls = []
+    monkeypatch.setattr(ft, "_launch", lambda *a, **k: calls.append(1) or _HANDLE)
+    monkeypatch.setattr(ft, "_poll_status", lambda *a, **k: _SUCCEEDED)
+    rc, out, err = _run(["--handle", "fc-x", "--steps", "5"], monkeypatch)
+    assert rc == 1
+    assert "--steps" in err and "dataset" in err.lower()
+    assert calls == []
+
+
+def test_json_carries_effective_steps(monkeypatch):
+    """`--json` output includes the effective steps the launch carried."""
+    rc, out, err = _run(
+        ["--dataset", "d", "--steps", "20000", "--json"],
+        monkeypatch,
+        launch=_HANDLE,
+        statuses=[_SUCCEEDED],
+    )
+    assert rc == 0
+    obj = json.loads(out)
+    assert obj["steps"] == 20000
+
+
+def test_json_steps_null_when_not_overridden(monkeypatch):
+    """No --steps → the JSON `steps` is null (server default in force), never a
+    CLI-invented default."""
+    rc, out, err = _run(
+        ["--dataset", "d", "--json"], monkeypatch, launch=_HANDLE, statuses=[_SUCCEEDED]
+    )
+    assert rc == 0
+    obj = json.loads(out)
+    assert obj["steps"] is None
+
+
+def test_launch_payload_omits_steps_when_absent_includes_when_set(monkeypatch):
+    """The launch POST body carries `steps` ONLY when the developer set it — absent, the
+    field is omitted so the server applies its own default."""
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"job_handle": "fc-x"}'
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    monkeypatch.setattr(ft, "urlopen", fake_urlopen)
+
+    ft._launch("http://console", "nt_k", "my-task")
+    assert "steps" not in captured["body"]
+
+    ft._launch("http://console", "nt_k", "my-task", steps=1234)
+    assert captured["body"]["steps"] == 1234
+
+
+# ---------------------------------------------------------------------------
 # Error paths from the console
 # ---------------------------------------------------------------------------
 
