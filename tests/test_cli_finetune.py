@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from urllib.error import HTTPError
 
@@ -382,3 +383,212 @@ def test_finetune_module_imports_no_modal_and_holds_no_credential():
     lowered = source.lower()
     for forbidden in ("modal-key", "modal-secret", "modal_token", "modal_secret"):
         assert forbidden not in lowered, f"no Modal credential may appear in the client: {forbidden!r}"
+
+
+# ---------------------------------------------------------------------------
+# Path-vs-name detection: a folder uploads-then-launches; a bare
+# name is byte-identical to before. The upload leg drives the real NTCloudSink
+# against a fake console (batch sign + PUT); _launch/_poll_status stay mocked.
+# ---------------------------------------------------------------------------
+
+_NAMESPACE = "0123456789abcdef"
+_BUCKET = "nt-episodes"
+
+
+class _FakeResp:
+    def __init__(self, body: bytes = b"") -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _make_export(tmp_path, name="my_export", *, valid=True):
+    import json as _json
+
+    export = tmp_path / name
+    (export / "meta").mkdir(parents=True)
+    (export / "data").mkdir(parents=True)
+    if valid:
+        (export / "meta" / "info.json").write_text(
+            _json.dumps(
+                {
+                    "codebase_version": "v3.0",
+                    "features": {
+                        "action": {"dtype": "float32", "shape": [6]},
+                        "observation.state": {"dtype": "float32", "shape": [6]},
+                    },
+                }
+            )
+        )
+    (export / "data" / "episode_000000.parquet").write_bytes(b"fake-parquet-bytes")
+    return export
+
+
+def _install_fake_console(monkeypatch, events, dataset):
+    """Fake the console's batch/single sign + GCS PUT, appending 'sign'/'put' to
+    `events` in call order so a test can assert the upload happened BEFORE launch."""
+    import json as _json
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        if url.endswith("/api/uploads/sign"):
+            events.append("sign")
+            body = _json.loads(req.data)
+            if "paths" in body:
+                urls = [
+                    {
+                        "path": p,
+                        "url": f"https://storage.googleapis.com/{_BUCKET}/{_NAMESPACE}/{dataset}/{p}?sig=fake",
+                        "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/{p}",
+                        "expiresAt": "2026-07-16T23:00:00.000Z",
+                    }
+                    for p in body["paths"]
+                ]
+                return _FakeResp(
+                    _json.dumps(
+                        {"namespace": _NAMESPACE, "dataset": dataset, "count": len(urls), "urls": urls}
+                    ).encode()
+                )
+            p = body["path"]
+            return _FakeResp(
+                _json.dumps(
+                    {
+                        "url": f"https://storage.googleapis.com/{_BUCKET}/{_NAMESPACE}/{dataset}/{p}?sig=fake",
+                        "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/{p}",
+                        "expiresAt": "2026-07-16T23:00:00.000Z",
+                    }
+                ).encode()
+            )
+        events.append("put")
+        return _FakeResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+
+
+def test_path_uploads_then_launches_and_prints_staged_name(monkeypatch, tmp_path):
+    """`newt finetune --dataset ./folder` validates, uploads, and launches — printing
+    the branch decision, the size, and the staged name; the launch runs against that
+    staged name."""
+    events: list[str] = []
+    export = _make_export(tmp_path, "my_export")
+    _install_fake_console(monkeypatch, events, "my_export")
+
+    launched_with = {}
+
+    def fake_launch(console, api_key, dataset, **k):
+        events.append("launch")
+        launched_with["dataset"] = dataset
+        return {"job_handle": "fc-abc123"}
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    monkeypatch.setattr(ft, "_poll_status", lambda *a, **k: _SUCCEEDED)
+    monkeypatch.setattr(ft.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("NT_API_KEY", "nt_" + "a" * 40)
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+    rc = cmd_finetune(["--dataset", str(export)])
+    assert rc == 0, f"stderr={err.getvalue()!r}"
+
+    text = out.getvalue()
+    assert "uploading" in text.lower(), "the upload size must be printed"
+    assert "staged as my_export" in text, "the staged name must be printed"
+    assert launched_with["dataset"] == "my_export", "launch must run against the staged name"
+    # Upload (sign + put) must all happen BEFORE the launch.
+    assert "launch" in events and "sign" in events and "put" in events
+    assert events.index("launch") == len(events) - 1, f"launch must be last: {events}"
+    assert all(e in ("sign", "put") for e in events[: events.index("launch")])
+
+
+def test_malformed_folder_fails_before_any_upload_or_launch(monkeypatch, tmp_path):
+    """A folder with no meta/info.json fails BEFORE a byte moves: no sign, no PUT, no
+    launch — the pre-transfer gate. The message names the fixable problem."""
+    events: list[str] = []
+    export = _make_export(tmp_path, "broken_export", valid=False)
+    _install_fake_console(monkeypatch, events, "broken_export")
+    monkeypatch.setattr(ft, "_launch", lambda *a, **k: events.append("launch") or {"job_handle": "x"})
+    monkeypatch.setattr(ft, "_poll_status", lambda *a, **k: _SUCCEEDED)
+    monkeypatch.setenv("NT_API_KEY", "nt_" + "a" * 40)
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+    rc = cmd_finetune(["--dataset", str(export)])
+    assert rc == 1
+    assert events == [], f"nothing should sign, upload, or launch: {events}"
+    assert "meta/info.json" in err.getvalue(), "the message must name the fixable problem"
+
+
+def test_bare_name_is_byte_identical_no_upload(monkeypatch, tmp_path):
+    """A bare NAME launches exactly as before — the launch call is unchanged and NO
+    upload is attempted. Regression guard for the path added by this card."""
+    events: list[str] = []
+    # If the cloud sink's urlopen is ever touched for a name, that's an upload — fail.
+    _install_fake_console(monkeypatch, events, "svla_so101_pickplace")
+
+    launched_with = {}
+
+    def fake_launch(console, api_key, dataset, **k):
+        events.append("launch")
+        launched_with["dataset"] = dataset
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    monkeypatch.setattr(ft, "_poll_status", lambda *a, **k: _SUCCEEDED)
+    monkeypatch.setattr(ft.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("NT_API_KEY", "nt_" + "a" * 40)
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+    rc = cmd_finetune(["--dataset", "svla_so101_pickplace"])
+    assert rc == 0, f"stderr={err.getvalue()!r}"
+    assert launched_with["dataset"] == "svla_so101_pickplace", "the bare name must reach _launch verbatim"
+    assert "sign" not in events and "put" not in events, f"a name must not upload: {events}"
+
+
+def test_path_with_separator_but_missing_dir_errors_not_name(monkeypatch, tmp_path):
+    """An argument with a path separator that doesn't resolve to a directory is a bad
+    path — NOT silently treated as a name (Rule 10). No launch happens."""
+    events: list[str] = []
+    monkeypatch.setattr(ft, "_launch", lambda *a, **k: events.append("launch") or _HANDLE)
+    monkeypatch.setattr(ft, "_poll_status", lambda *a, **k: _SUCCEEDED)
+    monkeypatch.setenv("NT_API_KEY", "nt_" + "a" * 40)
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+    rc = cmd_finetune(["--dataset", str(tmp_path / "does" / "not" / "exist")])
+    assert rc == 1
+    assert events == [], "a bad path must not launch"
+    assert "isn't an existing directory" in err.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Live round-trip — credential-gated, skips loudly without NEWT_E2E_KEY (never
+# mocked green). Uploads a tiny real export to the real console and launches.
+# ---------------------------------------------------------------------------
+
+def test_live_path_upload_round_trip(tmp_path, capsys):
+    key = os.environ.get("NEWT_E2E_KEY")
+    if not key:
+        pytest.skip("NEWT_E2E_KEY not set — skipping the live upload+launch round-trip")
+
+    os.environ["NT_API_KEY"] = key
+    export = _make_export(tmp_path, "newt-e2e-export")
+    rc = cmd_finetune(["--dataset", str(export), "--json"])
+    captured = capsys.readouterr()
+    # stdout is the launch JSON (handle + terminal state); stderr carries the
+    # human upload/staging lines. A staged name must have been printed.
+    assert "staged as newt-e2e-export" in captured.err, captured.err
+    parsed = json.loads(captured.out)
+    assert parsed.get("job_handle"), f"live launch returned no handle: {captured.out!r}"
+    assert rc in (0, 1)  # 0 succeeded / 1 failed-at-gate — both are real terminal states
