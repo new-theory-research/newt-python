@@ -5,6 +5,7 @@
     newt finetune --handle <job>         re-attach to a run already launched
     newt finetune --handle <job> --status   print the run's state ONCE and exit
     newt finetune --dataset <name> --json   machine-readable handle + terminal state
+    newt finetune --list                 your recent runs (handle, dataset, state, when)
 
 ``--dataset`` takes either a **path** or a **name**, and the CLI prints which it
 chose (never a silent branch). A path (a ``/`` in the argument, or an existing local
@@ -21,8 +22,16 @@ against that handle until the run reaches a terminal state:
     succeeded → the model tag + a pointer to its report card
     failed    → the pipeline gate that failed, NAMED (Rule 10)
 
+When a run fails at a gate that runs AFTER ``train`` (frame-check / registry+reload /
+serve), the CLI adds a survival line: training completed, the checkpoint is safe, and
+nothing needs retraining — the failure is in post-processing. This is derived purely
+from the gate order the client already knows (``_PIPELINE_GATES``), never new server
+state; a failure at intake or train prints no such line (nothing survived).
+
 Ctrl-C never loses the run: the handle is printed at launch, and
-``newt finetune --handle <job>`` re-attaches to it.
+``newt finetune --handle <job>`` re-attaches to it. ``newt finetune --list`` prints
+your recent runs so a handle is never lost to a scrollback — its ``state`` column is
+the last status the console recorded; for live state, poll a handle with ``--status``.
 
 Featherweight on purpose, same as the rest of the CLI: stdlib ``urllib`` only.
 """
@@ -65,6 +74,36 @@ _HEARTBEAT_EVERY_S = 60.0
 # STATUS_* constants (the Modal side that mints them) and lib/finetune-status.ts.
 _TERMINAL = ("succeeded", "failed")
 
+# The training pipeline's gate SEQUENCE, mirrored client-side. Source of truth is the
+# server pipeline's own ordered gate list (PIPELINE_GATES). We keep only the ORDER, and
+# only to answer one question with zero new server state — did the failing gate come
+# AFTER `train`? If it did, training finished and the checkpoint is safe on the volume
+# (the survival line below). `registry+reload` is deliberately ONE gate (it writes the
+# registry entry AND reloads it), not `registry`. A gate name we can't place in this
+# sequence is surfaced honestly, never guessed "after train" — a wrong guess would tell
+# someone their checkpoint is safe when it isn't (Rule 10).
+_PIPELINE_GATES = ("intake", "train", "frame-check", "registry+reload", "serve")
+
+
+def _survival_block(gate: str | None) -> str | None:
+    """The 'your checkpoint is safe' block for a terminal failure — or None.
+
+    Returns the survival message ONLY when `gate` names a gate that runs strictly
+    AFTER `train` in the known sequence: training completed, so the checkpoint is safe
+    and nothing needs retraining. Returns None for a failure at intake/train (nothing
+    survived — no false comfort, Rule 10) and for a gate name not in `_PIPELINE_GATES`
+    (we can't place it, so we say nothing rather than guess). Derived purely from gate
+    order — no server round-trip."""
+    if gate not in _PIPELINE_GATES:
+        return None
+    if _PIPELINE_GATES.index(gate) <= _PIPELINE_GATES.index("train"):
+        return None
+    return _c(
+        _GREEN,
+        "training completed — your checkpoint is safe; the failure is in\n"
+        f"post-processing (gate: {gate}); nothing needs retraining",
+    )
+
 
 def _c(code: str, text: str) -> str:
     if not sys.stdout.isatty():
@@ -94,7 +133,7 @@ def _opt_value(args: list[str], name: str) -> str | None:
 
 
 def _usage() -> None:
-    print("Usage: newt finetune (--dataset <path|name> | --handle <job>) [--status] [--json]")
+    print("Usage: newt finetune (--dataset <path|name> | --handle <job> | --list) [--status] [--json]")
     print("")
     print("  Launch a training run on NT's GPUs with your key, then watch it to")
     print("  completion. The launch happens server-side under NT's Modal credentials —")
@@ -108,7 +147,12 @@ def _usage() -> None:
     print("  --handle <job>         Re-attach to a run already launched (poll only).")
     print("  --status               With --handle: print the run's current state once")
     print("                         and exit — a one-shot check, no blocking watch.")
-    print("  --json                 Emit machine-readable JSON (handle + terminal state).")
+    print("  --list                 List your recent runs (handle, dataset, state,")
+    print("                         created). The state column is the LAST recorded")
+    print("                         status, not a live poll — for live state, check a")
+    print("                         handle with --status.")
+    print("  --json                 Emit machine-readable JSON (handle + terminal state;")
+    print("                         with --list, the raw runs array).")
     print("")
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials).")
@@ -140,6 +184,20 @@ def _poll_status(console: str, api_key: str, job_handle: str, *, timeout: float 
         return json.loads(resp.read())
 
 
+def _list_jobs(console: str, api_key: str, *, timeout: float = 30.0) -> list[dict]:
+    """The caller's recent runs, newest first, from GET /api/finetune/jobs — owner-
+    scoped server-side by the `nt_` key (the route returns only this key's owner's
+    rows). Returns the raw list; a response missing the `jobs` array is a contract
+    violation, surfaced loud rather than treated as 'no runs' (Rule 10)."""
+    req = Request(f"{console}/api/finetune/jobs", headers={"Authorization": f"Bearer {api_key}"}, method="GET")
+    with urlopen(req, timeout=timeout) as resp:
+        body = json.loads(resp.read())
+    jobs = body.get("jobs") if isinstance(body, dict) else None
+    if not isinstance(jobs, list):
+        raise ValueError(f"list response carried no jobs array: {body!r}")
+    return jobs
+
+
 # ---------------------------------------------------------------------------
 # Terminal rendering — pure: (status dict) -> (human text, exit code).
 # ---------------------------------------------------------------------------
@@ -166,7 +224,15 @@ def _render_terminal(status: dict) -> tuple[str, int]:
     if state == "failed":
         gate = status.get("gate")
         head = f"Fine-tune failed at gate: {gate}" if gate else "Fine-tune failed."
-        return _c(_RED, head), 1
+        lines = [_c(_RED, head)]
+        # If the failing gate ran after `train`, say plainly what SURVIVED: the
+        # checkpoint. This is the one wire point for the survival line, so every
+        # terminal render path (watch, re-attach, --status — all route through here)
+        # prints it exactly once.
+        survived = _survival_block(gate)
+        if survived:
+            lines.append(survived)
+        return "\n".join(lines), 1
 
     # Anything else reaching here is a contract violation — surface it, don't guess.
     return _c(_RED, f"Fine-tune ended in an unexpected state: {status!r}"), 1
@@ -182,6 +248,79 @@ def _terminal_json(job_handle: str, status: dict) -> str:
             "report_card": status.get("report_card"),
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# --list rendering — pure: (jobs list) -> human text. Newest-first ordering and
+# owner-scoping are the route's job; this just tabulates what it returns.
+# ---------------------------------------------------------------------------
+def _render_jobs_table(jobs: list[dict]) -> str:
+    """A readable table of the caller's runs: handle, dataset, state, created. The
+    `state` column prints the console's LAST-RECORDED status verbatim — it is not a
+    live poll (terminal states are set elsewhere; today many rows read `launched`).
+    The caption points at `--status` for live state so the column is never mistaken
+    for a fresh check (honest staleness, not invented live state — Rule 10)."""
+    headers = ("HANDLE", "DATASET", "STATE", "CREATED")
+    rows = [
+        (
+            str(j.get("job_handle") or "—"),
+            str(j.get("dataset") or "—"),
+            str(j.get("status") or "—"),
+            str(j.get("created_at") or "—"),
+        )
+        for j in jobs
+    ]
+    widths = [
+        max(len(headers[i]), *(len(r[i]) for r in rows)) if rows else len(headers[i])
+        for i in range(4)
+    ]
+
+    def _line(cells, color=None):
+        parts = [cells[i].ljust(widths[i]) for i in range(4)]
+        text = "  ".join(parts).rstrip()
+        return _c(color, text) if color else text
+
+    out_lines = [_line(headers, _GRAY)]
+    out_lines.extend(_line(r) for r in rows)
+    out_lines.append("")
+    out_lines.append(
+        _c(_GRAY, "state = last recorded status; for live state: newt finetune --handle <job> --status")
+    )
+    return "\n".join(out_lines)
+
+
+def _cmd_list(console: str, api_key: str, *, as_json: bool, out) -> int:
+    """`newt finetune --list` — print the caller's recent runs. `--json` emits the raw
+    list on a clean stdout; an owner with no runs gets a clear, friendly line (not an
+    error)."""
+    try:
+        jobs = _list_jobs(console, api_key)
+    except HTTPError as exc:
+        if exc.code == 401:
+            print("newt finetune: authentication failed — your key was rejected.", file=sys.stderr)
+            print("  Rotate your key in the console, or run `newt login` again.", file=sys.stderr)
+        else:
+            print(f"newt finetune: could not list runs ({exc.code}): {exc.reason}", file=sys.stderr)
+        return 1
+    except URLError as exc:
+        print(f"newt finetune: cannot reach {console}: {exc.reason}", file=sys.stderr)
+        print("  Set NT_CONSOLE_URL if you're running a local console.", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"newt finetune: {exc}", file=sys.stderr)
+        return 1
+
+    if as_json:
+        print(json.dumps(jobs))
+        return 0
+
+    if not jobs:
+        print("No fine-tune runs yet.", file=out)
+        print("  Launch one with:  newt finetune --dataset <path|name>", file=out)
+        return 0
+
+    print(_render_jobs_table(jobs), file=out)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +462,7 @@ def cmd_finetune(args: list[str]) -> int:
 
     as_json = "--json" in args
     as_status = "--status" in args
+    as_list = "--list" in args
     dataset = _opt_value(args, "--dataset")
     handle = _opt_value(args, "--handle")
 
@@ -330,6 +470,10 @@ def cmd_finetune(args: list[str]) -> int:
     # nothing but the final JSON object (composable with $(...) / jq).
     out = sys.stderr if as_json else sys.stdout
 
+    if as_list and (dataset or handle):
+        print("newt finetune: --list shows your runs — don't combine it with --dataset/--handle.", file=sys.stderr)
+        print("        Fix: newt finetune --list", file=sys.stderr)
+        return 1
     if dataset and handle:
         print("newt finetune: pass --dataset OR --handle, not both.", file=sys.stderr)
         return 1
@@ -337,7 +481,7 @@ def cmd_finetune(args: list[str]) -> int:
         print("newt finetune: --status needs --handle <job> — the run to check on.", file=sys.stderr)
         print("        Fix: newt finetune --handle <job> --status", file=sys.stderr)
         return 1
-    if not dataset and not handle:
+    if not as_list and not dataset and not handle:
         print("newt finetune: --dataset <name> is required (or --handle <job> to re-attach).", file=sys.stderr)
         print("        Fix: newt finetune --dataset my-task", file=sys.stderr)
         return 1
@@ -352,6 +496,10 @@ def cmd_finetune(args: list[str]) -> int:
         return 1
 
     console = _console_url()
+
+    # --- list the caller's recent runs (no launch, no watch) ----------------
+    if as_list:
+        return _cmd_list(console, api_key, as_json=as_json, out=out)
 
     # --- one-shot status check (no watch) -----------------------------------
     if as_status:

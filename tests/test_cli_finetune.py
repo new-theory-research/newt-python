@@ -19,7 +19,12 @@ from urllib.error import HTTPError
 import pytest
 
 import newt._cli.finetune as ft
-from newt._cli.finetune import cmd_finetune, _render_terminal
+from newt._cli.finetune import (
+    cmd_finetune,
+    _render_terminal,
+    _survival_block,
+    _render_jobs_table,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +575,165 @@ def test_path_with_separator_but_missing_dir_errors_not_name(monkeypatch, tmp_pa
     assert rc == 1
     assert events == [], "a bad path must not launch"
     assert "isn't an existing directory" in err.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Failure warmth — the survival line. A run that fails at a gate AFTER `train`
+# says the checkpoint is safe; a failure at intake/train must NOT (no false
+# comfort, Rule 10). Asserted on all three terminal render paths: watch,
+# re-attach, --status. This is the exact "lost night" the card fixes.
+# ---------------------------------------------------------------------------
+
+_POST_TRAIN_GATES = ("frame-check", "registry+reload", "serve")
+_NO_SURVIVE_GATES = ("intake", "train")
+
+
+def _failed_at(gate):
+    return {"status": "failed", "gate": gate, "tag": None, "report_card": None}
+
+
+def _run_failed(path, failed, monkeypatch):
+    """Drive a terminal failure through one of the three render paths."""
+    if path == "watch":
+        return _run(["--dataset", "d"], monkeypatch, launch=_HANDLE, statuses=[failed])
+    if path == "reattach":
+        return _run(["--handle", "fc-x"], monkeypatch, statuses=[failed])
+    if path == "status":
+        return _run(["--handle", "fc-x", "--status"], monkeypatch, statuses=[failed])
+    raise AssertionError(f"unknown render path {path!r}")
+
+
+@pytest.mark.parametrize("path", ["watch", "reattach", "status"])
+@pytest.mark.parametrize("gate", _POST_TRAIN_GATES)
+def test_survival_line_prints_for_post_train_gates(path, gate, monkeypatch):
+    """A failure at frame-check / registry+reload / serve means training finished —
+    the CLI must say the checkpoint is safe and nothing needs retraining, on EVERY
+    terminal render path. The gate is still named."""
+    _rc, out, _err = _run_failed(path, _failed_at(gate), monkeypatch)
+    assert "your checkpoint is safe" in out, f"[{path}/{gate}] survival line missing: {out!r}"
+    assert "nothing needs retraining" in out, f"[{path}/{gate}] retrain reassurance missing"
+    assert "post-processing" in out, f"[{path}/{gate}] must locate the failure in post-processing"
+    assert gate in out, f"[{path}/{gate}] the failing gate must still be named"
+
+
+@pytest.mark.parametrize("path", ["watch", "reattach", "status"])
+@pytest.mark.parametrize("gate", _NO_SURVIVE_GATES)
+def test_survival_line_absent_for_intake_and_train(path, gate, monkeypatch):
+    """A failure at intake or train means the checkpoint did NOT complete — the
+    survival line must NOT print (Rule 10, no false comfort). This is the mutation
+    guard: hard-code the 'safe' branch on and these assertions fail. The gate is
+    still named so the developer knows what broke."""
+    _rc, out, _err = _run_failed(path, _failed_at(gate), monkeypatch)
+    assert "your checkpoint is safe" not in out, f"[{path}/{gate}] false comfort leaked: {out!r}"
+    assert "nothing needs retraining" not in out, f"[{path}/{gate}] false retrain reassurance leaked"
+    assert gate in out, f"[{path}/{gate}] the failing gate must still be named"
+
+
+def test_survival_block_is_derived_only_from_gate_order():
+    """The helper is a pure function of gate order — after-train gates get the block,
+    intake/train get None, and a gate we can't PLACE gets None (surfaced by saying
+    nothing, never a guessed 'safe')."""
+    for g in _POST_TRAIN_GATES:
+        assert _survival_block(g) is not None, g
+    for g in _NO_SURVIVE_GATES:
+        assert _survival_block(g) is None, g
+    assert _survival_block(None) is None
+    assert _survival_block("some-unknown-gate") is None
+
+
+def test_render_terminal_post_train_failure_says_safe():
+    text, code = _render_terminal(_failed_at("registry+reload"))
+    assert code == 1
+    assert "your checkpoint is safe" in text
+    assert "registry+reload" in text
+
+
+def test_render_terminal_train_failure_no_false_comfort():
+    text, code = _render_terminal(_failed_at("train"))
+    assert code == 1
+    assert "checkpoint is safe" not in text
+
+
+# ---------------------------------------------------------------------------
+# `newt finetune --list` — the caller's recent runs. Owner-scoping is enforced
+# server-side (the route's bun tests); here we prove the CLI faithfully renders
+# only what its own key's row-set returns, emits the raw list under --json, and
+# gives an empty owner a friendly line, not an error.
+# ---------------------------------------------------------------------------
+
+_KEY_A = "nt_" + "a" * 40
+_KEY_C = "nt_" + "c" * 40
+
+
+def test_list_renders_only_this_keys_rows(monkeypatch):
+    """Two keys, disjoint owner row-sets: each key's --list shows ONLY its owner's
+    runs (the CLI renders exactly what the owner-scoped route returned for that key)."""
+    rows_by_key = {
+        _KEY_A: [{"job_handle": "fc-a1", "dataset": "da", "status": "launched", "created_at": "2026-07-14T10:00:00Z"}],
+        _KEY_C: [{"job_handle": "fc-c1", "dataset": "dc", "status": "launched", "created_at": "2026-07-14T09:00:00Z"}],
+    }
+    monkeypatch.setattr(ft, "_list_jobs", lambda console, api_key, **k: rows_by_key[api_key])
+
+    _rc_a, out_a, _ = _run(["--list"], monkeypatch, key=_KEY_A)
+    assert "fc-a1" in out_a and "fc-c1" not in out_a, out_a
+
+    _rc_c, out_c, _ = _run(["--list"], monkeypatch, key=_KEY_C)
+    assert "fc-c1" in out_c and "fc-a1" not in out_c, out_c
+
+
+def test_list_empty_prints_friendly_launch_line(monkeypatch):
+    """An owner with no runs gets a clear, friendly line naming the launch command —
+    not an error, not a bare empty table."""
+    monkeypatch.setattr(ft, "_list_jobs", lambda *a, **k: [])
+    rc, out, _ = _run(["--list"], monkeypatch)
+    assert rc == 0
+    assert "no fine-tune runs" in out.lower()
+    assert "--dataset" in out, "the empty-state line must name how to launch one"
+
+
+def test_list_json_emits_raw_array(monkeypatch):
+    """`--list --json` emits the raw runs array on a clean stdout — scriptable."""
+    rows = [{"job_handle": "fc-a1", "dataset": "da", "status": "launched", "created_at": "t"}]
+    monkeypatch.setattr(ft, "_list_jobs", lambda *a, **k: rows)
+    rc, out, _ = _run(["--list", "--json"], monkeypatch)
+    assert rc == 0
+    assert json.loads(out) == rows
+
+
+def test_render_jobs_table_columns_and_honest_state_caption():
+    """The table carries handle/dataset/state/created, and its caption surfaces the
+    staleness HONESTLY — the state column is the last recorded status, and live state
+    comes from --status (no invented live state)."""
+    rows = [{"job_handle": "fc-a1", "dataset": "da", "status": "launched", "created_at": "2026-07-14T10:00:00Z"}]
+    text = _render_jobs_table(rows)
+    for col in ("HANDLE", "DATASET", "STATE", "CREATED"):
+        assert col in text, f"missing column {col}"
+    assert "fc-a1" in text and "launched" in text
+    assert "last recorded" in text.lower(), "the state column's staleness must be captioned"
+    assert "--status" in text, "the caption must point at --status for live state"
+
+
+def test_list_rejects_combination_with_dataset(monkeypatch):
+    """`--list` is a standalone view — combining it with --dataset/--handle is a loud
+    error, never a silent branch."""
+    rc, _out, err = _run(["--list", "--dataset", "d"], monkeypatch)
+    assert rc == 1
+    assert "list" in err.lower()
+
+
+def test_list_no_key_tells_user_what_to_do(monkeypatch):
+    rc, _out, err = _run(["--list"], monkeypatch, key=None)
+    assert rc == 1
+    assert "login" in err.lower() or "NT_API_KEY" in err
+
+
+def test_list_401_blames_the_key(monkeypatch):
+    def _rejected(*a, **k):
+        raise HTTPError("url", 401, "Unauthorized", {}, None)
+    monkeypatch.setattr(ft, "_list_jobs", _rejected)
+    rc, _out, err = _run(["--list"], monkeypatch)
+    assert rc == 1
+    assert "key" in err.lower() or "auth" in err.lower()
 
 
 # ---------------------------------------------------------------------------
