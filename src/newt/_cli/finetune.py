@@ -1,9 +1,16 @@
 """newt finetune — launch a training run on NT's GPUs with your key, and watch it.
 
-    newt finetune --dataset <name>       launch a run, then poll it to completion
+    newt finetune --dataset ./my-folder  upload a local dataset folder, then launch
+    newt finetune --dataset <name>       launch on an already-staged dataset name
     newt finetune --handle <job>         re-attach to a run already launched
     newt finetune --handle <job> --status   print the run's state ONCE and exit
     newt finetune --dataset <name> --json   machine-readable handle + terminal state
+
+``--dataset`` takes either a **path** or a **name**, and the CLI prints which it
+chose (never a silent branch). A path (a ``/`` in the argument, or an existing local
+directory) is validated locally, uploaded to your NT namespace, and launched against
+the staged folder name. A bare name skips the upload and launches straight against
+the already-staged dataset — the original behavior, unchanged.
 
 `--dataset` POSTs to the NT console's ``/api/finetune`` endpoint, authenticated by
 your ``nt_`` key. The console launches the Modal training job **server-side, under
@@ -23,13 +30,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from newt._credentials import read_api_key
+
+# A staged dataset name: the safe-segment alphabet the console's sign route
+# accepts (apps/console/lib/uploads-request.ts::isSafeSegment). A folder whose
+# basename falls outside it can't be a namespace segment, so the upload is
+# refused with a rename hint rather than a downstream 400.
+_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # ANSI colors — same semantic roles as the sibling verbs.
 _RESET = "\033[0m"
@@ -79,18 +94,21 @@ def _opt_value(args: list[str], name: str) -> str | None:
 
 
 def _usage() -> None:
-    print("Usage: newt finetune (--dataset <name> | --handle <job>) [--status] [--json]")
+    print("Usage: newt finetune (--dataset <path|name> | --handle <job>) [--status] [--json]")
     print("")
     print("  Launch a training run on NT's GPUs with your key, then watch it to")
     print("  completion. The launch happens server-side under NT's Modal credentials —")
     print("  no Modal credential ever touches this client.")
     print("")
     print("Options:")
-    print("  --dataset <name>  The staged dataset to fine-tune on. Launches a new run.")
-    print("  --handle <job>    Re-attach to a run already launched (poll only).")
-    print("  --status          With --handle: print the run's current state once and")
-    print("                    exit — a one-shot check, no blocking watch.")
-    print("  --json            Emit machine-readable JSON (handle + terminal status/tag).")
+    print("  --dataset <path|name>  What to fine-tune on. Pass a local folder (e.g.")
+    print("                         ./my-export) to upload it and launch on it, or a")
+    print("                         staged dataset name to launch on it directly. The")
+    print("                         CLI prints which it detected before it acts.")
+    print("  --handle <job>         Re-attach to a run already launched (poll only).")
+    print("  --status               With --handle: print the run's current state once")
+    print("                         and exit — a one-shot check, no blocking watch.")
+    print("  --json                 Emit machine-readable JSON (handle + terminal state).")
     print("")
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials).")
@@ -166,6 +184,138 @@ def _terminal_json(job_handle: str, status: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Path-vs-name detection + folder upload. The name branch is the
+# original behavior verbatim; the path branch validates locally, uploads, and
+# hands the SAME launch code the staged folder name.
+# ---------------------------------------------------------------------------
+def _looks_like_path(arg: str) -> bool:
+    """Explicit, documented rule: an argument is a PATH if it contains a path
+    separator, OR it resolves to an existing local directory. Otherwise it's a
+    staged dataset NAME. Precedence for the ambiguous case (a bare token that also
+    names a local directory): the directory wins — so the developer's folder is
+    uploaded, and the CLI says so — never a silent guess."""
+    if "/" in arg or os.sep in arg or (os.altsep and os.altsep in arg):
+        return True
+    return Path(arg).is_dir()
+
+
+def _staged_name_for(export_dir: Path) -> str:
+    """The name the folder is staged under, launched by, and tracked as — one name
+    threaded through. It's the folder's basename, which must be a safe namespace
+    segment (the console's sign route rejects anything else). Raises with a rename
+    hint if it isn't."""
+    name = export_dir.resolve().name
+    if not name or name in (".", "..") or len(name) > 128 or not _SAFE_SEGMENT.match(name):
+        raise ValueError(
+            f"the folder name {name!r} can't be a dataset name — use letters, "
+            "digits, '.', '_' or '-' (max 128 chars). Rename the folder and retry."
+        )
+    return name
+
+
+def _format_size(nbytes: int) -> str:
+    mb = nbytes / (1024 * 1024)
+    if mb >= 10:
+        return f"{mb:.0f} MB"
+    if mb >= 1:
+        return f"{mb:.1f} MB"
+    return f"{nbytes / 1024:.0f} KB"
+
+
+def _dir_size(export_dir: Path) -> int:
+    return sum(p.stat().st_size for p in export_dir.rglob("*") if p.is_file())
+
+
+def _make_progress(out, total_bytes: int):
+    """A progress callback for NTCloudSink.upload_directory that redraws an upload
+    meter in place on a TTY, and stays quiet otherwise (so --json stdout and piped
+    logs aren't spammed with carriage returns)."""
+    is_tty = hasattr(out, "isatty") and out.isatty()
+
+    def _progress(done_files: int, total_files: int, done_bytes: int, total: int) -> None:
+        if not is_tty:
+            return
+        pct = (done_bytes / total * 100) if total else 100.0
+        print(
+            f"\r  … {done_files}/{total_files} files "
+            f"({_format_size(done_bytes)} / {_format_size(total)}) {pct:.0f}%",
+            end="",
+            file=out,
+            flush=True,
+        )
+        if done_files == total_files:
+            print("", file=out)
+
+    return _progress
+
+
+def _resolve_dataset_arg(dataset_arg: str, console: str, api_key: str, out) -> str | None:
+    """Turn ``--dataset``'s argument into the staged dataset name to launch against,
+    printing the detected branch. Name ⇒ returned unchanged (no upload). Path ⇒
+    validated locally, uploaded, and the staged folder name returned. Returns None
+    after surfacing a loud error (bad path, malformed export, failed upload) — the
+    caller then exits without launching."""
+    if not _looks_like_path(dataset_arg):
+        print(
+            f"Using staged dataset {dataset_arg!r} "
+            "(no local folder — launching against the staged name).",
+            file=out,
+        )
+        return dataset_arg
+
+    export_dir = Path(dataset_arg)
+    if not export_dir.is_dir():
+        print(
+            f"newt finetune: {dataset_arg!r} looks like a path but isn't an "
+            "existing directory.",
+            file=sys.stderr,
+        )
+        print(
+            "        Fix: point --dataset at your exported dataset folder, or pass "
+            "a staged dataset name.",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        staged = _staged_name_for(export_dir)
+    except ValueError as exc:
+        print(f"newt finetune: {exc}", file=sys.stderr)
+        return None
+
+    # Import lazily so the name path (and every non-upload path) never pays the
+    # recording import — and so `import newt._cli.finetune` stays featherweight.
+    from newt.recording._cloud_sink import NTCloudSink, validate_lerobot_export
+
+    # Validate on the laptop, BEFORE a byte moves: a malformed export fails here,
+    # not after the whole upload and a server-side intake rejection.
+    try:
+        validate_lerobot_export(export_dir)
+    except RuntimeError as exc:
+        print(f"newt finetune: {exc}", file=sys.stderr)
+        return None
+
+    total_bytes = _dir_size(export_dir)
+    print(
+        f"Detected a local folder — uploading {_format_size(total_bytes)}… "
+        f"staged as {staged}",
+        file=out,
+        flush=True,
+    )
+
+    try:
+        sink = NTCloudSink(staged, api_key=api_key, console_url=console)
+        # Already validated above — don't re-read the export just to re-check it.
+        sink.upload_directory(export_dir, validate=False, progress=_make_progress(out, total_bytes))
+    except RuntimeError as exc:
+        print(f"\nnewt finetune: upload failed — {exc}", file=sys.stderr)
+        return None
+
+    print(f"  uploaded {_format_size(total_bytes)}, staged as {staged}", file=out)
+    return staged
+
+
 def cmd_finetune(args: list[str]) -> int:
     if any(a in ("-h", "--help") for a in args):
         _usage()
@@ -210,6 +360,13 @@ def cmd_finetune(args: list[str]) -> int:
     # --- launch (unless re-attaching to an existing handle) -----------------
     job_handle = handle
     if dataset:
+        # Path-vs-name detection. A path validates + uploads here and
+        # resolves to its staged name; a name passes straight through unchanged.
+        # Either way, `dataset` below is the staged name the launch runs against.
+        dataset = _resolve_dataset_arg(dataset, console, api_key, out)
+        if dataset is None:
+            return 1  # bad path / malformed export / failed upload — already surfaced
+
         try:
             launched = _launch(console, api_key, dataset)
         except HTTPError as exc:
