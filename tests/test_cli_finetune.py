@@ -883,3 +883,231 @@ def test_live_path_upload_round_trip(tmp_path, capsys):
     parsed = json.loads(captured.out)
     assert parsed.get("job_handle"), f"live launch returned no handle: {captured.out!r}"
     assert rc in (0, 1)  # 0 succeeded / 1 failed-at-gate — both are real terminal states
+
+
+# ---------------------------------------------------------------------------
+# ft-024: --name — an optional, client-validated model name (default = dataset)
+# ---------------------------------------------------------------------------
+
+def test_validate_name_pure_shape():
+    """Client-side --name validation matches the console's slug rule: lowercase
+    alphanumeric + hyphens, length 3..40. No coercion — a bad name is a NAMED error,
+    never silently reshaped (spec §2, Rule 10)."""
+    assert ft._validate_name(None) == (None, None)          # absent → no name
+    assert ft._validate_name("kitchen-grasp") == ("kitchen-grasp", None)
+    assert ft._validate_name("  pick2  ") == ("pick2", None)  # whitespace stripped
+    # too short / too long
+    v, e = ft._validate_name("ab")
+    assert v is None and "--name" in e
+    v, e = ft._validate_name("x" * 41)
+    assert v is None and "--name" in e
+    # uppercase / spaces / underscores are refused, not coerced
+    for bad in ("Kitchen", "kitchen grasp", "kitchen_grasp", "café"):
+        v, e = ft._validate_name(bad)
+        assert v is None and "--name" in e and "slug" in e.lower(), bad
+    # present-but-empty flag surfaces a named error
+    v, e = ft._validate_name("")
+    assert v is None and "--name" in e
+
+
+def test_name_forwards_to_launch(monkeypatch):
+    """`--dataset X --name kitchen-grasp` reaches the console launch as name, and echoes
+    it to the human on launch."""
+    captured = {}
+
+    def fake_launch(console, api_key, dataset, *, steps=None, name=None, fresh=False, **k):
+        captured["name"] = name
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    rc, out, err = _run(
+        ["--dataset", "d", "--name", "kitchen-grasp"], monkeypatch, statuses=[_SUCCEEDED]
+    )
+    assert rc == 0
+    assert captured["name"] == "kitchen-grasp"
+    assert "name:         kitchen-grasp" in out
+
+
+def test_name_equals_form_forwards_to_launch(monkeypatch):
+    captured = {}
+
+    def fake_launch(console, api_key, dataset, *, steps=None, name=None, fresh=False, **k):
+        captured["name"] = name
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    rc, out, err = _run(["--dataset", "d", "--name=pick-place"], monkeypatch, statuses=[_SUCCEEDED])
+    assert rc == 0
+    assert captured["name"] == "pick-place"
+
+
+@pytest.mark.parametrize("bad", ["Kitchen", "kitchen grasp", "ab", ""])
+def test_name_bad_value_rejected_before_any_network(bad, monkeypatch):
+    """A garbage --name is rejected with a named error and NO launch — the bad value
+    never reaches the console."""
+    def _boom(*a, **k):
+        raise AssertionError("launch must not be called on a bad --name")
+
+    monkeypatch.setattr(ft, "_launch", _boom)
+    rc, out, err = _run(["--dataset", "d", "--name", bad], monkeypatch)
+    assert rc == 1
+    assert "--name" in err
+
+
+def test_name_requires_dataset(monkeypatch):
+    """`--name` names a NEW launch's model; on --handle re-attach there's nothing to
+    name — refuse loudly rather than silently ignore it (Rule 10)."""
+    def _boom(*a, **k):
+        raise AssertionError("must not launch")
+
+    monkeypatch.setattr(ft, "_launch", _boom)
+    rc, out, err = _run(["--handle", "fc-x", "--name", "kitchen-grasp"], monkeypatch)
+    assert rc == 1
+    assert "--name" in err and "dataset" in err.lower()
+
+
+def test_json_carries_effective_name(monkeypatch):
+    """`--json` output includes the effective name the launch carried."""
+    rc, out, err = _run(
+        ["--dataset", "d", "--name", "kitchen-grasp", "--json"],
+        monkeypatch,
+        launch=_HANDLE,
+        statuses=[_SUCCEEDED],
+    )
+    obj = json.loads(out)
+    assert obj["name"] == "kitchen-grasp"
+
+
+def test_json_name_null_when_not_set(monkeypatch):
+    """No --name → the JSON `name` is null (model named after the dataset), never a
+    fabricated name."""
+    rc, out, err = _run(
+        ["--dataset", "d", "--json"], monkeypatch, launch=_HANDLE, statuses=[_SUCCEEDED]
+    )
+    obj = json.loads(out)
+    assert obj["name"] is None
+
+
+def test_launch_payload_omits_name_and_fresh_when_absent_includes_when_set(monkeypatch):
+    """The launch POST body carries `name`/`fresh` ONLY when the developer set them —
+    absent, an un-flagged launch is byte-for-byte the request it was before ft-024."""
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"job_handle": "fc-x"}'
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    monkeypatch.setattr(ft, "urlopen", fake_urlopen)
+
+    ft._launch("http://console", "nt_k", "my-task")
+    assert "name" not in captured["body"]
+    assert "fresh" not in captured["body"]
+
+    ft._launch("http://console", "nt_k", "my-task", name="kitchen-grasp", fresh=True)
+    assert captured["body"]["name"] == "kitchen-grasp"
+    assert captured["body"]["fresh"] is True
+
+
+# ---------------------------------------------------------------------------
+# ft-024: --fresh — force a full retrain (default = resume)
+# ---------------------------------------------------------------------------
+
+def test_fresh_forwards_to_launch(monkeypatch):
+    """`--dataset X --fresh` reaches the launch as fresh=True and is announced to the
+    human on launch."""
+    captured = {}
+
+    def fake_launch(console, api_key, dataset, *, steps=None, name=None, fresh=False, **k):
+        captured["fresh"] = fresh
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    rc, out, err = _run(["--dataset", "d", "--fresh"], monkeypatch, statuses=[_SUCCEEDED])
+    assert rc == 0
+    assert captured["fresh"] is True
+    assert "fresh:" in out and "retrain" in out.lower()
+
+
+def test_fresh_absent_is_false(monkeypatch):
+    captured = {}
+
+    def fake_launch(console, api_key, dataset, *, steps=None, name=None, fresh=False, **k):
+        captured["fresh"] = fresh
+        return _HANDLE
+
+    monkeypatch.setattr(ft, "_launch", fake_launch)
+    rc, out, err = _run(["--dataset", "d"], monkeypatch, statuses=[_SUCCEEDED])
+    assert captured["fresh"] is False
+    assert "fresh:" not in out
+
+
+def test_fresh_requires_dataset(monkeypatch):
+    """`--fresh` forces a retrain of a NEW launch; on --handle/--list there's nothing to
+    retrain — refuse loudly (Rule 10, spec §2)."""
+    def _boom(*a, **k):
+        raise AssertionError("must not launch")
+
+    monkeypatch.setattr(ft, "_launch", _boom)
+    rc, out, err = _run(["--handle", "fc-x", "--fresh"], monkeypatch)
+    assert rc == 1
+    assert "--fresh" in err and "dataset" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# ft-020 papercut: the CLI must surface the server's `detail` verbatim on a 400/409 so
+# a bounds error (or a --name collision) actually reaches the developer.
+# ---------------------------------------------------------------------------
+
+def _http_error(code, body):
+    """An HTTPError whose body is a JSON string with a `detail` — the shape the console
+    returns on a rejected launch."""
+    return HTTPError("url", code, "err", {}, io.BytesIO(json.dumps(body).encode()))
+
+
+def test_400_detail_surfaced_verbatim(monkeypatch):
+    """A 400 whose body names the reason (an out-of-bounds --steps message) reaches
+    stdout/stderr verbatim, not a generic 'bad request'."""
+    detail = "steps must be between 2000 and 100000 (got 500)"
+
+    def _bad(*a, **k):
+        raise _http_error(400, {"error": "bad_request", "detail": detail})
+
+    monkeypatch.setattr(ft, "_launch", _bad)
+    rc, out, err = _run(["--dataset", "d"], monkeypatch)
+    assert rc == 1
+    assert detail in err
+
+
+def test_400_falls_back_to_generic_line_without_detail(monkeypatch):
+    """A 400 with no detail body still gets a clear message (backward-compatible)."""
+    def _bad(*a, **k):
+        raise HTTPError("url", 400, "Bad Request", {}, None)
+
+    monkeypatch.setattr(ft, "_launch", _bad)
+    rc, out, err = _run(["--dataset", "weird-set"], monkeypatch)
+    assert rc == 1
+    assert "weird-set" in err
+
+
+def test_409_collision_detail_surfaced_verbatim(monkeypatch):
+    """A 409 --name collision names the tag and that the run was NOT launched; the CLI
+    surfaces that verbatim (fail before spend, spec §2)."""
+    detail = 'a model named "kitchen-grasp" already exists (tag ft-team-kitchen-grasp) — the run was NOT launched.'
+
+    def _conflict(*a, **k):
+        raise _http_error(409, {"error": "conflict", "detail": detail})
+
+    monkeypatch.setattr(ft, "_launch", _conflict)
+    rc, out, err = _run(["--dataset", "d", "--name", "kitchen-grasp"], monkeypatch)
+    assert rc == 1
+    assert detail in err
