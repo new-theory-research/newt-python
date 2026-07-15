@@ -3,6 +3,8 @@
     newt finetune --dataset ./my-folder  upload a local dataset folder, then launch
     newt finetune --dataset <name>       launch on an already-staged dataset name
     newt finetune --dataset <name> --steps 20000   set total training steps
+    newt finetune --dataset <name> --name kitchen-grasp  name the model this run makes
+    newt finetune --dataset <name> --fresh   ignore any checkpoint, retrain from scratch
     newt finetune --handle <job>         re-attach to a run already launched
     newt finetune --handle <job> --status   print the run's state ONCE and exit
     newt finetune --dataset <name> --json   machine-readable handle + terminal state
@@ -164,6 +166,51 @@ def _validate_steps(raw: str | None) -> tuple[int | None, str | None]:
     return value, None
 
 
+# ft-024: --name is an optional model name, validated client-side to the SAME slug rule
+# the console enforces (lowercase alphanumeric + hyphens, length 3..40) so a bad name
+# never reaches the wire.
+_NAME_SLUG = re.compile(r"^[a-z0-9-]+$")
+_NAME_MIN = 3
+_NAME_MAX = 40
+
+
+def _name_raw(args: list[str]) -> str | None:
+    """Raw string value for ``--name`` (space or ``=`` form), or None when the flag is
+    absent. A present-but-empty flag (``--name`` with no value, ``--name=``, or a value
+    that looks like another flag) returns ``""`` so validation surfaces a named error —
+    never silently treated as "no name" (Rule 10)."""
+    for i, a in enumerate(args):
+        if a == "--name":
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            return nxt if (nxt is not None and not nxt.startswith("-")) else ""
+        if a.startswith("--name="):
+            return a[len("--name=") :]
+    return None
+
+
+def _validate_name(raw: str | None) -> tuple[str | None, str | None]:
+    """``(name, error)`` for the ``--name`` value. ``raw is None`` (flag absent) →
+    ``(None, None)``: no name, the model is named after the dataset (the default). A
+    present value must be a slug — lowercase letters, digits, and hyphens, length 3..40.
+    Anything else is a NAMED error with no coercion (spec §2, Rule 10): a name with
+    spaces or uppercase is refused, never silently reshaped into something that works.
+    The server re-validates the same rule; this keeps a bad value off the wire."""
+    if raw is None:
+        return None, None
+    text = raw.strip()
+    if len(text) < _NAME_MIN or len(text) > _NAME_MAX:
+        return None, (
+            f"--name must be between {_NAME_MIN} and {_NAME_MAX} characters, "
+            f"got {len(text)}: {raw!r}."
+        )
+    if not _NAME_SLUG.match(text):
+        return None, (
+            "--name must be a slug — lowercase letters, digits, and hyphens only "
+            f"(no spaces or uppercase): {raw!r}."
+        )
+    return text, None
+
+
 def _usage() -> None:
     print("Usage: newt finetune (--dataset <path|name> | --handle <job> | --list) [--status] [--json]")
     print("")
@@ -178,6 +225,11 @@ def _usage() -> None:
     print("                         CLI prints which it detected before it acts.")
     print("  --steps <int>          Total training steps for this run (with --dataset).")
     print("                         Omit to use the server default.")
+    print("  --name <slug>          Name for the model this run produces (with --dataset).")
+    print("                         Omit to name it after the dataset.")
+    print("  --fresh                Ignore any existing checkpoint and retrain from scratch")
+    print("                         (with --dataset). Omit to resume a completed run's")
+    print("                         post-processing.")
     print("  --handle <job>         Re-attach to a run already launched (poll only).")
     print("  --status               With --handle: print the run's current state once")
     print("                         and exit — a one-shot check, no blocking watch.")
@@ -203,14 +255,22 @@ def _launch(
     dataset: str,
     *,
     steps: int | None = None,
+    name: str | None = None,
+    fresh: bool = False,
     timeout: float = 30.0,
 ) -> dict:
     # `steps` rides only when the developer set it (--steps); absent, the field is
     # omitted entirely so the server applies its own default — never a client-fabricated
-    # step count (Rule 10).
+    # step count (Rule 10). `name` (ft-024, --name) and `fresh` (--fresh) ride the same
+    # way: each present in the body ONLY when the developer set it, so an un-flagged
+    # launch is byte-for-byte the request it was before these flags existed.
     payload: dict = {"dataset": dataset}
     if steps is not None:
         payload["steps"] = steps
+    if name is not None:
+        payload["name"] = name
+    if fresh:
+        payload["fresh"] = True
     req = Request(
         f"{console}/api/finetune",
         data=json.dumps(payload).encode(),
@@ -285,10 +345,19 @@ def _render_terminal(status: dict) -> tuple[str, int]:
     return _c(_RED, f"Fine-tune ended in an unexpected state: {status!r}"), 1
 
 
-def _terminal_json(job_handle: str, status: dict, *, steps: int | None = None) -> str:
+def _terminal_json(
+    job_handle: str,
+    status: dict,
+    *,
+    steps: int | None = None,
+    name: str | None = None,
+) -> str:
     # `steps` is the effective total-steps for this run: the value the developer set
     # with --steps, or null when they didn't (the server default is in force). Null is
     # honest here — the CLI never invents the server's default to fill it (Rule 10).
+    # `name` (ft-024) is the effective model name: the --name the developer set, or null
+    # when they didn't (the model is named after the dataset) — null, never a fabricated
+    # name.
     return json.dumps(
         {
             "job_handle": job_handle,
@@ -297,6 +366,7 @@ def _terminal_json(job_handle: str, status: dict, *, steps: int | None = None) -
             "tag": status.get("tag"),
             "report_card": status.get("report_card"),
             "steps": steps,
+            "name": name,
         }
     )
 
@@ -522,6 +592,12 @@ def cmd_finetune(args: list[str]) -> int:
     steps, steps_err = _validate_steps(_steps_raw(args))
     steps_present = _steps_raw(args) is not None
 
+    # --name (ft-024) is a launch-only, client-validated model name. Validated here
+    # BEFORE any network, same as --steps. --fresh is a launch-only boolean.
+    name, name_err = _validate_name(_name_raw(args))
+    name_present = _name_raw(args) is not None
+    fresh = "--fresh" in args
+
     # Instructional/progress output goes to stderr in --json mode so stdout carries
     # nothing but the final JSON object (composable with $(...) / jq).
     out = sys.stderr if as_json else sys.stdout
@@ -542,6 +618,22 @@ def cmd_finetune(args: list[str]) -> int:
         # nothing to apply it to. Refuse loudly rather than silently ignore it (Rule 10).
         print("newt finetune: --steps only applies when launching with --dataset.", file=sys.stderr)
         print("        Fix: newt finetune --dataset <name> --steps 20000", file=sys.stderr)
+        return 1
+    if name_err:
+        print(f"newt finetune: {name_err}", file=sys.stderr)
+        print("        Fix: newt finetune --dataset <name> --name kitchen-grasp", file=sys.stderr)
+        return 1
+    if name_present and not dataset:
+        # --name names a NEW launch's model; on --handle/--list there's nothing to name.
+        # Refuse loudly rather than silently ignore it (Rule 10).
+        print("newt finetune: --name only applies when launching with --dataset.", file=sys.stderr)
+        print("        Fix: newt finetune --dataset <name> --name kitchen-grasp", file=sys.stderr)
+        return 1
+    if fresh and not dataset:
+        # --fresh forces a retrain of a NEW launch; on --handle/--list there's nothing to
+        # retrain. Refuse loudly rather than silently ignore it (Rule 10, spec §2).
+        print("newt finetune: --fresh only applies when launching with --dataset.", file=sys.stderr)
+        print("        Fix: newt finetune --dataset <name> --fresh", file=sys.stderr)
         return 1
     if as_status and not handle:
         print("newt finetune: --status needs --handle <job> — the run to check on.", file=sys.stderr)
@@ -582,7 +674,7 @@ def cmd_finetune(args: list[str]) -> int:
             return 1  # bad path / malformed export / failed upload — already surfaced
 
         try:
-            launched = _launch(console, api_key, dataset, steps=steps)
+            launched = _launch(console, api_key, dataset, steps=steps, name=name, fresh=fresh)
         except HTTPError as exc:
             _explain_launch_http_error(exc, dataset)
             return 1
@@ -599,6 +691,10 @@ def cmd_finetune(args: list[str]) -> int:
         print(f"Launched fine-tune on dataset {dataset!r}.", file=out)
         if steps is not None:
             print(f"  steps:        {steps}", file=out)
+        if name is not None:
+            print(f"  name:         {name}", file=out)
+        if fresh:
+            print("  fresh:        forcing a full retrain (ignoring any existing checkpoint)", file=out)
         print(f"  job handle:   {_c(_GRAY, job_handle)}", file=out)
         print(f"  watch page:   {console}/runs/{job_handle}", file=out)
         print(f"  check later:  newt finetune --handle {job_handle} --status", file=out)
@@ -621,9 +717,9 @@ def cmd_finetune(args: list[str]) -> int:
         return 1  # error already surfaced by _watch
 
     if as_json:
-        # steps is the effective override this launch carried (None on a --handle
-        # re-attach, where the CLI didn't set it).
-        print(_terminal_json(job_handle, status, steps=steps))
+        # steps/name are the effective overrides this launch carried (None on a --handle
+        # re-attach, where the CLI didn't set them).
+        print(_terminal_json(job_handle, status, steps=steps, name=name))
         return 0 if status.get("status") == "succeeded" else 1
 
     text, code = _render_terminal(status)
@@ -711,12 +807,48 @@ def _status_once(console: str, api_key: str, job_handle: str, *, as_json: bool) 
     return 0
 
 
+def _http_error_detail(exc: HTTPError) -> str | None:
+    """The server's ``detail`` string from a JSON error body, or None when there isn't
+    one. The console names the EXACT reason a request was refused in ``detail`` — the
+    out-of-bounds steps message (`steps must be between 2000 and 100000`), a bad ``--name``
+    slug, or a ``--name`` collision (`a model named "…" already exists … NOT launched`).
+    Surfacing that verbatim is how a bounds/name error actually reaches the developer
+    instead of a generic 'bad request' (ft-020 papercut: the CLI was swallowing the
+    server's detail). Best-effort: a non-JSON or bodyless error just yields None and the
+    caller falls back to its generic line."""
+    try:
+        raw = exc.read()
+    except Exception:  # noqa: BLE001 - a body we can't read is just "no detail"
+        return None
+    if not raw:
+        return None
+    try:
+        body = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return detail if isinstance(detail, str) and detail else None
+
+
 def _explain_launch_http_error(exc: HTTPError, dataset: str) -> None:
+    detail = _http_error_detail(exc)
     if exc.code == 401:
         print("newt finetune: authentication failed — your key was rejected.", file=sys.stderr)
         print("  Rotate your key in the console, or run `newt login` again.", file=sys.stderr)
     elif exc.code == 400:
-        print(f"newt finetune: the console rejected dataset {dataset!r} (bad request).", file=sys.stderr)
+        # Surface the server's own reason verbatim when it names one (bad --steps bounds,
+        # bad --name slug) — otherwise fall back to the generic dataset line.
+        if detail:
+            print(f"newt finetune: the console rejected the request — {detail}", file=sys.stderr)
+        else:
+            print(f"newt finetune: the console rejected dataset {dataset!r} (bad request).", file=sys.stderr)
+    elif exc.code == 409:
+        # ft-024: a --name collision (or any conflict). The server names the tag and that
+        # the run was NOT launched (fail before spend); surface it verbatim.
+        if detail:
+            print(f"newt finetune: {detail}", file=sys.stderr)
+        else:
+            print("newt finetune: that name is already taken — the run was not launched.", file=sys.stderr)
     elif exc.code == 503:
         print("newt finetune: the training launch is unavailable right now (503).", file=sys.stderr)
         print("  This is server-side (Modal launch not configured/reachable) — not your key.", file=sys.stderr)
