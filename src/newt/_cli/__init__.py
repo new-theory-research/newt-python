@@ -14,6 +14,10 @@ def main() -> None:
         _usage()
         sys.exit(0)
 
+    if args[0] in ("--version", "-V"):
+        _print_version()
+        sys.exit(0)
+
     cmd = args[0]
     if cmd == "login":
         from newt._cli.login import cmd_login
@@ -47,9 +51,23 @@ def main() -> None:
         from newt._cli.episodes import cmd_episodes
         sys.exit(cmd_episodes(args[1:]))
 
+    if cmd == "version":
+        _print_version()
+        sys.exit(0)
+
     print(f"newt: unknown command '{cmd}'", file=sys.stderr)
     print("Run 'newt --help' for usage.", file=sys.stderr)
     sys.exit(1)
+
+
+def _print_version() -> None:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        v = version("newt")
+    except PackageNotFoundError:
+        from newt import __version__ as v
+    print(f"newt {v}")
 
 
 def _usage() -> None:
@@ -64,6 +82,7 @@ def _usage() -> None:
     print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
     print("  finetune Launch a training run on NT's GPUs and watch it (try: newt finetune --dataset <name>)")
+    print("  version  Show the installed newt version (also: --version, -V)")
     print("")
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status,")
