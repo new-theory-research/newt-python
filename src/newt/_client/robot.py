@@ -1086,7 +1086,10 @@ class Robot:
         return _with_verifier_retry(lambda: self._run_blocking_once(prompt, max_duration))
 
     def _run_blocking_once(self, prompt: str, max_duration: float) -> RunResult:
+        import logging
         import time as _time
+
+        _logger = logging.getLogger("newt")
         self._degradation_warned = False
         ws = self._ws_connect()
         stop_reason = "error"
@@ -1104,23 +1107,22 @@ class Robot:
                 frame_no += 1
 
                 payload = _pack(frame)
-                print(
-                    f"[newt debug] frame {frame_no}: sending {len(payload)} bytes",
-                    flush=True,
+                _logger.debug(
+                    "frame %d: sending %d bytes", frame_no, len(payload)
                 )
                 _send_t0 = _time.time()
                 try:
                     ws.send(payload)
-                    print(
-                        f"[newt debug] frame {frame_no}: send returned in "
-                        f"{(_time.time()-_send_t0)*1000:.1f}ms",
-                        flush=True,
+                    _logger.debug(
+                        "frame %d: send returned in %.1fms",
+                        frame_no,
+                        (_time.time() - _send_t0) * 1000,
                     )
                 except ConnectionClosed:
-                    print(
-                        f"[newt debug] frame {frame_no}: send raised "
-                        f"ConnectionClosed after {(_time.time()-_send_t0)*1000:.1f}ms",
-                        flush=True,
+                    _logger.debug(
+                        "frame %d: send raised ConnectionClosed after %.1fms",
+                        frame_no,
+                        (_time.time() - _send_t0) * 1000,
                     )
                     pass  # server may have initiated close; drain recv for terminal
 
@@ -1128,11 +1130,10 @@ class Robot:
                     raw = ws.recv()
                 except ConnectionClosed as exc:
                     rcvd = getattr(exc, "rcvd", None)
-                    print(
-                        f"[newt] WS closed by server: "
-                        f"code={getattr(rcvd, 'code', None)} "
-                        f"reason={getattr(rcvd, 'reason', None)!r}",
-                        flush=True,
+                    _logger.info(
+                        "WS closed by server: code=%s reason=%r",
+                        getattr(rcvd, "code", None),
+                        getattr(rcvd, "reason", None),
                     )
                     _check_close_error(exc, self._model)
                     break  # connection closed cleanly (no known error code)
