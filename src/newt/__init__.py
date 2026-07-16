@@ -54,6 +54,8 @@ Internal:
 - `newt._client` — edge client, invariant per tenet T1
 """
 
+__version__ = "0.0.1"
+
 from newt._client.robot import (
     AuthError,
     BaseNotDeployableError,
