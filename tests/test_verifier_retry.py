@@ -285,3 +285,67 @@ def test_non_transient_verifier_error_not_retried():
 
     assert call_count == 1, "Non-transient VerifierError must not be retried"
     assert exc_info.value.type == "verifier.config_error"
+
+
+# ---------------------------------------------------------------------------
+# SDK audit F1 (2026-07-16): robot.run()'s non-stream path must not spam stdout
+# ---------------------------------------------------------------------------
+
+
+def _make_terminal_frame(stop_reason: str = "task_complete") -> bytes:
+    """Minimal valid msgpack terminal frame that ends the run() loop."""
+    import msgpack
+
+    return msgpack.packb({"type": "terminal", "stop_reason": stop_reason}, use_bin_type=True)
+
+
+def test_run_blocking_produces_no_stdout_output(monkeypatch, capsys):
+    """robot.run() must drive frames without printing anything to stdout.
+
+    Before the fix, _run_blocking_once had four unconditional print() calls
+    ('[newt debug] frame N: sending X bytes', 'send returned...', etc.) that
+    fired every frame — a team driving a real arm at 30Hz got their terminal
+    flooded with debug chatter they never asked for and had no way to turn off
+    (SDK audit F1, 2026-07-16). The fix routes them through the `newt` logger
+    at DEBUG/INFO, which produces no output without a handler configured — the
+    library never calls basicConfig. This test pins that: frames still flow
+    (read_state/execute called, a real stop_reason returned) while stdout (and
+    stderr, since logging's lastResort handler only fires at WARNING+) stay
+    clean.
+    """
+    read_state_calls = 0
+    execute_calls: list[np.ndarray] = []
+
+    def read_state() -> dict:
+        nonlocal read_state_calls
+        read_state_calls += 1
+        return {"state": np.zeros(14, dtype=np.float32)}
+
+    def execute(chunk: np.ndarray) -> None:
+        execute_calls.append(chunk)
+
+    with patch.dict("os.environ", {"NT_INFERENCE_URL": "wss://fake.invalid/stream"}):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", newt.EnvOverrideWarning)
+            robot = newt.Robot(
+                api_key="nt_fakekey",
+                read_state=read_state,
+                execute=execute,
+            )
+
+    ws = MagicMock()
+    ws.send.return_value = None
+    # One action frame, then a terminal frame to end the loop deterministically.
+    ws.recv.side_effect = [_make_action_frame(), _make_terminal_frame()]
+    ws.close.return_value = None
+    monkeypatch.setattr(robot, "_ws_connect", lambda: ws)
+
+    result = robot.run("pick up the cup", max_duration=5.0)
+
+    assert read_state_calls >= 1, "read_state() must still be called"
+    assert len(execute_calls) >= 1, "execute() must still be called with the action chunk"
+    assert result.stop_reason == "task_complete"
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"run() must not print to stdout; got {captured.out!r}"
+    assert captured.err == "", f"run() must not print to stderr; got {captured.err!r}"
