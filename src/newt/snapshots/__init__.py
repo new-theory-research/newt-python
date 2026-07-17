@@ -16,15 +16,15 @@ Usage:
     import newt
     from newt import snapshots
 
-    robot = newt.Robot(api_key=..., model="nt0-fp3-pour")
-    response = robot.infer(snapshots.load("cup_stacking"))
+    robot = newt.Robot(api_key=..., model="so101")
+    response = robot.infer(snapshots.load("red_cube"))
     print(response)  # labeled chunk
 
 Available snapshots:
-    cup_stacking       — 8-axis nt0 rig (left-arm tr3 cup-stacking episode; wrist camera
+    cup_stacking       — 8-axis rig (left-arm tr3 cup-stacking episode; wrist camera
                          remapped to right-wrist-camera). Cameras: right-wrist-camera,
                          surrounding1, surrounding2.
-    pour_coffee_beans  — 8-axis nt0 rig (native right-arm tr2 pour episode). Same cameras.
+    pour_coffee_beans  — 8-axis rig (native right-arm tr2 pour episode). Same cameras.
     red_cube           — 6-axis SO-101 rig (red-cube-bowl episode). Cameras: top, side at
                          224x224. Matches the live red-cube-bowl fine-tune contract.
 """
@@ -45,7 +45,7 @@ class _Snapshot:
     ``cameras`` maps the contract camera name (the key the wire protocol expects) to
     the ``.npz`` key holding that camera's JPEG bytes — an ORDERED tuple because the
     contract declares cameras in order. Each snapshot carries its OWN camera set: an
-    8-axis nt0 rig has three cameras, a 6-axis SO-101 rig has two (top/side). There is
+    8-axis rig has three cameras, a 6-axis SO-101 rig has two (top/side). There is
     no global camera list — the shape is per-rig, and conflating them is exactly the
     bug this snapshot module exists to avoid.
     """
@@ -57,10 +57,10 @@ class _Snapshot:
 
 # Maps snapshot name -> its definition. Camera frames are stored JPEG-compressed to keep
 # each snapshot under the package-size budget; load() decodes them back to (3, H, W)
-# uint8 CHW arrays (H/W per the rig's contract — 240x320 for nt0, 378x378 for so101).
+# uint8 CHW arrays (H/W per the rig's contract — 240x320 for the 8-axis rig, 378x378 for so101).
 #
 # cup_stacking is listed first: it is the historical default `newt run` reaches for when
-# a model's contract declares nothing to match on (an nt0 base with no state_shape/cameras).
+# a model's contract declares nothing to match on (an 8-axis base with no state_shape/cameras).
 _SNAPSHOTS: dict[str, _Snapshot] = {
     "cup_stacking": _Snapshot(
         file="cup_stacking.npz",
@@ -70,7 +70,7 @@ _SNAPSHOTS: dict[str, _Snapshot] = {
             ("surrounding2", "jpeg_surrounding2"),
         ),
         # Override the raw recorded tag ("blue cups stitch cup") — too rough for docs.
-        # Substitute NT0-FP3's clean canonical task prompt, which still matches the obs
+        # Substitute a clean canonical task prompt, which still matches the obs
         # and returns a non-degenerate chunk.
         prompt_override="Stack one cup into another cup.",
     ),
@@ -106,7 +106,7 @@ _SNAPSHOTS: dict[str, _Snapshot] = {
 def _decode_jpeg(buf: np.ndarray) -> np.ndarray:
     """Decode JPEG bytes (stored as a uint8 array) to (3, H, W) uint8 CHW.
 
-    The H/W come from the encoded frame itself — never assumed. An nt0 frame decodes to
+    The H/W come from the encoded frame itself — never assumed. An 8-axis rig frame decodes to
     (3, 240, 320); the so101 red_cube frame to (3, 224, 224).
     """
     try:
@@ -140,7 +140,7 @@ def load(name: str) -> dict:
                 "images": {camera_name: (3, H, W) uint8} for the rig's cameras,
                 "prompt": str            — the instruction the episode was collected with,
             }
-        D and (H, W) are per-rig (8 / 240x320 for nt0, 6 / 224x224 for so101 red_cube). The
+        D and (H, W) are per-rig (8 / 240x320 for the 8-axis rig, 6 / 224x224 for so101 red_cube). The
         "prompt" rides along in the obs, so the caller doesn't pass it separately —
         `_build_obs_frame` prefers an obs-carried prompt.
 
@@ -170,7 +170,7 @@ def describe(name: str) -> dict:
 
     Returns:
         {
-            "state_shape": tuple[int, ...],   — e.g. (8,) for nt0, (6,) for so101,
+            "state_shape": tuple[int, ...],   — e.g. (8,) for the 8-axis rig, (6,) for so101,
             "cameras":     tuple[str, ...],   — contract camera names in order,
         }
 

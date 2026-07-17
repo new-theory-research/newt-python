@@ -146,7 +146,7 @@ class DegradationWarning(UserWarning):
 class ColdStartRetry(UserWarning):
     """First WS connection timed out; SDK retried with an extended timeout (180s).
 
-    Modal containers serving large NT0-FP3 checkpoints (~5GB) take 60–90s to warm
+    Modal containers serving large model checkpoints (~5GB) take 60–90s to warm
     up from cold. On the FIRST connection attempt of a Robot instance's lifecycle,
     a TimeoutError triggers one automatic retry with connect_timeout=180. Emitted
     exactly once per Robot instance via warnings.warn. Subsequent connections (warm
@@ -412,8 +412,8 @@ class ModelContract:
     field is reported as absent, never filled with a shaped-right default).
 
     Attributes:
-        state_shape:  Expected proprioceptive state vector shape, e.g. ``(8,)``
-                      for nt0-fp3, ``(6,)`` for so101. ``None`` if not declared.
+        state_shape:  Expected proprioceptive state vector shape, e.g. ``(6,)``
+                      for so101, ``(8,)`` for an 8-axis rig. ``None`` if not declared.
         cameras:      Expected camera keys in contract order, e.g.
                       ``("top", "side")``. ``None`` if not declared.
         image_shape:  Expected per-camera image array shape (CHW), e.g.
@@ -635,7 +635,11 @@ class InferenceResponse:
 # is skipped and the env URL is used directly (test/smoke affordance).
 
 _DEFAULT_BOOTSTRAP_URL = "https://nt-registry-production.up.railway.app"
-_DEFAULT_MODEL_UID = "ft_base_nt0fp3"
+_DEFAULT_MODEL_UID = "ft_6341c5_d13da9"
+# Human-friendly registry tag for _DEFAULT_MODEL_UID — the single source of truth
+# for the display string shown when a call runs on the default (model=None). Fallback
+# messages derive from this, never a hardcoded literal, so the default can move in one place.
+_DEFAULT_MODEL_TAG = "so101"
 
 
 def _resolve_bootstrap_url() -> str:
@@ -1176,9 +1180,9 @@ class Robot:
         override path where the registry is empty. A None contract means "I can't
         tell you here," not "this model has no shape."
 
-            >>> robot = newt.Robot(model="nt0-fp3")
+            >>> robot = newt.Robot(model="so101")
             >>> robot.contract.state_shape
-            (8,)
+            (6,)
             >>> robot.contract.cameras
             ('top', 'side')
         """
@@ -1414,7 +1418,7 @@ class Robot:
                 raise
             self._cold_start_retry_consumed = True
             self._last_connect_cold_retried = True
-            model_str = self._model or "nt0-fp3"
+            model_str = self._model or _DEFAULT_MODEL_TAG
             warnings.warn(
                 ColdStartRetry(
                     f"Cold-start retry for model={model_str!r} "
@@ -1736,7 +1740,7 @@ def _maybe_warn_degradation(parsed: dict, model: str | None) -> None:
     wfield = _warnings_dict(parsed)
     if wfield is None:
         return
-    model_str = model or "nt0-fp3"
+    model_str = model or _DEFAULT_MODEL_TAG
 
     # 1. Missing expected cameras (pre-258b signal, unchanged shape).
     missing_cams = _get_either(wfield, "missing_expected_cameras")
@@ -1798,7 +1802,7 @@ def _maybe_warn_mid_session(parsed: dict, model: str | None) -> None:
     got_shape = _get_either(ctx, "got_shape")
     exp_shape = _get_either(ctx, "expected_shape")
     impact = _coerce_str(_get_either(payload, "impact")) or ""
-    model_str = model or "nt0-fp3"
+    model_str = model or _DEFAULT_MODEL_TAG
     warnings.warn(
         DegradationWarning(
             f"Model {model_str!r} received garbled state on obs frame {frame_idx} "

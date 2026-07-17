@@ -8,33 +8,42 @@ Why these matter:
   - The "evaluate the API" audience reads the repr to learn what came back. If the
     repr drops labels, loses the shape, or guesses dim names when real ones exist,
     that audience is misled. Each assert below maps to one such regression.
+  - The default-UID path: model=None must resolve through _DEFAULT_MODEL_UID to
+    the so101 base entry's labels, not by guessing.
 """
 from __future__ import annotations
 
 import numpy as np
 
 import newt
-from newt._client.robot import InferenceResponse, _resolve_action_axes
+from newt._client.robot import (
+    InferenceResponse,
+    _DEFAULT_MODEL_UID,
+    _resolve_action_axes,
+)
 
-_NT0_AXES = ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]
+_SO101_AXES = [
+    "shoulder_pan", "shoulder_lift", "elbow_flex",
+    "wrist_flex", "wrist_roll", "gripper",
+]
 
 # Shape of the /v1/models JSON the SDK caches in self._registry: str keys, fine-tunes
 # already carry the resolved (inherited) contract because the server injects it.
 _FAKE_REGISTRY = [
     {
-        "uid": "ft_base_nt0fp3",
-        "tags": ["nt0-fp3"],
+        "uid": _DEFAULT_MODEL_UID,
+        "tags": ["so101"],
         "type": "base",
         "base": None,
         "endpoint": "wss://example/stream",
-        "contract": {"action_shape": [50, 8], "action_axes": _NT0_AXES},
+        "contract": {"action_shape": [30, 6], "action_axes": _SO101_AXES},
     },
     {
         "uid": "ft_4hn40z6a",
         "tags": ["clean_table"],
         "type": "fine_tune",
-        "base": "ft_base_nt0fp3",
-        "contract": {"action_shape": [50, 8], "action_axes": _NT0_AXES},
+        "base": _DEFAULT_MODEL_UID,
+        "contract": {"action_shape": [30, 6], "action_axes": _SO101_AXES},
     },
     {  # deployable model whose contract omits labels — must fall back, not crash
         "uid": "ft_nolabels",
@@ -42,7 +51,7 @@ _FAKE_REGISTRY = [
         "type": "base",
         "base": None,
         "endpoint": "wss://example/stream",
-        "contract": {"action_shape": [50, 8]},
+        "contract": {"action_shape": [30, 6]},
     },
 ]
 
@@ -59,18 +68,19 @@ def test_repr_shows_shape_labels_and_latency():
     This is the exact string the brief promises a developer evaluating the API sees.
     """
     resp = InferenceResponse(
-        np.zeros((50, 8), dtype=np.float32), _NT0_AXES, 261.0, model="nt0-fp3"
+        np.zeros((30, 6), dtype=np.float32), _SO101_AXES, 261.0, model="so101"
     )
     assert repr(resp) == (
-        "action_chunk (50, 8): x, y, z, qw, qx, qy, qz, gripper | latency 261ms"
+        "action_chunk (30, 6): shoulder_pan, shoulder_lift, elbow_flex, "
+        "wrist_flex, wrist_roll, gripper | latency 261ms"
     )
     assert str(resp) == repr(resp)
 
 
 def test_action_chunk_is_canonical_no_regression():
     """.action_chunk returns the exact raw ndarray run()'s execute() would receive."""
-    chunk = np.arange(16, dtype=np.float32).reshape(2, 8)
-    resp = InferenceResponse(chunk, _NT0_AXES, 12.0)
+    chunk = np.arange(12, dtype=np.float32).reshape(2, 6)
+    resp = InferenceResponse(chunk, _SO101_AXES, 12.0)
     assert resp.action_chunk is chunk
     assert resp.latency_ms == 12.0
     assert resp.model is None
@@ -78,15 +88,15 @@ def test_action_chunk_is_canonical_no_regression():
 
 def test_registry_resolves_labels_for_base_tag_and_finetune():
     """Labels resolve by default-UID, by tag, and for inherited fine-tune contracts."""
-    assert _resolve_action_axes(_FAKE_REGISTRY, None) == _NT0_AXES  # default UID
-    assert _resolve_action_axes(_FAKE_REGISTRY, "nt0-fp3") == _NT0_AXES  # base tag
-    assert _resolve_action_axes(_FAKE_REGISTRY, "clean_table") == _NT0_AXES  # ft tag
+    assert _resolve_action_axes(_FAKE_REGISTRY, None) == _SO101_AXES  # default UID
+    assert _resolve_action_axes(_FAKE_REGISTRY, "so101") == _SO101_AXES  # base tag
+    assert _resolve_action_axes(_FAKE_REGISTRY, "clean_table") == _SO101_AXES  # ft tag
 
 
 def test_registry_returns_none_when_no_labels():
     """No labels -> None (caller falls back to dim_N), never a wrong guess or a crash."""
     assert _resolve_action_axes(_FAKE_REGISTRY, "nope") is None  # unknown model
-    assert _resolve_action_axes([], "nt0-fp3") is None  # empty registry (env override)
+    assert _resolve_action_axes([], "so101") is None  # empty registry (env override)
     assert _resolve_action_axes(_FAKE_REGISTRY, "mystery") is None  # contract w/o axes
 
 
@@ -99,5 +109,5 @@ def test_dim_n_fallback_is_index_named_not_mislabeled():
     robot = newt.Robot.__new__(newt.Robot)  # skip __init__/network
     robot._registry = []
     robot._model = "mystery"
-    axes = robot._action_axes_for(np.zeros((50, 8)))
-    assert axes == [f"dim_{i}" for i in range(8)]
+    axes = robot._action_axes_for(np.zeros((30, 6)))
+    assert axes == [f"dim_{i}" for i in range(6)]

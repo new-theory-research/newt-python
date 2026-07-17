@@ -11,7 +11,7 @@ round-trip latency, and the action-chunk shape.
 
 Snapshot selection is contract-aware. With no `--snapshot`, `newt run` reads the resolved
 model's declared contract (`robot.contract`) and picks the bundled snapshot whose state
-dimension and camera set MATCH — an 8-axis nt0 model gets an 8-axis snapshot, a 6-axis
+dimension and camera set MATCH — an 8-axis model gets an 8-axis snapshot, a 6-axis
 SO-101 model gets a 6-axis one. If no bundled snapshot matches the contract, that's an
 honest error naming what's available for which shapes — never a silent coercion of a
 wrong-shaped frame (Rule 10). `--snapshot` overrides the choice explicitly; a mismatched
@@ -38,11 +38,11 @@ import threading
 
 from newt._credentials import read_api_key
 
-# The fallback snapshot when a model's contract declares nothing to match on (an nt0 base
+# The fallback snapshot when a model's contract declares nothing to match on (a base
 # whose registry entry carries no state_shape / cameras — there's no shape to key off, so
 # the historical default stands). A model WITH a contract gets a contract-matched snapshot
 # instead (see _select_snapshot). cup_stacking is the docs' own example: a developer types
-# `newt run <nt0-tag>` and gets a real cup-stacking observation without knowing a snapshot
+# `newt run <tag>` and gets a real cup-stacking observation without knowing a snapshot
 # name exists.
 _DEFAULT_SNAPSHOT = "cup_stacking"
 
@@ -85,7 +85,7 @@ def _usage() -> None:
     print("")
     print("Options:")
     print("  --snapshot <name>  Bundled observation to send (default: matched to the")
-    print("                     model's contract — 8-axis nt0, 6-axis SO-101)")
+    print("                     model's contract — 8-axis rig, 6-axis SO-101)")
     print("  --prompt <text>    Override the snapshot's recorded prompt")
     print("  --json             Emit machine-readable JSON")
     print("")
@@ -120,7 +120,7 @@ def _opt_value(args: list[str], name: str) -> str | None:
 def _positional_tag(args: list[str]) -> str | None:
     """First bareword that is not a flag or a value consumed by a value-flag.
 
-    ``newt run nt0-fp3-pour --snapshot pour_coffee_beans --json`` → ``nt0-fp3-pour``.
+    ``newt run so101 --snapshot red_cube --json`` → ``so101``.
     """
     skip_next = False
     for a in args:
@@ -227,11 +227,11 @@ def _select_snapshot(snapshots, contract) -> str | None:
     The match is on SHAPE, the thing that actually has to line up: a snapshot qualifies
     when the contract's state_shape and cameras (whichever the contract declares) equal
     the snapshot's. Snapshots are scanned in registry order, so cup_stacking wins the
-    8-axis tie over pour_coffee_beans — preserving the historical nt0 default.
+    8-axis tie over pour_coffee_beans — preserving the historical 8-axis default.
 
     Two Rule-10 seams:
       - A contract that declares NOTHING to match on (state_shape and cameras both
-        absent — an nt0 base whose entry carries only action_shape, or the empty
+        absent — a base whose entry carries only action_shape, or the empty
         registry of the NT_INFERENCE_URL override) has no shape to key off, so we fall
         back to _DEFAULT_SNAPSHOT rather than guess. The default is a real 8-axis frame;
         if it's wrong for this model, the server's contract check catches it — we don't

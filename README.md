@@ -22,7 +22,7 @@ The library installs into a project, exactly when you have Python to write:
 uv init my-robot && cd my-robot
 uv add "newt @ git+ssh://git@github.com/new-theory-research/newt-python.git"
 uv run python -c "from newt import Robot; print(Robot())"
-# nt0-fp3 · contract received · (50,8) · 8 labeled axes
+# so101 · contract received · (30,6) · 6 labeled axes
 ```
 
 `Robot()` reads the credentials `newt login` created — no second login, no shell export — and fetches the model contract from the registry. That printed line confirms you reached the API; you're done with milestone 1.
