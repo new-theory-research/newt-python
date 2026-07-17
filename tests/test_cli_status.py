@@ -17,8 +17,8 @@ from newt._cli.status import cmd_status
 
 
 _SAMPLE_MODELS = [
-    {"uid": "ft_base_modelafp3", "type": "fine_tune", "base": "base_modelafp3", "tags": ["model-a"]},
-    {"uid": "base_modelafp3", "type": "base", "base": None, "tags": []},
+    {"uid": "ft_base_fixture", "type": "fine_tune", "base": "base_fixture", "tags": ["fixture-base"]},
+    {"uid": "base_fixture", "type": "base", "base": None, "tags": []},
 ]
 
 
