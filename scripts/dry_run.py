@@ -56,7 +56,7 @@ def main() -> None:
         if read_state_calls[0] == 1:
             print("[smoke] WS connect /stream OK", flush=True)
             print("[smoke] sent obs frame with depth+matrices (zero-fill / identity)", flush=True)
-        # flagship base observation: include depth + camera matrices so UnprojectPoints runs.
+        # flagship base observation: include depth + camera matrices so the server's geometry step runs.
         # Zero-fill depth + identity intrinsics/extrinsics → degraded (not real) point cloud,
         # but the encoder receives a valid (non-None) cloud and produces action chunks.
         return {
