@@ -25,12 +25,23 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 
 from newt._credentials import read_api_key
 
 # The docs' own example. A developer types `newt run <tag>` and gets a real cup-stacking
 # observation without having to know a snapshot name exists.
 _DEFAULT_SNAPSHOT = "cup_stacking"
+
+# issue #38 — honest cold-start feedback. Two independent seams:
+#   1. While a call is in flight past this many seconds, print ONE stderr line
+#      saying the model may be waking up — never silence, never a fabricated ETA.
+#   2. When the call returns, if the whole call (total_ms) dwarfed the final
+#      attempt's own latency, or a retry happened, the latency line renders the
+#      split honestly instead of labeling the whole wait "latency".
+_WAKING_THRESHOLD_S = 5.0
+_WAKING_LINE = "model is waking up — first call after idle can take a few minutes"
+_SPLIT_GAP_MS = 5000.0
 
 # ANSI colors — same semantic roles as the sibling verbs.
 _RESET = "\033[0m"
@@ -121,11 +132,52 @@ def _shape_str(chunk) -> str:
     return "(" + ", ".join(str(d) for d in shape) + ")"
 
 
+def _latency_line(resp) -> str:
+    """The latency line — split honestly when the whole call dwarfed the final
+    attempt's own latency, or a retry happened (issue #38).
+
+    `resp.latency_ms` is the final attempt's send+recv only; `resp.total_ms` is
+    real wall-clock for the WHOLE call (connect, any cold-start retry, every
+    failed verifier-retry attempt and its backoff). Both are facts the client
+    measured — never a guessed duration. On the ordinary warm path the two are
+    equal and this renders byte-identical to the plain `Xms` it always did.
+    """
+    total_ms = getattr(resp, "total_ms", resp.latency_ms)
+    retries = getattr(resp, "retries", 0)
+    gap_ms = total_ms - resp.latency_ms
+    if retries <= 0 and gap_ms <= _SPLIT_GAP_MS:
+        return f"{resp.latency_ms:.0f}ms"
+    note = "first call woke the model" if gap_ms > _SPLIT_GAP_MS else "retrying"
+    total_s = int(total_ms // 1000)
+    return f"{resp.latency_ms:.0f}ms ({note}: {total_s}s total)"
+
+
+def _call_with_waking_notice(fn, *, enabled: bool, threshold: float = _WAKING_THRESHOLD_S):
+    """Call fn(); if it hasn't returned within `threshold` seconds, print the
+    #38 waking line to stderr once (issue #38's silence fix — say something the
+    moment a call runs long, not only after it finally returns).
+
+    `enabled` gates the whole mechanism at the call site: the caller passes
+    False for --json or when stderr isn't a TTY, so the line is TTY-only, never
+    machine-readable output, and — because the timer is one-shot — never
+    repeated.
+    """
+    if not enabled:
+        return fn()
+    timer = threading.Timer(threshold, lambda: print(_WAKING_LINE, file=sys.stderr))
+    timer.daemon = True
+    timer.start()
+    try:
+        return fn()
+    finally:
+        timer.cancel()
+
+
 def _render_human(tag: str, resp, snapshot: str) -> None:
     """The resolved model, latency, action-chunk shape summary, and the honest framing."""
     model = resp.model or tag
     print(_c(_GREEN, model))
-    print(f"  latency   {_c(_MINT, f'{resp.latency_ms:.0f}ms')}")
+    print(f"  latency   {_c(_MINT, _latency_line(resp))}")
     print(f"  action    {_shape_str(resp.action_chunk)}  {_c(_GRAY, ' '.join(resp.axes))}")
     print(f"  snapshot  {_c(_GRAY, snapshot)}")
     print("")
@@ -203,7 +255,13 @@ def cmd_run(args: list[str]) -> int:
 
     try:
         robot = newt.Robot(api_key=api_key, model=tag)
-        resp = robot.infer(obs)
+        # The waking-line timer is TTY-only and never fires under --json (issue
+        # #38): a script parsing --json must never see an extra stderr line
+        # mid-call.
+        waking_enabled = (not as_json) and sys.stderr.isatty()
+        resp = _call_with_waking_notice(
+            lambda: robot.infer(obs), enabled=waking_enabled, threshold=_WAKING_THRESHOLD_S
+        )
     except newt.AuthError as exc:
         print(f"newt: authentication failed — {exc.message}", file=sys.stderr)
         print("  Run `newt login` to authenticate, or set NT_API_KEY.", file=sys.stderr)
@@ -241,6 +299,8 @@ def cmd_run(args: list[str]) -> int:
                     "snapshot": snapshot,
                     "prompt": obs.get("prompt"),
                     "latency_ms": resp.latency_ms,
+                    "total_ms": getattr(resp, "total_ms", resp.latency_ms),
+                    "retries": getattr(resp, "retries", 0),
                     "action_chunk": {
                         "shape": list(getattr(resp.action_chunk, "shape", ())),
                         "axes": resp.axes,
