@@ -22,6 +22,8 @@ import newt._cli.finetune as ft
 from newt._cli.finetune import (
     cmd_finetune,
     _render_terminal,
+    _render_progress,
+    _terminal_json,
     _survival_block,
     _render_jobs_table,
 )
@@ -1242,3 +1244,93 @@ def test_409_collision_detail_surfaced_verbatim(monkeypatch):
     rc, out, err = _run(["--dataset", "d", "--name", "kitchen-grasp"], monkeypatch)
     assert rc == 1
     assert detail in err
+
+
+# ---------------------------------------------------------------------------
+# Live progress rendering (step/loss/throughput/ETA) — the training dashboard's
+# CLI half. Pure function, best-effort: renders what the run reported, drops the
+# rest, never fabricates a scalar the trainer didn't send (Rule 10).
+# ---------------------------------------------------------------------------
+
+_RUNNING_WITH_PROGRESS = {
+    "status": "running",
+    "progress": {
+        "active_gate": "train",
+        "step": 2000,
+        "total_steps": 10000,
+        "loss": 0.184,
+        "samples_per_s": 6,
+        "gpu_mem_gb": 16.5,
+        "eta_s": 11520,
+    },
+}
+
+
+def test_render_progress_full_line():
+    line = _render_progress(_RUNNING_WITH_PROGRESS)
+    assert line is not None
+    # every reported field surfaces, compactly, on one line
+    assert "gate: train" in line
+    assert "step 2,000 / 10,000 (20%)" in line
+    assert "loss 0.184" in line
+    assert "6 smp/s" in line
+    assert "16.5 GiB" in line
+    assert "~3h 12m left" in line
+
+
+def test_render_progress_partial_drops_missing_never_fabricates():
+    # a run reporting only step+loss renders those and nothing else — no zeros, no ETA
+    line = _render_progress({"progress": {"step": 500, "total_steps": 10000, "loss": 0.5}})
+    assert line is not None
+    assert "step 500 / 10,000 (5%)" in line
+    assert "loss 0.500" in line
+    assert "smp/s" not in line and "GiB" not in line and "left" not in line
+
+
+def test_render_progress_none_before_first_report():
+    # no progress block yet → None, so the caller falls back to its honest bare-state line
+    assert _render_progress({"status": "running"}) is None
+    assert _render_progress({"status": "running", "progress": None}) is None
+    assert _render_progress({"status": "running", "progress": {}}) is None
+
+
+def test_render_progress_tolerates_garbage_eta_and_types():
+    # a malformed ETA (or non-numeric loss) must not crash the render — it just drops
+    line = _render_progress({"progress": {"step": 3000, "total_steps": 10000, "eta_s": "n/a"}})
+    assert line is not None and "left" not in line
+    # step alone (no total) still renders, without a percentage
+    solo = _render_progress({"progress": {"step": 3000}})
+    assert solo == "step 3,000"
+
+
+def test_status_once_shows_live_progress_line(monkeypatch):
+    # `newt finetune --handle <job> --status` on a live run prints the telemetry line,
+    # not the bare "not done yet".
+    rc, out, err = _run(
+        ["--handle", "fc-abc123", "--status"], monkeypatch, statuses=[_RUNNING_WITH_PROGRESS]
+    )
+    assert rc == 0, f"a successful fetch exits 0 even mid-run; stderr={err!r}"
+    assert "step 2,000 / 10,000 (20%)" in out
+    assert "loss 0.184" in out
+    assert "not done yet" not in out
+
+
+def test_status_once_falls_back_when_no_progress(monkeypatch):
+    rc, out, err = _run(
+        ["--handle", "fc-abc123", "--status"], monkeypatch, statuses=[{"status": "running"}]
+    )
+    assert rc == 0
+    assert "not done yet" in out
+
+
+def test_terminal_json_passes_progress_through():
+    payload = json.loads(_terminal_json("fc-abc123", _RUNNING_WITH_PROGRESS))
+    # additive: the existing keys are still present, and progress rides along verbatim
+    assert payload["job_handle"] == "fc-abc123"
+    assert payload["progress"]["step"] == 2000
+    assert payload["progress"]["loss"] == 0.184
+
+
+def test_terminal_json_progress_null_when_absent():
+    payload = json.loads(_terminal_json("fc-abc123", _SUCCEEDED))
+    assert payload["progress"] is None
