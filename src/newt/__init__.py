@@ -4,6 +4,9 @@ Importable as `import newt`. Distribution name on PyPI: `newt`.
 
 Public surface:
 - `newt.Robot`                — top-level robot handle
+- `newt.ModelContract`        — read-only view of a model's declared contract
+                                 (state_shape, cameras, image_shape, action_shape,
+                                 action_axes, .raw); reachable via `robot.contract`
 - `newt.Embodiment`           — typing.Protocol for hardware drivers passed to
                                  Robot(embodiment=...); any object with read_state()
                                  and execute() satisfies it — no inheritance required
@@ -65,6 +68,7 @@ from newt._client.robot import (
     EmbodimentError,
     EnvOverrideWarning,
     InferenceResponse,
+    ModelContract,
     ModelNotFoundError,
     NewTheoryError,
     ProtocolError,
@@ -89,6 +93,7 @@ __all__ = [
     "EmbodimentError",
     "EnvOverrideWarning",
     "InferenceResponse",
+    "ModelContract",
     "ModelNotFoundError",
     "NewTheoryError",
     "ProtocolError",
@@ -101,3 +106,22 @@ __all__ = [
     "snapshots",
     "list_models",
 ]
+
+
+def __getattr__(name: str):
+    """PEP 562 module-level attribute hook.
+
+    Resolves `newt.fixtures` — the deprecated alias for `newt.snapshots` the
+    module docstring promises — lazily, so the DeprecationWarning fires on USE
+    (`newt.fixtures`) rather than on every `import newt`. Importing the submodule
+    (`from newt import fixtures`) triggers the same warning from the submodule
+    body. Any other missing attribute raises AttributeError as usual.
+    """
+    if name == "fixtures":
+        import importlib
+
+        # import_module (not `from newt import fixtures`) so the fromlist handler
+        # doesn't recurse back through this __getattr__. The submodule body emits
+        # the DeprecationWarning on this (use-time) import.
+        return importlib.import_module("newt.fixtures")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
