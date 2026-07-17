@@ -1,13 +1,13 @@
 """Contract-aware snapshot selection for `newt run`.
 
 `newt run <tag>` with no --snapshot must send the model a frame OF THE RIGHT SHAPE:
-an 8-axis modela model gets an 8-axis snapshot, a 6-axis SO-101 model gets a 6-axis one.
+an 8-axis flagship model gets an 8-axis snapshot, a 6-axis SO-101 model gets a 6-axis one.
 Sending a cup_stacking (8-axis) frame to an SO-101 model is the exact hard-stop this
 selection fixes — before it, every SO-101 fine-tune run failed on shape.
 
 These tests encode WHY selection matters:
 - A contract with a declared shape must be MATCHED, not ignored (the SO-101 bug).
-- A contract with nothing to match on (an modela base carrying only action_shape) must
+- A contract with nothing to match on (a flagship base carrying only action_shape) must
   fall back to the historical default, not error.
 - A shape nothing bundled matches must fail HONESTLY, naming the available shapes —
   never coerce a wrong-shaped frame onto the wire (Rule 10).
@@ -43,8 +43,8 @@ def _contract(state_shape=None, cameras=None, image_shape=None) -> ModelContract
     )
 
 
-# modela 8-axis contract, cameras exactly cup_stacking's — the positively-matched modela case.
-_ModelA_CONTRACT = _contract(
+# flagship 8-axis contract, cameras exactly cup_stacking's — the positively-matched flagship case.
+_FIXTURE_CONTRACT = _contract(
     state_shape=(8,),
     cameras=("right-wrist-camera", "surrounding1", "surrounding2"),
 )
@@ -60,7 +60,7 @@ _SO101_CONTRACT = _contract(state_shape=(6,), image_shape=(3, 224, 224))
 _SO101_CONTRACT_WITH_CAMERAS = _contract(
     state_shape=(6,), cameras=("top", "side"), image_shape=(3, 224, 224)
 )
-# modela BASE with only action_shape declared — no state_shape / cameras to key off.
+# flagship BASE with only action_shape declared — no state_shape / cameras to key off.
 _NO_SIGNAL_CONTRACT = _contract()
 # A shape nothing bundled matches (e.g. a 14-axis bimanual).
 _UNMATCHABLE_CONTRACT = _contract(state_shape=(14,))
@@ -69,7 +69,7 @@ _UNMATCHABLE_CONTRACT = _contract(state_shape=(14,))
 # --- _select_snapshot unit --------------------------------------------------
 
 def test_select_no_signal_falls_back_to_default():
-    """A contract declaring neither state_shape nor cameras (modela base) → cup_stacking,
+    """A contract declaring neither state_shape nor cameras (flagship base) → cup_stacking,
     the historical default — we don't guess a shape we can't see."""
     assert _select_snapshot(snapshots, _NO_SIGNAL_CONTRACT) == "cup_stacking"
 
@@ -79,10 +79,10 @@ def test_select_none_contract_falls_back_to_default():
     assert _select_snapshot(snapshots, None) == "cup_stacking"
 
 
-def test_select_modela_contract_matches_cup_stacking():
-    """An 8-axis modela contract is positively MATCHED to cup_stacking (state + cameras),
+def test_select_fixture_contract_matches_cup_stacking():
+    """An 8-axis flagship contract is positively MATCHED to cup_stacking (state + cameras),
     and wins the 8-axis tie over pour_coffee_beans via registry order."""
-    assert _select_snapshot(snapshots, _ModelA_CONTRACT) == "cup_stacking"
+    assert _select_snapshot(snapshots, _FIXTURE_CONTRACT) == "cup_stacking"
 
 
 def test_select_so101_contract_matches_red_cube():
@@ -109,7 +109,7 @@ def test_select_unmatchable_contract_returns_none():
 _AXES = ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]
 
 
-def _fake_response(model="model-a-pour"):
+def _fake_response(model="fixture-base-pour"):
     chunk = np.zeros((50, 8), dtype=np.float32)
     return InferenceResponse(action_chunk=chunk, axes=list(_AXES), latency_ms=12.0, model=model)
 
@@ -143,15 +143,15 @@ def _run_with_contract(args, monkeypatch, *, contract, infer_return=None, infer_
     return code, out.getvalue(), err.getvalue(), robot
 
 
-def test_modela_model_defaults_to_cup_stacking(monkeypatch):
-    """An modela model whose contract has no shape to match → cup_stacking rides the obs."""
+def test_fixture_model_defaults_to_cup_stacking(monkeypatch):
+    """A flagship model whose contract has no shape to match → cup_stacking rides the obs."""
     code, out, err, robot = _run_with_contract(
-        ["model-a-pour"], monkeypatch,
+        ["fixture-base-pour"], monkeypatch,
         contract=_NO_SIGNAL_CONTRACT, infer_return=_fake_response(),
     )
     assert code == 0, f"stderr={err!r}"
     assert robot.infer_obs["prompt"] == "Stack one cup into another cup.", (
-        "cup_stacking's canonical prompt must ride the obs for an modela model"
+        "cup_stacking's canonical prompt must ride the obs for a flagship model"
     )
     assert "cup_stacking" in out
 
@@ -190,9 +190,9 @@ def test_no_match_contract_errors_naming_available_shapes(monkeypatch):
 
 def test_explicit_snapshot_overrides_selection(monkeypatch):
     """--snapshot wins over contract-aware selection: an explicit pour_coffee_beans is
-    sent even to an modela model whose default would be cup_stacking."""
+    sent even to a flagship model whose default would be cup_stacking."""
     code, out, err, robot = _run_with_contract(
-        ["model-a-pour", "--snapshot", "pour_coffee_beans"], monkeypatch,
+        ["fixture-base-pour", "--snapshot", "pour_coffee_beans"], monkeypatch,
         contract=_NO_SIGNAL_CONTRACT, infer_return=_fake_response(),
     )
     assert code == 0, f"stderr={err!r}"
