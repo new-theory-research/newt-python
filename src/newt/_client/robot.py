@@ -177,6 +177,35 @@ class VerifierTransientRetry(UserWarning):
     """
 
 
+# ---------------------------------------------------------------------------
+# Plain-language warning rendering (friction #6, 2026-07-16)
+# ---------------------------------------------------------------------------
+# A bare warnings.warn() defaults to Python's stock format:
+#   /Users/dev/.venv/lib/.../newt/_client/robot.py:1637: DegradationWarning: <msg>
+#     warnings.warn(...)
+# — an internal filesystem path plus a source-line dump, for what's meant to be a
+# plain-language heads-up (the model ran on substituted inputs; retry underway).
+# NT's own warning categories render as just "Category: message" when they hit the
+# default handler; anything else (a third-party DeprecationWarning, etc.) keeps
+# Python's stock format untouched.
+_NT_WARNING_CATEGORIES = (
+    DegradationWarning,
+    ColdStartRetry,
+    EnvOverrideWarning,
+    VerifierTransientRetry,
+)
+_stock_formatwarning = warnings.formatwarning
+
+
+def _format_nt_warning(message, category, filename, lineno, line=None):
+    if isinstance(category, type) and issubclass(category, _NT_WARNING_CATEGORIES):
+        return f"{category.__name__}: {message}\n"
+    return _stock_formatwarning(message, category, filename, lineno, line)
+
+
+warnings.formatwarning = _format_nt_warning
+
+
 class ProtocolError(NewTheoryError):
     """Obs frame could not be parsed or has an unrecognized type (WS close 4400).
 
@@ -549,9 +578,20 @@ class InferenceResponse:
                       ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]. Falls back to
                       ["dim_0", ..., "dim_N"] when the registry carries no labels for
                       the resolved model.
-        latency_ms:   Wall-clock round-trip for the single request, in milliseconds.
+        latency_ms:   Wall-clock time for the final attempt's send+recv, in
+                      milliseconds — the send/recv round-trip only, excluding
+                      connect and any retry backoff (issue #38).
         model:        Resolved model identifier (UID or tag), or None when not known
                       (e.g. NT_INFERENCE_URL override skips registry discovery).
+        total_ms:     Wall-clock time for the WHOLE infer() call, in milliseconds —
+                      connect (including any cold-start retry) plus every failed
+                      attempt and its backoff plus the final send/recv. Equals
+                      latency_ms when nothing but the final attempt happened.
+                      A gap between total_ms and latency_ms is real elapsed time
+                      the client observed, not an estimate (issue #38).
+        retries:      Count of retries the call needed — a cold-start WS-connect
+                      retry and/or transient verifier retries. 0 on the common
+                      warm path.
     """
 
     def __init__(
@@ -560,11 +600,15 @@ class InferenceResponse:
         axes: list[str],
         latency_ms: float,
         model: str | None = None,
+        total_ms: float | None = None,
+        retries: int = 0,
     ) -> None:
         self.action_chunk = action_chunk
         self.axes = axes
         self.latency_ms = latency_ms
         self.model = model
+        self.total_ms = total_ms if total_ms is not None else latency_ms
+        self.retries = retries
 
     def __repr__(self) -> str:
         shape = getattr(self.action_chunk, "shape", ())
@@ -801,14 +845,19 @@ _VERIFIER_BACKOFF_SECONDS = (3.0, 5.0, 7.0, 8.0)  # one per retry slot
 _T = TypeVar("_T")
 
 
-def _with_verifier_retry(fn: Callable[[], _T]) -> _T:
+def _with_verifier_retry(
+    fn: Callable[[], _T], *, on_retry: Callable[[], None] | None = None
+) -> _T:
     """Call fn(); retry transparently on transient VerifierError (verifier.unavailable).
 
     fn must be a zero-argument callable. Each attempt opens a fresh connection so
     fn must be side-effect-free with respect to state outside itself (i.e. suitable
     to re-run from scratch). AuthError passes through immediately — zero retries.
 
-    Emits VerifierTransientRetry on the first retry.
+    Emits VerifierTransientRetry on the first retry. on_retry, when given, is
+    called once per retry (every loop, not just the first) — issue #38's honest
+    retry count, for callers that want to know a retry happened without parsing
+    warnings.
     """
     last_exc: VerifierError | None = None
     for attempt in range(_VERIFIER_MAX_RETRIES + 1):  # attempt 0 is the initial try
@@ -822,6 +871,8 @@ def _with_verifier_retry(fn: Callable[[], _T]) -> _T:
             if attempt == _VERIFIER_MAX_RETRIES:
                 break  # budget exhausted; fall through to re-raise
             delay = _VERIFIER_BACKOFF_SECONDS[attempt]
+            if on_retry is not None:
+                on_retry()
             if attempt == 0:
                 warnings.warn(
                     VerifierTransientRetry(
@@ -1054,6 +1105,11 @@ class Robot:
         # Never reset — cold-start retry fires at most once per Robot instance.
         self._cold_start_retry_consumed: bool = False
 
+        # Set by _ws_connect() on every call (True iff that call's own ColdStartRetry
+        # fired) — read by infer() right after connecting, to fold into an honest
+        # retry count (issue #38). Not a public attribute.
+        self._last_connect_cold_retried: bool = False
+
         # Test-affordance: NT_INFERENCE_URL takes highest precedence — if set,
         # discovery is skipped and this URL is used directly. Smoke + golden
         # tests use this to repoint at specific servers without touching the registry.
@@ -1207,7 +1263,10 @@ class Robot:
 
         Returns:
             InferenceResponse — .action_chunk (raw ndarray), .axes (semantic labels),
-            .latency_ms, .model.
+            .latency_ms, .model, .total_ms, .retries (issue #38: .latency_ms is the
+            final attempt's send+recv only; .total_ms is the whole call including
+            connect and any retry — the two only diverge when there's something
+            real to report).
 
         Raises:
             AuthError, ProtocolError, ModelNotFoundError, ContractMismatchError,
@@ -1225,8 +1284,9 @@ class Robot:
 
         import time as _time
 
-        def _attempt() -> InferenceResponse:
+        def _attempt() -> tuple[InferenceResponse, bool]:
             ws = self._ws_connect()
+            cold_retried = self._last_connect_cold_retried
             try:
                 frame = _build_obs_frame(obs, prompt or "", None, self._model)
                 t0 = _time.perf_counter()
@@ -1265,19 +1325,33 @@ class Robot:
                 _maybe_warn_mid_session(parsed, self._model)
                 chunk = parsed.get("chunk")
                 axes = self._action_axes_for(chunk)
-                return InferenceResponse(
+                resp = InferenceResponse(
                     action_chunk=chunk,
                     axes=axes,
                     latency_ms=latency_ms,
                     model=self._model,
                 )
+                return resp, cold_retried
             finally:
                 try:
                     ws.close()
                 except Exception:
                     pass
 
-        return _with_verifier_retry(_attempt)
+        _call_t0 = _time.perf_counter()
+        _verifier_retries = 0
+
+        def _record_verifier_retry() -> None:
+            nonlocal _verifier_retries
+            _verifier_retries += 1
+
+        resp, cold_retried = _with_verifier_retry(_attempt, on_retry=_record_verifier_retry)
+        # total_ms is real elapsed wall time for the WHOLE call — connect (including
+        # any cold-start retry inside _ws_connect), every failed attempt and its
+        # backoff, and the final send+recv. Never an estimate (issue #38).
+        resp.total_ms = (_time.perf_counter() - _call_t0) * 1000.0
+        resp.retries = _verifier_retries + (1 if cold_retried else 0)
+        return resp
 
     # -----------------------------------------------------------------------
     # Internal
@@ -1325,6 +1399,7 @@ class Robot:
         # unexplained 1006/1011. The raw-client CI probes survive the cold load
         # precisely because they don't enforce a pong deadline; match that.
         # Keepalive pings still fire (default ping_interval=20).
+        self._last_connect_cold_retried = False
         try:
             ws = connect(
                 self._url,
@@ -1338,12 +1413,13 @@ class Robot:
             if self._cold_start_retry_consumed:
                 raise
             self._cold_start_retry_consumed = True
+            self._last_connect_cold_retried = True
             model_str = self._model or "nt0-fp3"
             warnings.warn(
                 ColdStartRetry(
                     f"Cold-start retry for model={model_str!r} "
-                    "(warming up the container, may take 60-90s). "
-                    "Subsequent calls hit the warm container."
+                    "(warming up the container — first call after idle can take "
+                    "a few minutes). Subsequent calls hit the warm container."
                 ),
                 stacklevel=3,
             )

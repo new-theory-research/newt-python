@@ -408,3 +408,227 @@ def test_help_prints_usage_and_exits_zero(monkeypatch):
     text = out.getvalue()
     assert "Usage: newt run <tag>" in text
     assert "No robot is connected" in text, "usage must carry the honest framing too"
+
+
+# ---------------------------------------------------------------------------
+# Issue #38 — honest cold-start latency: split rendering, --json additive fields,
+# the waking-line stderr notice, and warm-path byte-stability.
+#
+# The receipt: a cold fine-tune's first call printed `latency 83609ms` as if the
+# whole container-wake wait were steady-state inference speed; a warm call
+# answered in 1863ms. The fix never fabricates a duration — it renders the two
+# REAL numbers the SDK measured (the final attempt's own latency_ms, and total_ms
+# for the whole call) and says only what the client actually knows (a retry
+# happened / the call ran long), never a guessed ETA.
+# ---------------------------------------------------------------------------
+
+
+def test_cold_start_renders_honest_split_not_bare_latency(monkeypatch):
+    """A call whose total_ms dwarfs its final-attempt latency_ms must render the
+    split — never print the inflated number bare as if it were `newt run`'s
+    steady-state speed.
+
+    If this regresses: a developer's first call against a cold fine-tune sees
+    `latency 83609ms` with no context and concludes their model is catastrophically
+    slow, when 99% of calls (once warm) look nothing like that.
+    """
+    chunk = np.zeros((50, 8), dtype=np.float32)
+    resp = InferenceResponse(
+        action_chunk=chunk, axes=list(_AXES), latency_ms=1863.0, model="so101-red-cube-bowl",
+        total_ms=83609.0, retries=1,
+    )
+    code, out, err, _ = _run(["so101-red-cube-bowl"], monkeypatch, infer_return=resp)
+
+    assert code == 0, f"stderr={err!r}"
+    assert "1863ms" in out, "the real final-attempt latency must still be named"
+    assert "83s total" in out, "the real total elapsed time must be named"
+    assert "woke" in out.lower(), "the honest cause (cold start) must be named in plain language"
+    # No fabricated ETA: a specific "will take Nmin" claim is never printed — only
+    # what the client measured (elapsed) or is retrying, per issue #38's discipline.
+    assert "60-90" not in out and "30-90" not in out
+
+
+def test_verifier_retry_with_small_gap_still_renders_honest_note(monkeypatch):
+    """A retry that resolved fast (small total-vs-latency gap) still must say a
+    retry happened — the render trigger is 'gap dwarfs latency OR retries > 0',
+    not gap size alone, so a fast-resolving retry isn't silently hidden."""
+    chunk = np.zeros((50, 8), dtype=np.float32)
+    resp = InferenceResponse(
+        action_chunk=chunk, axes=list(_AXES), latency_ms=180.0, model="nt0-fp3-pour",
+        total_ms=3400.0, retries=1,
+    )
+    code, out, err, _ = _run(["nt0-fp3-pour"], monkeypatch, infer_return=resp)
+
+    assert code == 0
+    assert "180ms" in out
+    assert "retr" in out.lower(), "a retry that happened must be named even with a small gap"
+
+
+def test_warm_path_render_is_byte_unchanged(monkeypatch):
+    """The ordinary warm path — no retries, total_ms == latency_ms — must render
+    EXACTLY the pre-#38 single-line latency, byte for byte. The split machinery
+    must never fire on a call with nothing to explain."""
+    resp = _fake_response(model="nt0-fp3-pour", latency_ms=37.0)
+    code, out, err, _ = _run(["nt0-fp3-pour"], monkeypatch, infer_return=resp)
+
+    assert code == 0
+    assert "  latency   37ms\n" in out
+    assert "total" not in out
+    assert "woke" not in out.lower()
+    assert "retr" not in out.lower()
+
+
+def test_json_gains_total_ms_and_retries_additively(monkeypatch):
+    """--json's existing fields are untouched; total_ms/retries are additive."""
+    chunk = np.zeros((50, 8), dtype=np.float32)
+    resp = InferenceResponse(
+        action_chunk=chunk, axes=list(_AXES), latency_ms=1863.0, model="so101-red-cube-bowl",
+        total_ms=83609.0, retries=1,
+    )
+    code, out, err, _ = _run(["so101-red-cube-bowl", "--json"], monkeypatch, infer_return=resp)
+
+    assert code == 0, f"stderr={err!r}"
+    data = json.loads(out)
+    # Existing fields, unchanged shape/values.
+    assert data["latency_ms"] == 1863.0
+    assert data["model"] == "so101-red-cube-bowl"
+    assert data["action_chunk"]["shape"] == [50, 8]
+    # New, additive fields.
+    assert data["total_ms"] == 83609.0
+    assert data["retries"] == 1
+
+
+def test_json_warm_path_total_ms_defaults_to_latency_ms(monkeypatch):
+    """A warm response built without total_ms/retries (the common case) must still
+    carry the new --json fields, defaulting sanely rather than raising."""
+    resp = _fake_response(model="nt0-fp3-pour", latency_ms=42.0)
+    code, out, err, _ = _run(["nt0-fp3-pour", "--json"], monkeypatch, infer_return=resp)
+
+    assert code == 0
+    data = json.loads(out)
+    assert data["total_ms"] == 42.0
+    assert data["retries"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The waking-line stderr notice — TTY-only, never --json, never repeated
+# ---------------------------------------------------------------------------
+
+
+class _SlowFakeRobot(_FakeRobot):
+    """Like _FakeRobot, but infer() sleeps briefly before returning — simulates a
+    call running past the waking-line threshold without a real multi-second wait."""
+
+    def __init__(self, *, delay_s=0.05, **kw):
+        super().__init__(**kw)
+        self._delay_s = delay_s
+
+    def infer(self, obs, prompt=None):
+        import time as _time
+        _time.sleep(self._delay_s)
+        return super().infer(obs, prompt)
+
+
+def _run_slow(args, monkeypatch, *, infer_return, threshold=0.01, delay_s=0.05, key="nt_testkey"):
+    """Like _run(), but with a slow FakeRobot and a tiny waking-line threshold so
+    the timer fires within the test's own delay, without a real multi-second sleep."""
+    out, err = io.StringIO(), io.StringIO()
+
+    def fake_robot_cls(*a, **kw):
+        return _SlowFakeRobot(delay_s=delay_s, infer_return=infer_return, **kw)
+
+    monkeypatch.setattr(newt, "Robot", fake_robot_cls)
+    monkeypatch.setenv("NT_API_KEY", key)
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    import newt._cli.run as run_mod
+    monkeypatch.setattr(run_mod, "_WAKING_THRESHOLD_S", threshold)
+
+    code = cmd_run(args)
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_waking_line_prints_on_stderr_when_tty_and_slow(monkeypatch):
+    """A slow call, human output, stderr as a TTY → the #38 waking line prints to
+    stderr exactly once, and stdout stays clean of it.
+
+    If this regresses: a developer waiting on a genuinely cold container sees
+    total silence for the whole wait, exactly the friction issue #38 reports.
+    """
+    resp = _fake_response()
+    out_io, err_io = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(err_io, "isatty", lambda: True)
+
+    def fake_robot_cls(*a, **kw):
+        return _SlowFakeRobot(delay_s=0.05, infer_return=resp, **kw)
+
+    monkeypatch.setattr(newt, "Robot", fake_robot_cls)
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+    monkeypatch.setattr(sys, "stdout", out_io)
+    monkeypatch.setattr(sys, "stderr", err_io)
+    import newt._cli.run as run_mod
+    monkeypatch.setattr(run_mod, "_WAKING_THRESHOLD_S", 0.01)
+
+    code = cmd_run(["some-tag"])
+
+    assert code == 0
+    assert err_io.getvalue().count("model is waking up") == 1, (
+        f"waking line must print exactly once: {err_io.getvalue()!r}"
+    )
+    assert "waking" not in out_io.getvalue(), "the waking line must never land on stdout"
+
+
+def test_waking_line_absent_when_stderr_not_a_tty(monkeypatch):
+    """Same slow call, but stderr is NOT a TTY (the default io.StringIO, and every
+    CI/redirected-output run) → no waking line. Piping `newt run` output must not
+    inject an extra line a script doesn't expect."""
+    resp = _fake_response()
+    code, out, err = _run_slow(["some-tag"], monkeypatch, infer_return=resp, threshold=0.01, delay_s=0.05)
+    assert code == 0
+    assert "waking" not in err, f"non-TTY stderr must never see the waking line: {err!r}"
+
+
+def test_waking_line_absent_under_json_even_if_tty(monkeypatch):
+    """--json must never print the waking line, even on a slow call with stderr
+    as a TTY — a script parsing --json output must never see extra stderr noise
+    mid-call that it didn't ask for."""
+    resp = _fake_response()
+    out_io, err_io = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(err_io, "isatty", lambda: True)
+
+    def fake_robot_cls(*a, **kw):
+        return _SlowFakeRobot(delay_s=0.05, infer_return=resp, **kw)
+
+    monkeypatch.setattr(newt, "Robot", fake_robot_cls)
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+    monkeypatch.setattr(sys, "stdout", out_io)
+    monkeypatch.setattr(sys, "stderr", err_io)
+    import newt._cli.run as run_mod
+    monkeypatch.setattr(run_mod, "_WAKING_THRESHOLD_S", 0.01)
+
+    code = cmd_run(["some-tag", "--json"])
+
+    assert code == 0
+    assert "waking" not in err_io.getvalue(), "--json must never see the waking line"
+    assert json.loads(out_io.getvalue())["tag"] == "some-tag"
+
+
+def test_waking_line_absent_on_fast_call(monkeypatch):
+    """A fast (non-slow) call must never print the waking line, even with a tiny
+    threshold and stderr as a TTY — the timer must be cancelled once fn() returns,
+    not left to fire after the fact."""
+    resp = _fake_response()
+    out_io, err_io = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(err_io, "isatty", lambda: True)
+    monkeypatch.setattr(newt, "Robot", lambda *a, **kw: _FakeRobot(infer_return=resp, **kw))
+    monkeypatch.setenv("NT_API_KEY", "nt_testkey")
+    monkeypatch.setattr(sys, "stdout", out_io)
+    monkeypatch.setattr(sys, "stderr", err_io)
+    import newt._cli.run as run_mod
+    # A real threshold (5s) — the fast fake call returns immediately, well under it.
+    monkeypatch.setattr(run_mod, "_WAKING_THRESHOLD_S", 5.0)
+
+    code = cmd_run(["some-tag"])
+
+    assert code == 0
+    assert "waking" not in err_io.getvalue()
