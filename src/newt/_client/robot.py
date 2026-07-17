@@ -102,6 +102,29 @@ class AuthError(NewTheoryError):
     """
 
 
+class ForbiddenError(NewTheoryError):
+    """Key is valid but not authorized for the requested model (WS close 4403).
+
+    Distinct from AuthError (4001, key rejected): here the key authenticates
+    fine, but it may only serve models the team owns. Group-by-domain: every
+    `auth.forbidden` type raises this class. (Named to match the error
+    catalog's `sdk_exception_class: "ForbiddenError"`.)
+    """
+
+
+class ConnectionDroppedError(NewTheoryError):
+    """The WS connection dropped mid-session with no error envelope and no known
+    close code (e.g. 1006 abnormal closure, 1011 internal error, or a codeless
+    drop).
+
+    This is the SDK-side face of a cold-start ping timeout, an OOM kill, or a
+    container restart — conditions the server never got to describe. The
+    developer gets a typed exception with a retry hint instead of a bare
+    RunResult(stop_reason="error"). Never raised on the normal terminal / 1000
+    completion path.
+    """
+
+
 class DegradationWarning(UserWarning):
     """Server reports that the model ran on substituted (not real) inputs.
 
@@ -1295,11 +1318,19 @@ class Robot:
         Subsequent calls (warm container, reconnects) do not retry. If the 180s retry
         also times out, the original TimeoutError is re-raised unmasked.
         """
+        # ping_timeout=None: while the server blocks loading a cold checkpoint
+        # (175–187s observed), its event loop can't send Pong frames. With the
+        # websockets default (ping_timeout=20) the client would drop the
+        # established connection ~20s into that load — surfacing as an
+        # unexplained 1006/1011. The raw-client CI probes survive the cold load
+        # precisely because they don't enforce a pong deadline; match that.
+        # Keepalive pings still fire (default ping_interval=20).
         try:
             ws = connect(
                 self._url,
                 additional_headers={"Authorization": f"Bearer {self._api_key}"},
                 open_timeout=self._connect_timeout,
+                ping_timeout=None,
             )
             self._cold_start_retry_consumed = True
             return ws
@@ -1321,6 +1352,7 @@ class Robot:
                     self._url,
                     additional_headers={"Authorization": f"Bearer {self._api_key}"},
                     open_timeout=180,
+                    ping_timeout=None,
                 )
             except Exception:
                 raise original_exc
@@ -1710,6 +1742,7 @@ def _maybe_warn_mid_session(parsed: dict, model: str | None) -> None:
 _CLOSE_CODE_TO_EXCEPTION: dict[int, type[NewTheoryError]] = {
     4001: AuthError,
     4400: ProtocolError,
+    4403: ForbiddenError,
     4404: ModelNotFoundError,
     4422: ContractMismatchError,
     4500: ServerError,
@@ -1721,6 +1754,7 @@ _CLOSE_CODE_TO_EXCEPTION: dict[int, type[NewTheoryError]] = {
 _DEFAULT_TYPE_FOR_CODE: dict[int, str] = {
     4001: "auth.invalid_key",
     4400: "protocol.unknown_type",
+    4403: "auth.forbidden",
     4404: "model_not_found.unknown_identifier",
     4422: "contract_mismatch.unknown",
     4500: "server.internal",
@@ -1755,28 +1789,60 @@ def _check_error_envelope_frame(parsed: dict) -> None:
     raise inst
 
 
+# WS close codes that mean the session ended normally — never an error. 1000 is
+# a clean close; 1005 ("no status received") is what websockets reports for a
+# clean close carrying no explicit code. Neither should raise.
+_NORMAL_CLOSE_CODES: frozenset[int] = frozenset({1000, 1005})
+
+
 def _check_close_error(exc: ConnectionClosed, model: str | None = None) -> None:
-    """Raise the typed exception for any known 4xxx WS close code.
+    """Raise the typed exception for any WS close that isn't a clean completion.
 
     Fallback for when no envelope frame was received before the close
-    (e.g. connection dropped between send_bytes and close). Raises with
-    minimal context — developer still gets a typed exception, not
-    stop_reason="error".
+    (e.g. connection dropped between send_bytes and close). Two tiers:
+
+    1. A known 4xxx close code → the mapped typed exception (AuthError,
+       ForbiddenError, …) with minimal context.
+    2. An abnormal close with no code, or a code not in the map (1006, 1011,
+       …) → ConnectionDroppedError with a cold-load retry hint. This is the
+       not-silent fallback: an unexplained drop must never surface as a bare
+       stop_reason="error".
+
+    A normal completion (close 1000/1005, or the `terminal` frame path which
+    never reaches here) returns without raising.
     """
     rcvd = getattr(exc, "rcvd", None)
-    if not rcvd:
-        return
-    code = getattr(rcvd, "code", None)
+    code = getattr(rcvd, "code", None) if rcvd else None
     exc_class = _CLOSE_CODE_TO_EXCEPTION.get(code)
-    if exc_class is None:
+
+    if exc_class is not None:
+        reason = getattr(rcvd, "reason", "") or ""
+        type_ = _DEFAULT_TYPE_FOR_CODE.get(code, "unknown.error")
+        message = reason or f"Server closed connection with code {code}."
+        context: dict = {"model": model} if model else {}
+
+        inst = exc_class.__new__(exc_class)
+        NewTheoryError.__init__(inst, code=code, type=type_, message=message,
+                                context=context, docs=None, trace_id="")
+        raise inst from exc
+
+    # Normal completion — the session ended cleanly, not an error.
+    if code in _NORMAL_CLOSE_CODES:
         return
 
-    reason = getattr(rcvd, "reason", "") or ""
-    type_ = _DEFAULT_TYPE_FOR_CODE.get(code, "unknown.error")
-    message = reason or f"Server closed connection with code {code}."
-    context: dict = {"model": model} if model else {}
-
-    inst = exc_class.__new__(exc_class)
-    NewTheoryError.__init__(inst, code=code, type=type_, message=message,
-                            context=context, docs=None, trace_id="")
+    # Abnormal, unexplained drop (no code, or an unmapped code like 1006/1011).
+    # No fake precision about the cause — just the honest fact plus a retry hint.
+    inst = ConnectionDroppedError.__new__(ConnectionDroppedError)
+    NewTheoryError.__init__(
+        inst,
+        code=code if code is not None else 1006,
+        type="connection.dropped",
+        message=(
+            "The connection dropped mid-session. If this was your first call, "
+            "the model may still be cold-loading (~3 min) — retry once."
+        ),
+        context={"model": model} if model else {},
+        docs=None,
+        trace_id="",
+    )
     raise inst from exc
