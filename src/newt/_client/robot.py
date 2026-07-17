@@ -8,8 +8,9 @@ import functools
 import os
 import time
 import warnings
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Callable, TypeVar
 
 import msgpack
@@ -263,13 +264,20 @@ class BaseNotDeployableError(NewTheoryError):
     """
 
 
-class RegistryUnavailable(Exception):
+class RegistryUnavailable(NewTheoryError):
     """Registry fetch failed before WS connection could be established.
 
     Mirrors the canonical six-field error envelope (per
     portal/wiki/operating-docs/error-style.md). Raised when GET /v1/models fails
     (network error, 5xx, or malformed JSON). Single attempt; no retry. Developer
     retries by re-instantiating Robot.
+
+    Subclasses NewTheoryError so `except newt.NewTheoryError` catches a registry
+    outage — the most-likely first-call failure. Its constructor keeps the
+    developer-facing `(bootstrap_url, reason, docs)` signature and builds the
+    six-field envelope from those inputs (rather than taking the six fields
+    positionally like the base), so it must pass every field through to the base
+    __init__ explicitly.
 
     Attributes:
         code:     503 (HTTP-convention; client-side before WS connection).
@@ -286,25 +294,221 @@ class RegistryUnavailable(Exception):
         reason: str,
         docs: str | None = None,
     ) -> None:
-        self.code = 503
-        self.type = "registry.unavailable"
-        self.message = (
+        message = (
             f"Could not reach NT inference registry at {bootstrap_url}: "
             f"{reason}. Check NT_BOOTSTRAP_URL / NT_INFERENCE_URL, or retry."
         )
-        self.context = {"bootstrap_url": bootstrap_url, "reason": reason}
-        self.docs = docs
-        self.trace_id = ""
-        super().__init__(self.message)
-
-    def __str__(self) -> str:
-        return self.message
+        super().__init__(
+            code=503,
+            type="registry.unavailable",
+            message=message,
+            context={"bootstrap_url": bootstrap_url, "reason": reason},
+            docs=docs,
+            trace_id="",
+        )
 
 
 @dataclass
 class RunResult:
     """Returned by Robot.run() when stream=False."""
     stop_reason: str
+
+
+_CONTRACT_DOCS = "https://newtheory-docs.vercel.app/docs/api/errors#contract-mismatch"
+
+
+def _as_shape(v: Any) -> tuple[int, ...] | None:
+    """Normalize a contract shape field to a tuple[int] (numpy-comparable), or None."""
+    if v is None:
+        return None
+    if isinstance(v, int):
+        return (v,)
+    if isinstance(v, (list, tuple)):
+        try:
+            return tuple(int(x) for x in v)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _as_str_tuple(v: Any) -> tuple[str, ...] | None:
+    """Normalize a contract list-of-names field to a tuple[str], or None when empty/absent."""
+    if isinstance(v, (list, tuple)) and v:
+        return tuple(str(x) for x in v)
+    return None
+
+
+@dataclass(frozen=True)
+class ModelContract:
+    """Read-only view of the resolved model's declared input/output contract.
+
+    Exposed by ``Robot.contract`` — a public window onto the very contract the
+    SDK already fetched at construction (the matched ``/v1/models`` entry's
+    ``contract`` dict). Not a new fetch, not a new wire field: just the fact the
+    SDK was already holding privately, handed over so a developer can read
+    ``robot.contract.state_shape`` / ``.cameras`` / ``.image_shape`` instead of
+    reaching into ``robot._registry``.
+
+    The five named fields are the ones confirmed to ride a live ``/v1/models``
+    entry (the SDK parses ``action_shape``/``action_axes``; the SO101 starter
+    parses ``state_shape``/``cameras``; the so101 serve contract carries
+    ``image_shape``). Any other field the payload carries is reachable, unparsed,
+    via ``.raw`` — so this view never has to invent or guess a field it doesn't
+    see, and forward-compatible fields aren't lost.
+
+    A field is ``None`` when the contract doesn't carry it (Rule 10 — an absent
+    field is reported as absent, never filled with a shaped-right default).
+
+    Attributes:
+        state_shape:  Expected proprioceptive state vector shape, e.g. ``(8,)``
+                      for nt0-fp3, ``(6,)`` for so101. ``None`` if not declared.
+        cameras:      Expected camera keys in contract order, e.g.
+                      ``("top", "side")``. ``None`` if not declared.
+        image_shape:  Expected per-camera image array shape (CHW), e.g.
+                      ``(3, 378, 378)``. ``None`` if not declared.
+        action_shape: Emitted action-chunk shape, e.g. ``(50, 8)`` /
+                      ``(30, 6)``. ``None`` if not declared.
+        action_axes:  Semantic labels for the action dimensions, e.g.
+                      ``("shoulder_pan", ...)``. ``None`` if not declared.
+        raw:          Read-only mapping of the full contract dict as fetched —
+                      the escape hatch for any field not named above.
+    """
+
+    state_shape: tuple[int, ...] | None
+    cameras: tuple[str, ...] | None
+    image_shape: tuple[int, ...] | None
+    action_shape: tuple[int, ...] | None
+    action_axes: tuple[str, ...] | None
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def _from_dict(cls, contract: dict) -> "ModelContract":
+        return cls(
+            state_shape=_as_shape(contract.get("state_shape")),
+            cameras=_as_str_tuple(contract.get("cameras")),
+            image_shape=_as_shape(contract.get("image_shape")),
+            action_shape=_as_shape(contract.get("action_shape")),
+            action_axes=_as_str_tuple(contract.get("action_axes")),
+            raw=MappingProxyType(dict(contract)),
+        )
+
+
+def _resolve_contract(registry: list, model: str | None) -> ModelContract | None:
+    """Return the resolved model's contract as a ModelContract, or None.
+
+    Mirrors _resolve_action_axes: resolve `model` (default → _DEFAULT_MODEL_UID)
+    against the registry by uid or tag, read its `contract` dict. Never raises —
+    a contract-derived view must never break the inference path. Returns None
+    when the model isn't found, has no contract, or the registry is empty (the
+    NT_INFERENCE_URL override path). Never fabricates a contract (Rule 10): a
+    missing contract is None ("can't check this here"), not a shaped-right stand-in.
+    """
+    target = model if model is not None else _DEFAULT_MODEL_UID
+    for entry in registry:
+        uid = entry.get("uid") or ""
+        tags = entry.get("tags") or []
+        if target == uid or target in tags:
+            contract = entry.get("contract")
+            if not contract:
+                return None
+            return ModelContract._from_dict(contract)
+    return None
+
+
+def _model_label(model: str | None) -> str:
+    """Human label for a model in a teaching error message."""
+    return repr(model) if model is not None else f"the default model ({_DEFAULT_MODEL_UID!r})"
+
+
+def _validate_obs_against_contract(
+    obs: Any, contract: ModelContract | None, model: str | None
+) -> None:
+    """Fail INSTANTLY, client-side, on an obs whose PROVIDED fields contradict the
+    model's declared contract — before a single byte hits the wire.
+
+    Raises ContractMismatchError (the existing WS-4422 class) with expected-vs-got
+    named in the message, for: a provided `state` whose shape != contract.state_shape;
+    a provided image whose key isn't in contract.cameras (a typo — the developer
+    named a camera the model doesn't expect); a provided image whose array shape !=
+    contract.image_shape.
+
+    Discipline (Rule 10 + the partial-obs contract):
+      - contract is None → no-op (can't check what we don't have — never fabricate one).
+      - Validates ONLY fields the obs actually provides. A partial obs the server
+        firehose-coerces (absent state, absent camera) is NOT failed here — a
+        missing field is the server's to fill, not ours to demand.
+      - NEVER mutates, reorders, or re-encodes obs — a valid obs is untouched
+        (the frame stays byte-for-byte identical to the old path).
+    """
+    if contract is None or not isinstance(obs, dict):
+        return
+
+    # State: present-but-wrong-shape only. Absent state → server fills; don't demand it.
+    state = obs.get("state")
+    got_state = getattr(state, "shape", None)
+    if state is not None and got_state is not None and contract.state_shape is not None:
+        if tuple(got_state) != contract.state_shape:
+            raise ContractMismatchError(
+                code=4422,
+                type="contract_mismatch.state_shape",
+                message=(
+                    f"Observation 'state' has shape {tuple(got_state)}, but model "
+                    f"{_model_label(model)} expects state_shape {contract.state_shape}. "
+                    "Reshape your state vector to match, or inspect robot.contract.state_shape."
+                ),
+                context={
+                    "model": model,
+                    "expected_shape": list(contract.state_shape),
+                    "got_shape": list(got_state),
+                },
+                docs=_CONTRACT_DOCS,
+            )
+
+    images = obs.get("images")
+    if isinstance(images, dict) and images:
+        # Unknown/typo'd camera key: a key the obs provides that the contract
+        # doesn't name. (A camera the contract names but the obs omits is
+        # server-zero-filled with a DegradationWarning — NOT failed here.)
+        if contract.cameras is not None:
+            for key in images:
+                if key not in contract.cameras:
+                    raise ContractMismatchError(
+                        code=4422,
+                        type="contract_mismatch.camera_unknown",
+                        message=(
+                            f"Observation 'images' names camera {key!r}, which model "
+                            f"{_model_label(model)} does not expect. Expected cameras: "
+                            f"{list(contract.cameras)}. Check the key spelling, or "
+                            "inspect robot.contract.cameras."
+                        ),
+                        context={
+                            "model": model,
+                            "expected_cameras": list(contract.cameras),
+                            "got_camera": key,
+                        },
+                        docs=_CONTRACT_DOCS,
+                    )
+        # Wrong image shape: a provided image array whose shape != image_shape.
+        if contract.image_shape is not None:
+            for key, img in images.items():
+                got_img = getattr(img, "shape", None)
+                if got_img is not None and tuple(got_img) != contract.image_shape:
+                    raise ContractMismatchError(
+                        code=4422,
+                        type="contract_mismatch.image_shape",
+                        message=(
+                            f"Observation image {key!r} has shape {tuple(got_img)}, but model "
+                            f"{_model_label(model)} expects image_shape {contract.image_shape}. "
+                            "Resize/transpose to match, or inspect robot.contract.image_shape."
+                        ),
+                        context={
+                            "model": model,
+                            "camera": key,
+                            "expected_shape": list(contract.image_shape),
+                            "got_shape": list(got_img),
+                        },
+                        docs=_CONTRACT_DOCS,
+                    )
 
 
 class InferenceResponse:
@@ -738,12 +942,15 @@ class Robot:
                      inheritance or registration required. Passing a string raises
                      EmbodimentError with a pointer to the setup guide.
         read_state:  callable returning an observation dict. Optional keys:
-                     "state" (float32 ndarray (14,)), "images" (dict of camera
-                     arrays), "prompt" (str). Missing fields are firehose-coerced
-                     by the server — partial dicts are fine.
-        execute:     callable receiving an action chunk ndarray (action_horizon, 14).
-                     Called once per inference cycle in default (non-stream) mode.
-                     Never called in stream mode.
+                     "state" (float32 ndarray, shape model-dependent — see
+                     robot.contract.state_shape), "images" (dict of camera
+                     arrays keyed by robot.contract.cameras), "prompt" (str).
+                     Missing fields are firehose-coerced by the server — partial
+                     dicts are fine.
+        execute:     callable receiving an action chunk ndarray of shape
+                     (action_horizon, action_dim) — model-dependent; see
+                     robot.contract.action_shape. Called once per inference cycle
+                     in default (non-stream) mode. Never called in stream mode.
         model:       Model identifier (UID or tag). The SDK resolves it via
                      endpoint discovery (GET /v1/models on construction) and also
                      forwards it in the first obs frame so the server resolves the
@@ -875,6 +1082,42 @@ class Robot:
     # Public API
     # -----------------------------------------------------------------------
 
+    @property
+    def contract(self) -> ModelContract | None:
+        """The resolved model's declared contract — a read-only public view.
+
+        Resolves this Robot's model against the registry it already fetched at
+        construction and hands back the matched entry's contract as a
+        ModelContract: state_shape, cameras, image_shape, action_shape,
+        action_axes (plus `.raw` for any other field the payload carries).
+
+        No new fetch, no wire call — it reads what construction already stored.
+        Returns None (never raises, never fabricates) when there's no contract to
+        show: a model whose registry entry omits one, or the NT_INFERENCE_URL
+        override path where the registry is empty. A None contract means "I can't
+        tell you here," not "this model has no shape."
+
+            >>> robot = newt.Robot(model="nt0-fp3")
+            >>> robot.contract.state_shape
+            (8,)
+            >>> robot.contract.cameras
+            ('top', 'side')
+        """
+        registry = getattr(self, "_registry", None)
+        if not registry:
+            return None
+        return _resolve_contract(registry, getattr(self, "_model", None))
+
+    def _validate_obs(self, obs: dict) -> None:
+        """Pre-flight one obs against robot.contract before the wire.
+
+        Runs once per run() (first frame only) and once per infer() — Rule 11,
+        zero per-frame cost. No-op when no contract is available. Never mutates
+        obs; raises ContractMismatchError (client-side) on a provided field that
+        contradicts the contract, naming expected-vs-got.
+        """
+        _validate_obs_against_contract(obs, self.contract, self._model)
+
     def run(
         self,
         prompt: str,
@@ -904,10 +1147,18 @@ class Robot:
                                    (WS close 4503).
         """
         if self._read_state is None or self._execute is None:
-            raise TypeError(
-                "Robot.run() requires read_state and execute callbacks. "
-                "Construct Robot(api_key, embodiment, read_state, execute) to drive a robot, "
-                "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
+            # A NewTheoryError (not a bare TypeError) so `except newt.NewTheoryError`
+            # catches it — consistent with EmbodimentError, the sibling "you
+            # misconfigured Robot for driving hardware" error. run() needs an
+            # embodiment (read_state + execute) and none was supplied.
+            raise EmbodimentError(
+                type="embodiment.missing_callbacks",
+                message=(
+                    "Robot.run() requires read_state and execute callbacks. "
+                    "Construct Robot(api_key, embodiment, read_state, execute) to drive a robot, "
+                    "or use Robot(api_key).infer(obs) for one-shot inference without hardware."
+                ),
+                context={},
             )
         if stream:
             return self._stream(prompt, max_duration)
@@ -944,6 +1195,11 @@ class Robot:
         "verifier.unavailable") is retried automatically with bounded backoff
         (≤45s total, ≤4 retries). AuthError always propagates immediately.
         """
+        # Pre-flight the obs against the contract BEFORE opening the WS — a
+        # wrong-shaped obs fails here, client-side, in microseconds, instead of
+        # after a ~50s cold-start round-trip returns the same 4422 rejection.
+        self._validate_obs(obs)
+
         import time as _time
 
         def _attempt() -> InferenceResponse:
@@ -1091,13 +1347,21 @@ class Robot:
 
         _logger = logging.getLogger("newt")
         self._degradation_warned = False
+        # Pre-flight the FIRST obs against the contract BEFORE the (possibly
+        # ~50s cold-start) WS connect — a wrong-shaped obs fails instantly,
+        # client-side, instead of after the round-trip. Once per run (Rule 11):
+        # only this first obs is validated and it's reused as frame 1, so frames
+        # 2..N carry zero pre-flight cost. Valid obs → identical frame on the wire.
+        obs = self._read_state()
+        self._validate_obs(obs)
         ws = self._ws_connect()
         stop_reason = "error"
         try:
             first = True
             frame_no = 0
             while True:
-                obs = self._read_state()
+                if not first:
+                    obs = self._read_state()
                 frame = _build_obs_frame(
                     obs, prompt,
                     max_duration if first else None,
@@ -1197,11 +1461,17 @@ class Robot:
         self, prompt: str, max_duration: float
     ) -> Generator[np.ndarray, None, None]:
         self._degradation_warned = False
+        # Pre-flight the FIRST obs against the contract BEFORE the WS connect
+        # (same once-per-run guarantee as _run_blocking_once). Reused as frame 1;
+        # frames 2..N carry zero pre-flight cost.
+        obs = self._read_state()
+        self._validate_obs(obs)
         ws = self._ws_connect()
         try:
             first = True
             while True:
-                obs = self._read_state()
+                if not first:
+                    obs = self._read_state()
                 frame = _build_obs_frame(
                     obs, prompt,
                     max_duration if first else None,

@@ -49,6 +49,10 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/newt"]
+# PEP 561: ship the py.typed marker so the SDK's type hints reach mypy/pyright/
+# IDEs/agents. Explicit force-include makes this deterministic across build
+# methods (a bare `packages` include can miss a data file depending on VCS state).
+force-include = { "src/newt/py.typed" = "newt/py.typed" }
 
 [tool.deptry]
 # Scan tests too (default excludes them) — httpx/pytest are used there, not in src/.
