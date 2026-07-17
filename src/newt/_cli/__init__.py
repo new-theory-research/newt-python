@@ -35,6 +35,10 @@ def main() -> None:
         from newt._cli.status import cmd_status
         sys.exit(cmd_status(args[1:]))
 
+    if cmd == "run":
+        from newt._cli.run import cmd_run
+        sys.exit(cmd_run(args[1:]))
+
     if cmd == "skill":
         from newt._cli.skill import cmd_skill
         sys.exit(cmd_skill(args[1:]))
@@ -78,6 +82,7 @@ def _usage() -> None:
     print("  logout   Remove local credentials (key remains valid until revoked on the console)")
     print("  models   List every model your key can drive")
     print("  status   Show your current key, identity, and registry connectivity")
+    print("  run      Run one real inference against your model (try: newt run <tag>)")
     print("  skill    Manage built-in skills (try: newt skill install)")
     print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
@@ -86,7 +91,7 @@ def _usage() -> None:
     print("")
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status,")
-    print("           record, episodes, finetune)")
+    print("           run, record, episodes, finetune)")
     print("  --print  (login only) Print the key to stdout; do not write credentials.")
     print("           Compose with: KEY=$(newt login --print)")
     print("")
