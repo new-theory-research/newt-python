@@ -48,9 +48,17 @@ _NT0_CONTRACT = _contract(
     state_shape=(8,),
     cameras=("right-wrist-camera", "surrounding1", "surrounding2"),
 )
-# so101 6-axis contract (the real red-cube-bowl shape). Matches red_cube once bundled.
-_SO101_CONTRACT = _contract(
-    state_shape=(6,), cameras=("top", "side"), image_shape=(3, 378, 378)
+# The LIVE red-cube-bowl contract as the SDK actually sees it: state (6,), image
+# (3,224,224), cameras=None. The real serve contract carries `cameras` as a
+# {required, expected} DICT, which ModelContract._from_dict leaves unparsed (None) — so
+# selection keys off state_shape alone, and it must land on red_cube. (This is exactly why
+# selection can't hard-require a camera-set match: the flagship's own live contract
+# doesn't expose one.)
+_SO101_CONTRACT = _contract(state_shape=(6,), image_shape=(3, 224, 224))
+# A hypothetical SO-101 contract that DOES parse cameras (a flat top/side list) — red_cube
+# must match it on both state and cameras.
+_SO101_CONTRACT_WITH_CAMERAS = _contract(
+    state_shape=(6,), cameras=("top", "side"), image_shape=(3, 224, 224)
 )
 # nt0 BASE with only action_shape declared — no state_shape / cameras to key off.
 _NO_SIGNAL_CONTRACT = _contract()
@@ -75,6 +83,19 @@ def test_select_nt0_contract_matches_cup_stacking():
     """An 8-axis nt0 contract is positively MATCHED to cup_stacking (state + cameras),
     and wins the 8-axis tie over pour_coffee_beans via registry order."""
     assert _select_snapshot(snapshots, _NT0_CONTRACT) == "cup_stacking"
+
+
+def test_select_so101_contract_matches_red_cube():
+    """THE fix: the live 6-axis red-cube-bowl contract (cameras unparsed → None) selects
+    red_cube, not the 8-axis cup_stacking that used to be sent to every model. This is the
+    E2E hard-stop the whole arc closes."""
+    assert _select_snapshot(snapshots, _SO101_CONTRACT) == "red_cube"
+
+
+def test_select_so101_contract_with_parsed_cameras_matches_red_cube():
+    """When an SO-101 contract DOES expose a flat top/side camera list, red_cube matches on
+    both state and cameras — selection isn't fooled into cup_stacking by the camera check."""
+    assert _select_snapshot(snapshots, _SO101_CONTRACT_WITH_CAMERAS) == "red_cube"
 
 
 def test_select_unmatchable_contract_returns_none():
@@ -133,6 +154,21 @@ def test_nt0_model_defaults_to_cup_stacking(monkeypatch):
         "cup_stacking's canonical prompt must ride the obs for an nt0 model"
     )
     assert "cup_stacking" in out
+
+
+def test_so101_model_selects_red_cube(monkeypatch):
+    """End-to-end: `newt run <so101-fine-tune>` with the live red-cube-bowl contract sends
+    red_cube — 6-axis state, top/side cameras — and its real recorded prompt rides the obs.
+    Before this arc it sent cup_stacking (8-axis) and hard-stopped on shape."""
+    code, out, err, robot = _run_with_contract(
+        ["ft-64cad948c4e9f09c-red-cube-bowl"], monkeypatch,
+        contract=_SO101_CONTRACT, infer_return=_fake_response(),
+    )
+    assert code == 0, f"stderr={err!r}"
+    assert robot.infer_obs["state"].shape == (6,), "a 6-axis state must reach the wire"
+    assert set(robot.infer_obs["images"].keys()) == {"top", "side"}
+    assert "red cube" in robot.infer_obs["prompt"].lower(), "the real recorded prompt rides"
+    assert "red_cube" in out
 
 
 def test_no_match_contract_errors_naming_available_shapes(monkeypatch):

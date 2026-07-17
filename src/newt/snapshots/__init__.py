@@ -26,7 +26,7 @@ Available snapshots:
                          surrounding1, surrounding2.
     pour_coffee_beans  — 8-axis nt0 rig (native right-arm tr2 pour episode). Same cameras.
     red_cube           — 6-axis SO-101 rig (red-cube-bowl episode). Cameras: top, side at
-                         378x378. Matches the so101 serve contract.
+                         224x224. Matches the live red-cube-bowl fine-tune contract.
 """
 from __future__ import annotations
 
@@ -82,16 +82,24 @@ _SNAPSHOTS: dict[str, _Snapshot] = {
             ("surrounding2", "jpeg_surrounding2"),
         ),
     ),
-    # red_cube — 6-axis SO-101 red-cube-bowl frame — is registered in the SAME commit as
-    # its data file (data/red_cube.npz), extracted from a real recorded episode. It is
-    # withheld from the registry until that real frame is built (Rule 10: no entry that
-    # would `load()` a file that isn't there, and no synthesized stand-in frame). Its
-    # definition, kept here so the shape is reviewable, is:
-    #     "red_cube": _Snapshot(
-    #         file="red_cube.npz",
-    #         cameras=(("top", "jpeg_top"), ("side", "jpeg_side")),
-    #         # no override — the episode's real recorded task prompt rides out as-is
-    #     ),
+    # red_cube — one real frame from a recorded red-cube-bowl SO-101 episode
+    # (LeRobot so100_follower dataset; episode 0, frame 338 of 677 — the mid-episode reach
+    # where the gripper is on the cube). State is the 6 joint scalars; cameras are the
+    # dataset's own observation.images.top / .side, resized to 224x224 square exactly as
+    # newt-starter-so101's embodiment.read_state() does before sending (embodiment.py:535).
+    #
+    # Camera KEYS are "top"/"side" — what the deployed red-cube-bowl serve app actually
+    # accepts on the wire (starter _CAMERA_KEYS, the dataset, and the hackathon runbook all
+    # agree). The model's /v1/models contract *advertises* cameras {required:[up,side]},
+    # but that key-name is known-drifted metadata (durable-serving spec §"LIVE WART"); the
+    # SDK can't even parse that dict-shaped field, so robot.contract.cameras is None and no
+    # client-side camera check runs — selection matches this snapshot on state_shape (6,).
+    "red_cube": _Snapshot(
+        file="red_cube.npz",
+        cameras=(("top", "jpeg_top"), ("side", "jpeg_side")),
+        # No override — the episode's real recorded task prompt ("Pick up\n  the red cube
+        # and place it in the bowl.") rides out verbatim, the exact string the model trained on.
+    ),
 }
 
 
@@ -99,7 +107,7 @@ def _decode_jpeg(buf: np.ndarray) -> np.ndarray:
     """Decode JPEG bytes (stored as a uint8 array) to (3, H, W) uint8 CHW.
 
     The H/W come from the encoded frame itself — never assumed. An nt0 frame decodes to
-    (3, 240, 320); an so101 frame to (3, 378, 378).
+    (3, 240, 320); the so101 red_cube frame to (3, 224, 224).
     """
     try:
         from PIL import Image
@@ -132,7 +140,7 @@ def load(name: str) -> dict:
                 "images": {camera_name: (3, H, W) uint8} for the rig's cameras,
                 "prompt": str            — the instruction the episode was collected with,
             }
-        D and (H, W) are per-rig (8 / 240x320 for nt0, 6 / 378x378 for so101). The
+        D and (H, W) are per-rig (8 / 240x320 for nt0, 6 / 224x224 for so101 red_cube). The
         "prompt" rides along in the obs, so the caller doesn't pass it separately —
         `_build_obs_frame` prefers an obs-carried prompt.
 
