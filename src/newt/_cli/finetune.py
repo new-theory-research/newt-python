@@ -23,7 +23,8 @@ reaches this client (training spec §3.1). The CLI then polls ``/api/finetune/st
 against that handle until the run reaches a terminal state:
 
     succeeded → the model tag + a pointer to its report card
-    failed    → the pipeline gate that failed, NAMED (Rule 10)
+    failed    → what happened in plain words, the raw gate + any server detail on the
+                technical line, the run page repeated, and the concrete next steps
 
 When a run fails at a gate that runs AFTER ``train`` (frame-check / registry+reload /
 serve), the CLI adds a survival line: training completed, the checkpoint is safe, and
@@ -86,6 +87,44 @@ _TERMINAL = ("succeeded", "failed")
 # sequence is surfaced honestly, never guessed "after train" — a wrong guess would tell
 # someone their checkpoint is safe when it isn't (Rule 10).
 _PIPELINE_GATES = ("intake", "train", "frame-check", "registry+reload", "serve")
+
+# Plain-language translation of each pipeline gate — what the developer was waiting on
+# when the run stopped. The HEADLINE always uses this, never the bare internal token: a
+# developer has never seen `registry+reload`, and Mattie's live receipt (2026-07-17) was
+# the terminal line `Fine-tune failed at gate: train` — no why, no next step, internal
+# `gate` vocabulary. The raw token stays visible on the technical line below. A gate NOT
+# in this map (an unknown/renamed one) falls back to a generic headline and shows its raw
+# token only on the technical line — never guessed into a plausible phrase (Rule 10).
+# `eval` is mapped defensively for a checkpoint-eval gate; the entry only ever fires if
+# the wire actually names it, so it invents nothing.
+_GATE_PLAIN = {
+    "intake": "while checking your dataset",
+    "train": "during training",
+    "frame-check": "while checking the trained model's frames",
+    "registry+reload": "while registering your model",
+    "serve": "while bringing your model online",
+    "eval": "during checkpoint evaluation",
+}
+
+# Where a developer goes when the terminal output isn't enough. The run page (repeated at
+# failure) is the primary place; the docs are the secondary pointer.
+_HELP_DOCS = "https://newtheory-docs.vercel.app/docs/getting-started"
+
+
+def _failure_detail(status: dict) -> str | None:
+    """The server's own human-readable failure text, if the wire carried any.
+
+    The pipeline persists the cause under the gate (``_status_from_exception`` sets
+    ``error``); if/when the console status route passes it through (as ``detail`` or
+    verbatim ``error``), this surfaces it on the technical line. Read both keys so a real
+    cause reaches the developer the moment either lands on the wire. Returns None when
+    neither is present — absence renders the honest 'this is all the run reported' line,
+    never a guessed cause (Rule 10)."""
+    for key in ("detail", "error"):
+        val = status.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
 
 
 def _survival_block(gate: str | None) -> str | None:
@@ -308,7 +347,13 @@ def _list_jobs(console: str, api_key: str, *, timeout: float = 30.0) -> list[dic
 # ---------------------------------------------------------------------------
 # Terminal rendering — pure: (status dict) -> (human text, exit code).
 # ---------------------------------------------------------------------------
-def _render_terminal(status: dict) -> tuple[str, int]:
+def _render_terminal(
+    status: dict,
+    *,
+    console: str | None = None,
+    job_handle: str | None = None,
+    dataset: str | None = None,
+) -> tuple[str, int]:
     state = status.get("status")
     if state == "succeeded":
         tag = status.get("tag")
@@ -330,8 +375,21 @@ def _render_terminal(status: dict) -> tuple[str, int]:
 
     if state == "failed":
         gate = status.get("gate")
-        head = f"Fine-tune failed at gate: {gate}" if gate else "Fine-tune failed."
+        detail = _failure_detail(status)
+
+        # Plain-words headline — what the developer was waiting on when the run stopped,
+        # NEVER the bare internal gate token (Rule 10; Mattie's receipt: the old headline
+        # `Fine-tune failed at gate: train` said nothing a developer could act on). An
+        # unknown/renamed gate falls back to the generic line — the raw token surfaces
+        # only on the technical line below, never guessed into a phrase.
+        phrase = _GATE_PLAIN.get(gate) if isinstance(gate, str) else None
+        head = (
+            f"Fine-tune didn't finish — it stopped {phrase}."
+            if phrase
+            else "Fine-tune didn't finish."
+        )
         lines = [_c(_RED, head)]
+
         # If the failing gate ran after `train`, say plainly what SURVIVED: the
         # checkpoint. This is the one wire point for the survival line, so every
         # terminal render path (watch, re-attach, --status — all route through here)
@@ -339,6 +397,37 @@ def _render_terminal(status: dict) -> tuple[str, int]:
         survived = _survival_block(gate)
         if survived:
             lines.append(survived)
+
+        # The technical line — the raw wire token (and the server's own words if it sent
+        # any), kept UNDER the plain headline for the developer who wants the exact gate.
+        if isinstance(gate, str) and gate:
+            tech = f"failed at gate {gate!r}"
+        else:
+            tech = "the run reported a failure with no gate named"
+        if detail:
+            tech += f" — {detail}"
+        lines.append(_c(_GRAY, f"  technical:   {tech}"))
+
+        # Repeat the run's page (already printed at launch) — the primary place to see
+        # more than the CLI was handed.
+        if console and job_handle:
+            lines.append(_c(_GRAY, f"  run page:    {console}/runs/{job_handle}"))
+
+        # Honesty (Rule 10): when the wire carried nothing beyond the gate name, say so —
+        # never invent a cause. The run page may carry more than reached the CLI. Today
+        # the wire IS bare here: the pipeline persists the cause but the console status
+        # route drops it before this client (portal#94) — this line is honest until it lands.
+        if not detail:
+            tail = " — its page above may have more." if (console and job_handle) else "."
+            lines.append(_c(_GRAY, f"  This is all the run reported{tail}"))
+
+        # Concrete next steps: re-run this exact dataset (only when we know it — never a
+        # fabricated name, Rule 10), and where to go for help.
+        lines.append("")
+        if dataset:
+            lines.append(f"  try again:   newt finetune --dataset {dataset}")
+        lines.append(f"  get help:    {_HELP_DOCS}")
+
         return "\n".join(lines), 1
 
     # Anything else reaching here is a contract violation — surface it, don't guess.
@@ -722,7 +811,12 @@ def cmd_finetune(args: list[str]) -> int:
         print(_terminal_json(job_handle, status, steps=steps, name=name))
         return 0 if status.get("status") == "succeeded" else 1
 
-    text, code = _render_terminal(status)
+    # `dataset` is the staged name this launch ran against, or None on a --handle
+    # re-attach (nothing to re-run with — the try-again line is then omitted, never
+    # a fabricated dataset name). `console`/`job_handle` repeat the run page at failure.
+    text, code = _render_terminal(
+        status, console=console, job_handle=job_handle, dataset=dataset
+    )
     print(text)
     return code
 
@@ -797,9 +891,11 @@ def _status_once(console: str, api_key: str, job_handle: str, *, as_json: bool) 
 
     state = status.get("status") if isinstance(status, dict) else None
     if state in _TERMINAL:
-        # Terminal states get the full render (tag + Robot snippet on success, named
-        # gate on failure) — but the fetch succeeded, so exit 0 regardless.
-        text, _ = _render_terminal(status)
+        # Terminal states get the full render (tag + Robot snippet on success, plain-words
+        # failure + run page + next steps on failure) — but the fetch succeeded, so exit 0
+        # regardless. No dataset here (a --status check doesn't carry it), so the try-again
+        # line is omitted rather than fabricated (Rule 10); the run page still points on.
+        text, _ = _render_terminal(status, console=console, job_handle=job_handle)
         print(text)
     else:
         print(f"{job_handle}: {state or 'unknown'} — not done yet.")
