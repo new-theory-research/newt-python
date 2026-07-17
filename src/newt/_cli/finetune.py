@@ -456,8 +456,82 @@ def _terminal_json(
             "report_card": status.get("report_card"),
             "steps": steps,
             "name": name,
+            # Live telemetry passthrough (may be null): the run's step/loss/throughput/
+            # ETA while training, sourced from the console's `progress` block. Additive —
+            # existing keys are unchanged, so a consumer that ignores it sees no diff.
+            "progress": status.get("progress") if isinstance(status, dict) else None,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Live-progress rendering — pure: (status dict) -> one compact line, or None.
+# ---------------------------------------------------------------------------
+def _fmt_duration(seconds) -> str | None:
+    """A compact human duration ('3h 12m' / '28m' / '45s'), or None if unusable. Never
+    raises on a garbage value — live telemetry is best-effort, so a bad ETA just drops."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return None
+    if total < 0:
+        return None
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def _render_progress(status: dict) -> str | None:
+    """A compact, single-line live-progress string from a status dict's `progress`
+    block, or None when there's no usable live telemetry yet.
+
+    Pure and best-effort: every field is optional (the trainer reports whatever lerobot
+    logged), so a run with only a step, or only a loss, still renders what it has and
+    silently drops the rest — never fabricates a missing scalar (Rule 10). Returns None
+    when `progress` is absent/empty so the caller can fall back to its honest
+    'no telemetry yet' line."""
+    progress = status.get("progress") if isinstance(status, dict) else None
+    if not isinstance(progress, dict):
+        return None
+
+    parts: list[str] = []
+
+    gate = progress.get("active_gate") or progress.get("gate")
+    if gate:
+        parts.append(f"gate: {gate}")
+
+    step = progress.get("step")
+    total = progress.get("total_steps")
+    if isinstance(step, (int, float)) and not isinstance(step, bool):
+        if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
+            pct = int(step / total * 100)
+            parts.append(f"step {int(step):,} / {int(total):,} ({pct}%)")
+        else:
+            parts.append(f"step {int(step):,}")
+
+    loss = progress.get("loss")
+    if isinstance(loss, (int, float)) and not isinstance(loss, bool):
+        parts.append(f"loss {loss:.3f}")
+
+    sps = progress.get("samples_per_s")
+    if isinstance(sps, (int, float)) and not isinstance(sps, bool):
+        parts.append(f"{int(sps)} smp/s")
+
+    mem = progress.get("gpu_mem_gb")
+    if isinstance(mem, (int, float)) and not isinstance(mem, bool):
+        parts.append(f"{mem:.1f} GiB")
+
+    eta = _fmt_duration(progress.get("eta_s"))
+    if eta:
+        parts.append(f"~{eta} left")
+
+    if not parts:
+        return None
+    return "   ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -849,7 +923,13 @@ def _watch(console: str, api_key: str, job_handle: str, *, out) -> dict | None:
 
         now = time.monotonic()
         if now - last_heartbeat >= _HEARTBEAT_EVERY_S:
-            print(f"  … still {state or 'running'}", file=out, flush=True)
+            # Prefer live telemetry (step/loss/ETA) when the run is reporting it; fall
+            # back to the honest bare-state line before the first progress lands.
+            live = _render_progress(status) if isinstance(status, dict) else None
+            if live:
+                print(f"  {live}", file=out, flush=True)
+            else:
+                print(f"  … still {state or 'running'}", file=out, flush=True)
             last_heartbeat = now
         time.sleep(_POLL_INTERVAL_S)
 
@@ -898,7 +978,13 @@ def _status_once(console: str, api_key: str, job_handle: str, *, as_json: bool) 
         text, _ = _render_terminal(status, console=console, job_handle=job_handle)
         print(text)
     else:
-        print(f"{job_handle}: {state or 'unknown'} — not done yet.")
+        # A live run: show step/loss/ETA when the run is reporting it, else the honest
+        # 'not done yet' line (never a fabricated number before the first report).
+        live = _render_progress(status)
+        if live:
+            print(f"{job_handle}: {state or 'running'} — {live}")
+        else:
+            print(f"{job_handle}: {state or 'unknown'} — not done yet.")
         print(f"  Watch it live:  newt finetune --handle {job_handle}")
     return 0
 
