@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Local test virtualenv (never commit)
+.venv/
