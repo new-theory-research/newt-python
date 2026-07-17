@@ -33,7 +33,7 @@ from newt._cli.run import cmd_run
 _AXES = ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]
 
 
-def _fake_response(model="nt0-fp3-pour", latency_ms=42.0):
+def _fake_response(model="fixture-base-pour", latency_ms=42.0):
     """A labeled action chunk shaped like a real infer() return (50, 8)."""
     chunk = np.zeros((50, 8), dtype=np.float32)
     return InferenceResponse(action_chunk=chunk, axes=list(_AXES), latency_ms=latency_ms, model=model)
@@ -93,12 +93,12 @@ def test_happy_path_prints_model_latency_shape_and_framing(monkeypatch):
     framing line — because a live inference is not a live robot and the verb must
     never let that ambiguity stand.
     """
-    resp = _fake_response(model="nt0-fp3-pour", latency_ms=37.0)
-    code, out, err, _ = _run(["nt0-fp3-pour"], monkeypatch, infer_return=resp)
+    resp = _fake_response(model="fixture-base-pour", latency_ms=37.0)
+    code, out, err, _ = _run(["fixture-base-pour"], monkeypatch, infer_return=resp)
 
     assert code == 0, f"expected exit 0; stderr={err!r}"
     assert err == ""
-    assert "nt0-fp3-pour" in out, "resolved model must appear"
+    assert "fixture-base-pour" in out, "resolved model must appear"
     assert "37ms" in out, "latency must appear"
     assert "(50, 8)" in out, "action-chunk shape summary must appear"
     assert "gripper" in out, "axis labels must appear"
@@ -216,13 +216,13 @@ def test_prompt_override_replaces_snapshot_prompt(monkeypatch):
 def test_json_mirror_is_structured_and_prose_free(monkeypatch):
     """`--json` emits the machine-readable mirror — tag, model, latency, shape/axes —
     and NO framing prose (that belongs only in the human output)."""
-    resp = _fake_response(model="nt0-fp3-pour", latency_ms=42.0)
-    code, out, err, _ = _run(["nt0-fp3-pour", "--json"], monkeypatch, infer_return=resp)
+    resp = _fake_response(model="fixture-base-pour", latency_ms=42.0)
+    code, out, err, _ = _run(["fixture-base-pour", "--json"], monkeypatch, infer_return=resp)
 
     assert code == 0, f"stderr={err!r}"
     data = json.loads(out)
-    assert data["tag"] == "nt0-fp3-pour"
-    assert data["model"] == "nt0-fp3-pour"
+    assert data["tag"] == "fixture-base-pour"
+    assert data["model"] == "fixture-base-pour"
     assert data["latency_ms"] == 42.0
     assert data["action_chunk"]["shape"] == [50, 8]
     assert data["action_chunk"]["axes"] == _AXES
@@ -294,7 +294,7 @@ def test_auth_error_renders_login_hint(monkeypatch):
 
 def test_model_not_found_renders_message(monkeypatch):
     """ModelNotFoundError → house error carrying the SDK's known-models message."""
-    exc = ModelNotFoundError(model="typo-tag", known=["nt0-fp3", "nt0-fp3-pour"])
+    exc = ModelNotFoundError(model="typo-tag", known=["fixture-base", "fixture-base-pour"])
     code, out, err, _ = _run(["typo-tag"], monkeypatch, construct_raises=exc)
     assert code == 1
     assert err.startswith("newt: ")
@@ -307,14 +307,14 @@ def test_base_not_deployable_renders_message(monkeypatch):
     exc = BaseNotDeployableError(
         code=4424,
         type="model.base_not_deployable",
-        message="'nt0-fp3' is a base — run one of its fine-tunes: nt0-fp3-pour.",
-        context={"model": "nt0-fp3", "fine_tunes": ["nt0-fp3-pour"]},
+        message="'fixture-base' is a base — run one of its fine-tunes: fixture-base-pour.",
+        context={"model": "fixture-base", "fine_tunes": ["fixture-base-pour"]},
     )
-    code, out, err, _ = _run(["nt0-fp3"], monkeypatch, construct_raises=exc)
+    code, out, err, _ = _run(["fixture-base"], monkeypatch, construct_raises=exc)
     assert code == 1
     assert err.startswith("newt: ")
     assert "base" in err.lower()
-    assert "nt0-fp3-pour" in err, "the deployable fine-tunes must survive to the user"
+    assert "fixture-base-pour" in err, "the deployable fine-tunes must survive to the user"
 
 
 def test_registry_unavailable_renders_message(monkeypatch):
@@ -454,10 +454,10 @@ def test_verifier_retry_with_small_gap_still_renders_honest_note(monkeypatch):
     not gap size alone, so a fast-resolving retry isn't silently hidden."""
     chunk = np.zeros((50, 8), dtype=np.float32)
     resp = InferenceResponse(
-        action_chunk=chunk, axes=list(_AXES), latency_ms=180.0, model="nt0-fp3-pour",
+        action_chunk=chunk, axes=list(_AXES), latency_ms=180.0, model="fixture-base-pour",
         total_ms=3400.0, retries=1,
     )
-    code, out, err, _ = _run(["nt0-fp3-pour"], monkeypatch, infer_return=resp)
+    code, out, err, _ = _run(["fixture-base-pour"], monkeypatch, infer_return=resp)
 
     assert code == 0
     assert "180ms" in out
@@ -468,8 +468,8 @@ def test_warm_path_render_is_byte_unchanged(monkeypatch):
     """The ordinary warm path — no retries, total_ms == latency_ms — must render
     EXACTLY the pre-#38 single-line latency, byte for byte. The split machinery
     must never fire on a call with nothing to explain."""
-    resp = _fake_response(model="nt0-fp3-pour", latency_ms=37.0)
-    code, out, err, _ = _run(["nt0-fp3-pour"], monkeypatch, infer_return=resp)
+    resp = _fake_response(model="fixture-base-pour", latency_ms=37.0)
+    code, out, err, _ = _run(["fixture-base-pour"], monkeypatch, infer_return=resp)
 
     assert code == 0
     assert "  latency   37ms\n" in out
@@ -501,8 +501,8 @@ def test_json_gains_total_ms_and_retries_additively(monkeypatch):
 def test_json_warm_path_total_ms_defaults_to_latency_ms(monkeypatch):
     """A warm response built without total_ms/retries (the common case) must still
     carry the new --json fields, defaulting sanely rather than raising."""
-    resp = _fake_response(model="nt0-fp3-pour", latency_ms=42.0)
-    code, out, err, _ = _run(["nt0-fp3-pour", "--json"], monkeypatch, infer_return=resp)
+    resp = _fake_response(model="fixture-base-pour", latency_ms=42.0)
+    code, out, err, _ = _run(["fixture-base-pour", "--json"], monkeypatch, infer_return=resp)
 
     assert code == 0
     data = json.loads(out)

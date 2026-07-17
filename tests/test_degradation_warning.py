@@ -23,7 +23,7 @@ from newt._client.robot import (
 
 
 def _depth_warning_payload() -> dict:
-    """The shape serve_nt0._build_warning_from_catalog('degradation.missing_depth_fields')
+    """The shape the server's _build_warning_from_catalog('degradation.missing_depth_fields')
     produces, hand-built so the test does not import the server."""
     return {
         "type": "degradation.missing_depth_fields",
@@ -34,7 +34,7 @@ def _depth_warning_payload() -> dict:
             "and extrinsics."
         ),
         "context": {
-            "model": "nt0-fp3",
+            "model": "fixture-base",
             "missing_expected_fields": [
                 {"camera": "right-wrist-camera", "fields": ["depth_maps", "intrinsics", "extrinsics"]},
                 {"camera": "surrounding1", "fields": ["depth_maps", "intrinsics", "extrinsics"]},
@@ -57,7 +57,7 @@ def _mid_session_payload(frame_index: int = 5) -> dict:
             "actions until clean state resumes."
         ),
         "context": {
-            "model": "nt0-fp3",
+            "model": "fixture-base",
             "frame_index": frame_index,
             "expected_shape": [8],
             "got_shape": [],
@@ -75,7 +75,7 @@ def test_missing_depth_fields_names_fields_and_impact():
     frame = {"type": "action", "warnings": {"missing_depth_fields": _depth_warning_payload()}}
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _maybe_warn_degradation(frame, "nt0-fp3")
+        _maybe_warn_degradation(frame, "fixture-base")
 
     msgs = [str(w.message) for w in rec if issubclass(w.category, DegradationWarning)]
     assert len(msgs) == 1, f"expected exactly one DegradationWarning, got {msgs}"
@@ -93,7 +93,7 @@ def test_missing_expected_cameras_still_warns():
     frame = {"type": "action", "warnings": {"missing_expected_cameras": ["surrounding2"]}}
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _maybe_warn_degradation(frame, "nt0-fp3")
+        _maybe_warn_degradation(frame, "fixture-base")
     msgs = [str(w.message) for w in rec if issubclass(w.category, DegradationWarning)]
     assert len(msgs) == 1 and "surrounding2" in msgs[0]
 
@@ -109,7 +109,7 @@ def test_both_camera_and_depth_warn_independently():
     }
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _maybe_warn_degradation(frame, "nt0-fp3")
+        _maybe_warn_degradation(frame, "fixture-base")
     msgs = [str(w.message) for w in rec if issubclass(w.category, DegradationWarning)]
     assert len(msgs) == 2
 
@@ -118,8 +118,8 @@ def test_no_warning_on_clean_frame():
     """Happy path: a frame with no warnings dict emits nothing."""
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _maybe_warn_degradation({"type": "action"}, "nt0-fp3")
-        _maybe_warn_mid_session({"type": "action"}, "nt0-fp3")
+        _maybe_warn_degradation({"type": "action"}, "fixture-base")
+        _maybe_warn_mid_session({"type": "action"}, "fixture-base")
     assert [w for w in rec if issubclass(w.category, DegradationWarning)] == []
 
 
@@ -128,7 +128,7 @@ def test_mid_session_warns_with_frame_index_and_impact():
     frame = {"type": "action", "warnings": {"mid_session_degradation": _mid_session_payload(frame_index=7)}}
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _maybe_warn_mid_session(frame, "nt0-fp3")
+        _maybe_warn_mid_session(frame, "fixture-base")
     msgs = [str(w.message) for w in rec if issubclass(w.category, DegradationWarning)]
     assert len(msgs) == 1
     assert "frame 7" in msgs[0]
@@ -147,7 +147,7 @@ def test_mid_session_fires_per_frame_not_once():
         frame = {"type": "action", "warnings": {"mid_session_degradation": _mid_session_payload(frame_index=idx)}}
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter("always")
-            _maybe_warn_mid_session(frame, "nt0-fp3")
+            _maybe_warn_mid_session(frame, "fixture-base")
         total += len([w for w in rec if issubclass(w.category, DegradationWarning)])
     assert total == 2, "mid-session must warn once per affected frame"
 
@@ -171,6 +171,6 @@ def test_bytes_keys_decoded():
     }
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        _maybe_warn_degradation(frame, "nt0-fp3")
+        _maybe_warn_degradation(frame, "fixture-base")
     msgs = [str(w.message) for w in rec if issubclass(w.category, DegradationWarning)]
     assert len(msgs) == 1 and "surrounding1" in msgs[0] and "extrinsics" in msgs[0]

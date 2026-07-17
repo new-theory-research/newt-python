@@ -56,7 +56,7 @@ def test_snapshots_load_returns_expected_structure() -> None:
 
 
 def test_snapshots_load_cup_stacking_prompt_override() -> None:
-    """cup_stacking's prompt is overridden to the clean NT0-FP3 task description."""
+    """cup_stacking's prompt is overridden to the clean flagship base task description."""
     import newt.snapshots as snapshots
 
     obs = snapshots.load("cup_stacking")

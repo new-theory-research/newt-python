@@ -188,13 +188,13 @@ def test_nt_warning_categories_render_without_filesystem_path():
     plain-language heads-up.
     """
     rendered = _format_nt_warning(
-        "Model 'nt0-fp3' expected cameras not all present. Missing: ['left_wrist'].",
+        "Model 'fixture-base' expected cameras not all present. Missing: ['left_wrist'].",
         DegradationWarning,
         "/Users/dev/.venv/lib/python3.12/site-packages/newt/_client/robot.py",
         1637,
     )
     assert rendered == (
-        "DegradationWarning: Model 'nt0-fp3' expected cameras not all present. "
+        "DegradationWarning: Model 'fixture-base' expected cameras not all present. "
         "Missing: ['left_wrist'].\n"
     )
     assert "robot.py" not in rendered
@@ -218,7 +218,7 @@ def test_non_nt_warning_categories_keep_stock_format():
 def test_cold_start_retry_message_has_no_hardcoded_minute_estimate():
     """ColdStartRetry's message must not hardcode a duration the wire doesn't
     support (issue #38's own callout: the old '60-90s' text was right for
-    NT0-FP3 and wrong for the SO-101 family app measured at ~3.5min cold).
+    flagship base and wrong for the SO-101 family app measured at ~3.5min cold).
     """
     warning = ColdStartRetry("Cold-start retry for model='so101-red-cube-bowl' "
                               "(warming up the container — first call after idle "
