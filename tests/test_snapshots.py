@@ -63,6 +63,42 @@ def test_snapshots_load_cup_stacking_prompt_override() -> None:
     assert obs["prompt"] == "Stack one cup into another cup."
 
 
+def test_snapshots_load_red_cube_is_so101_shaped() -> None:
+    """red_cube is the 6-axis SO-101 frame that unblocks `newt run <so101-fine-tune>`.
+
+    It must carry the exact SO-101 contract shape: a (6,) state, and top/side cameras at
+    (3, 224, 224) — the shape the live red-cube-bowl fine-tune declares and the starter
+    embodiment sends. This is the whole reason the snapshot exists; a wrong shape here is
+    the E2E hard-stop it fixes, back again.
+    """
+    import newt.snapshots as snapshots
+
+    obs = snapshots.load("red_cube")
+
+    assert obs["state"].dtype == np.float32
+    assert obs["state"].shape == (6,), "SO-101 state is 6-dim (5 arm joints + gripper)"
+
+    assert set(obs["images"].keys()) == {"top", "side"}, "SO-101 cameras are top/side"
+    for cam in ("top", "side"):
+        frame = obs["images"][cam]
+        assert frame.dtype == np.uint8
+        assert frame.shape == (3, 224, 224), f"images[{cam!r}] must be the (3,224,224) SO-101 shape"
+
+    # The real recorded task prompt rides verbatim (not overridden) — the exact string the
+    # red-cube-bowl model trained on, so infer() returns a non-degenerate chunk.
+    assert isinstance(obs["prompt"], str) and "red cube" in obs["prompt"].lower()
+
+
+def test_snapshots_describe_red_cube_signature() -> None:
+    """describe() reports red_cube's selection signature — (6,) state, top/side cameras —
+    read from the bundled data, which is what contract-aware selection keys off."""
+    import newt.snapshots as snapshots
+
+    desc = snapshots.describe("red_cube")
+    assert desc["state_shape"] == (6,)
+    assert desc["cameras"] == ("top", "side")
+
+
 def test_snapshots_load_all_available() -> None:
     """load() works for every name returned by available()."""
     import newt.snapshots as snapshots
