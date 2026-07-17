@@ -1,6 +1,6 @@
 """newt run — run one real inference against your model and print the result.
 
-    newt run <tag>                              run the default snapshot against <tag>
+    newt run <tag>                              run the contract-matched snapshot against <tag>
     newt run <tag> --snapshot pour_coffee_beans use a different bundled observation
     newt run <tag> --prompt "stack the cups"    override the snapshot's recorded prompt
     newt run <tag> --json                        machine-readable mirror
@@ -8,6 +8,15 @@
 The hero verb: take a model tag, authenticate, load a real bundled observation, call
 the model ONCE against prod, and print what came back — the resolved model, the
 round-trip latency, and the action-chunk shape.
+
+Snapshot selection is contract-aware. With no `--snapshot`, `newt run` reads the resolved
+model's declared contract (`robot.contract`) and picks the bundled snapshot whose state
+dimension and camera set MATCH — an 8-axis nt0 model gets an 8-axis snapshot, a 6-axis
+SO-101 model gets a 6-axis one. If no bundled snapshot matches the contract, that's an
+honest error naming what's available for which shapes — never a silent coercion of a
+wrong-shaped frame (Rule 10). `--snapshot` overrides the choice explicitly; a mismatched
+explicit choice fails client-side with the same contract error the SDK raises for any bad
+obs (console-011's pre-flight).
 
 v1 is hardware-free by design: no robot is connected and nothing moves. This is a live
 inference against your model, said plainly in the output so no one mistakes it for a
@@ -29,8 +38,12 @@ import threading
 
 from newt._credentials import read_api_key
 
-# The docs' own example. A developer types `newt run <tag>` and gets a real cup-stacking
-# observation without having to know a snapshot name exists.
+# The fallback snapshot when a model's contract declares nothing to match on (an nt0 base
+# whose registry entry carries no state_shape / cameras — there's no shape to key off, so
+# the historical default stands). A model WITH a contract gets a contract-matched snapshot
+# instead (see _select_snapshot). cup_stacking is the docs' own example: a developer types
+# `newt run <nt0-tag>` and gets a real cup-stacking observation without knowing a snapshot
+# name exists.
 _DEFAULT_SNAPSHOT = "cup_stacking"
 
 # issue #38 — honest cold-start feedback. Two independent seams:
@@ -71,7 +84,8 @@ def _usage() -> None:
     print("  <tag>   Model tag or UID to run (required)")
     print("")
     print("Options:")
-    print("  --snapshot <name>  Bundled observation to send (default: cup_stacking)")
+    print("  --snapshot <name>  Bundled observation to send (default: matched to the")
+    print("                     model's contract — 8-axis nt0, 6-axis SO-101)")
     print("  --prompt <text>    Override the snapshot's recorded prompt")
     print("  --json             Emit machine-readable JSON")
     print("")
@@ -204,6 +218,103 @@ def _surface_model_status(exc) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Contract-aware snapshot selection
+# ---------------------------------------------------------------------------
+
+def _select_snapshot(snapshots, contract) -> str | None:
+    """Pick the bundled snapshot matching `contract`, or None if nothing matches.
+
+    The match is on SHAPE, the thing that actually has to line up: a snapshot qualifies
+    when the contract's state_shape and cameras (whichever the contract declares) equal
+    the snapshot's. Snapshots are scanned in registry order, so cup_stacking wins the
+    8-axis tie over pour_coffee_beans — preserving the historical nt0 default.
+
+    Two Rule-10 seams:
+      - A contract that declares NOTHING to match on (state_shape and cameras both
+        absent — an nt0 base whose entry carries only action_shape, or the empty
+        registry of the NT_INFERENCE_URL override) has no shape to key off, so we fall
+        back to _DEFAULT_SNAPSHOT rather than guess. The default is a real 8-axis frame;
+        if it's wrong for this model, the server's contract check catches it — we don't
+        fabricate a match.
+      - When the contract DOES declare a shape and no snapshot matches it, we return None
+        (the caller prints an honest no-match error) — never coerce a wrong-shaped frame.
+    """
+    if contract is None or (contract.state_shape is None and contract.cameras is None):
+        return _DEFAULT_SNAPSHOT
+
+    for name in snapshots.available():
+        desc = snapshots.describe(name)
+        if contract.state_shape is not None and desc["state_shape"] != contract.state_shape:
+            continue
+        if contract.cameras is not None and desc["cameras"] != tuple(contract.cameras):
+            continue
+        return name
+    return None
+
+
+def _print_no_match_error(snapshots, tag: str, contract) -> None:
+    """Print the honest no-bundled-snapshot-matches-this-contract error to stderr.
+
+    Names the contract we couldn't match AND every bundled snapshot's shape, so the
+    developer sees exactly why (and can pass an explicit --snapshot or record their own
+    frame). Never coerces a wrong-shaped snapshot onto the wire (Rule 10)."""
+    print(
+        f"newt: no bundled snapshot matches the contract for {tag!r} "
+        f"(state_shape={contract.state_shape}, cameras={contract.cameras}).",
+        file=sys.stderr,
+    )
+    print("  Bundled snapshots and their shapes:", file=sys.stderr)
+    for name in snapshots.available():
+        desc = snapshots.describe(name)
+        print(
+            f"    {name}: state_shape={desc['state_shape']}, cameras={desc['cameras']}",
+            file=sys.stderr,
+        )
+    print(
+        "  Pass --snapshot <name> to send one explicitly, or record a matching frame "
+        "with `newt record`.",
+        file=sys.stderr,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Error rendering — one house-shaped dispatch, shared by construction and infer
+# ---------------------------------------------------------------------------
+
+def _render_error(exc) -> int:
+    """Render a NewTheoryError as the house 2-line stderr shape and return exit code 1.
+
+    Shared by both boundaries that can raise it — Robot construction (auth / model
+    resolution / registry) and infer() (contract / server / verifier / protocol) — so a
+    given error prints identically no matter which call surfaced it."""
+    import newt
+
+    if isinstance(exc, newt.AuthError):
+        print(f"newt: authentication failed — {exc.message}", file=sys.stderr)
+        print("  Run `newt login` to authenticate, or set NT_API_KEY.", file=sys.stderr)
+    elif isinstance(exc, newt.ModelNotFoundError):
+        print(f"newt: model not found — {exc.message}", file=sys.stderr)
+    elif isinstance(exc, newt.BaseNotDeployableError):
+        print(f"newt: model not deployable — {exc.message}", file=sys.stderr)
+    elif isinstance(exc, newt.RegistryUnavailable):
+        print(f"newt: registry unreachable — {exc.message}", file=sys.stderr)
+    elif isinstance(exc, newt.ContractMismatchError):
+        print(f"newt: contract mismatch — {exc.message}", file=sys.stderr)
+        _surface_model_status(exc)
+    elif isinstance(exc, newt.ServerError):
+        print(f"newt: server error — {exc.message}", file=sys.stderr)
+        _surface_model_status(exc)
+    elif isinstance(exc, newt.VerifierError):
+        print(f"newt: verifier unavailable — {exc.message}", file=sys.stderr)
+    elif isinstance(exc, newt.ProtocolError):
+        print(f"newt: protocol error — {exc.message}", file=sys.stderr)
+    else:
+        # Any other NewTheoryError — surface its message rather than swallow it (Rule 10).
+        print(f"newt: {exc.message}", file=sys.stderr)
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -231,13 +342,37 @@ def cmd_run(args: list[str]) -> int:
         )
         return 1
 
-    snapshot = _opt_value(args, "--snapshot") or _DEFAULT_SNAPSHOT
+    explicit_snapshot = _opt_value(args, "--snapshot")
     prompt_override = _opt_value(args, "--prompt")
 
     from newt import snapshots
 
-    # Validate the snapshot BEFORE we touch the wire — an unknown name is a helpful,
-    # network-free error listing what's available, never a raw KeyError traceback.
+    import newt
+
+    # Construct the Robot FIRST — it fetches the registry and resolves the tag's contract,
+    # which contract-aware snapshot selection needs. Construction is also where auth /
+    # model-resolution / registry errors surface.
+    try:
+        robot = newt.Robot(api_key=api_key, model=tag)
+    except newt.NewTheoryError as exc:
+        return _render_error(exc)
+
+    # Choose the snapshot. An explicit --snapshot wins as-is (a mismatch with the model's
+    # contract is caught client-side by the SDK's own pre-flight on infer(), console-011).
+    # Otherwise pick the snapshot whose shape matches the resolved contract; if the
+    # contract declares a shape nothing bundled matches, fail honestly (Rule 10) —
+    # never coerce a wrong-shaped frame onto the wire.
+    if explicit_snapshot is not None:
+        snapshot = explicit_snapshot
+    else:
+        contract = getattr(robot, "contract", None)
+        snapshot = _select_snapshot(snapshots, contract)
+        if snapshot is None:
+            _print_no_match_error(snapshots, tag, contract)
+            return 1
+
+    # Load the chosen snapshot. An unknown explicit name is a helpful, network-free error
+    # listing what's available, never a raw KeyError traceback.
     try:
         obs = snapshots.load(snapshot)
     except KeyError:
@@ -251,10 +386,7 @@ def cmd_run(args: list[str]) -> int:
     if prompt_override is not None:
         obs["prompt"] = prompt_override
 
-    import newt
-
     try:
-        robot = newt.Robot(api_key=api_key, model=tag)
         # The waking-line timer is TTY-only and never fires under --json (issue
         # #38): a script parsing --json must never see an extra stderr line
         # mid-call.
@@ -262,33 +394,8 @@ def cmd_run(args: list[str]) -> int:
         resp = _call_with_waking_notice(
             lambda: robot.infer(obs), enabled=waking_enabled, threshold=_WAKING_THRESHOLD_S
         )
-    except newt.AuthError as exc:
-        print(f"newt: authentication failed — {exc.message}", file=sys.stderr)
-        print("  Run `newt login` to authenticate, or set NT_API_KEY.", file=sys.stderr)
-        return 1
-    except newt.ModelNotFoundError as exc:
-        print(f"newt: model not found — {exc.message}", file=sys.stderr)
-        return 1
-    except newt.BaseNotDeployableError as exc:
-        print(f"newt: model not deployable — {exc.message}", file=sys.stderr)
-        return 1
-    except newt.RegistryUnavailable as exc:
-        print(f"newt: registry unreachable — {exc.message}", file=sys.stderr)
-        return 1
-    except newt.ContractMismatchError as exc:
-        print(f"newt: contract mismatch — {exc.message}", file=sys.stderr)
-        _surface_model_status(exc)
-        return 1
-    except newt.ServerError as exc:
-        print(f"newt: server error — {exc.message}", file=sys.stderr)
-        _surface_model_status(exc)
-        return 1
-    except newt.VerifierError as exc:
-        print(f"newt: verifier unavailable — {exc.message}", file=sys.stderr)
-        return 1
-    except newt.ProtocolError as exc:
-        print(f"newt: protocol error — {exc.message}", file=sys.stderr)
-        return 1
+    except newt.NewTheoryError as exc:
+        return _render_error(exc)
 
     if as_json:
         print(
