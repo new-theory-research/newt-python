@@ -18,54 +18,71 @@ def main() -> None:
         _print_version()
         sys.exit(0)
 
+    rc = _dispatch(args)
+
+    # Passive, once-a-day, post-output staleness nudge — only AFTER a command SUCCEEDED,
+    # never for `upgrade` itself (it just changed the version). Fully silent on any
+    # failure and never able to change `rc` or slow the command (console-014).
+    if rc == 0 and args[0] != "upgrade":
+        from newt._cli.upgrade import run_update_check
+        run_update_check(args)
+
+    sys.exit(rc)
+
+
+def _dispatch(args: list[str]) -> int:
     cmd = args[0]
     if cmd == "login":
         from newt._cli.login import cmd_login
-        sys.exit(cmd_login(args[1:]))
+        return cmd_login(args[1:])
 
     if cmd == "logout":
         from newt._cli.logout import cmd_logout
-        sys.exit(cmd_logout(args[1:]))
+        return cmd_logout(args[1:])
 
     if cmd == "models":
         from newt._cli.models import cmd_models
-        sys.exit(cmd_models(args[1:]))
+        return cmd_models(args[1:])
 
     if cmd == "status":
         from newt._cli.status import cmd_status
-        sys.exit(cmd_status(args[1:]))
+        return cmd_status(args[1:])
 
     if cmd == "run":
         from newt._cli.run import cmd_run
-        sys.exit(cmd_run(args[1:]))
+        return cmd_run(args[1:])
 
     if cmd == "skill":
         from newt._cli.skill import cmd_skill
-        sys.exit(cmd_skill(args[1:]))
+        return cmd_skill(args[1:])
 
     if cmd == "record":
         from newt._cli.record import cmd_record
-        sys.exit(cmd_record(args[1:]))
+        return cmd_record(args[1:])
 
     if cmd == "finetune":
         from newt._cli.finetune import cmd_finetune
-        sys.exit(cmd_finetune(args[1:]))
+        return cmd_finetune(args[1:])
 
     if cmd == "promote":
         from newt._cli.promote import cmd_promote
-        sys.exit(cmd_promote(args[1:]))
+        return cmd_promote(args[1:])
 
     if cmd == "episodes":
         from newt._cli.episodes import cmd_episodes
-        sys.exit(cmd_episodes(args[1:]))
+        return cmd_episodes(args[1:])
+
+    if cmd == "upgrade":
+        from newt._cli.upgrade import cmd_upgrade
+        return cmd_upgrade(args[1:])
 
     if cmd == "version":
         _print_version()
-        sys.exit(0)
+        return 0
 
     print(f"newt: unknown command '{cmd}'", file=sys.stderr)
     print("Run 'newt --help' for usage.", file=sys.stderr)
-    sys.exit(1)
+    return 1
 
 
 def _print_version() -> None:
@@ -92,6 +109,7 @@ def _usage() -> None:
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
     print("  finetune Launch a training run on NT's GPUs and watch it (try: newt finetune --dataset <name>)")
     print("  promote  Keep a fine-tune's checkpoint band and serve it (try: newt promote <job-handle> --band <n>)")
+    print("  upgrade  Upgrade the CLI to the latest version (try: newt upgrade)")
     print("  version  Show the installed newt version (also: --version, -V)")
     print("")
     print("Options:")
@@ -105,3 +123,4 @@ def _usage() -> None:
     print("  NT_BOOTSTRAP_URL  Override registry discovery base URL")
     print("  NT_INFERENCE_URL  Override inference endpoint directly (skips discovery)")
     print("  NT_CONSOLE_URL    Console URL (default: https://newtheory-console.vercel.app)")
+    print("  NEWT_NO_UPDATE_CHECK  Set to 1 to disable the once-a-day 'update available' notice")
