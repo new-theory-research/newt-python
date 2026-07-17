@@ -44,8 +44,8 @@ def main() -> None:
     # as the test/smoke escape hatch.
     os.environ["NT_INFERENCE_URL"] = args.url
 
-    # NT0-FP3 camera keys (matches serve_nt0._CAMERA_KEYS).
-    _NT0_CAMERA_KEYS = ["right-wrist-camera", "surrounding1", "surrounding2"]
+    # flagship base camera keys (match the server's camera-key list).
+    _FLAGSHIP_CAMERA_KEYS = ["right-wrist-camera", "surrounding1", "surrounding2"]
 
     # --- mock callables ---
     chunks_applied: list[np.ndarray] = []
@@ -56,14 +56,14 @@ def main() -> None:
         if read_state_calls[0] == 1:
             print("[smoke] WS connect /stream OK", flush=True)
             print("[smoke] sent obs frame with depth+matrices (zero-fill / identity)", flush=True)
-        # NT0-FP3 observation: include depth + camera matrices so UnprojectPoints runs.
+        # flagship base observation: include depth + camera matrices so the server's geometry step runs.
         # Zero-fill depth + identity intrinsics/extrinsics → degraded (not real) point cloud,
         # but the encoder receives a valid (non-None) cloud and produces action chunks.
         return {
             "state": np.zeros(14, dtype=np.float32),
-            "depth_maps": {cam: np.zeros((240, 320), dtype=np.float32) for cam in _NT0_CAMERA_KEYS},
-            "intrinsics":  {cam: np.eye(3, dtype=np.float32) for cam in _NT0_CAMERA_KEYS},
-            "extrinsics":  {cam: np.eye(4, dtype=np.float32) for cam in _NT0_CAMERA_KEYS},
+            "depth_maps": {cam: np.zeros((240, 320), dtype=np.float32) for cam in _FLAGSHIP_CAMERA_KEYS},
+            "intrinsics":  {cam: np.eye(3, dtype=np.float32) for cam in _FLAGSHIP_CAMERA_KEYS},
+            "extrinsics":  {cam: np.eye(4, dtype=np.float32) for cam in _FLAGSHIP_CAMERA_KEYS},
         }
 
     def mock_execute(chunk: np.ndarray) -> None:

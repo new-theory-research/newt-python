@@ -45,8 +45,8 @@ def _run(args: list[str], monkeypatch, models_return=None, side_effect=None):
 # Real 7-model registry payload (structure matches live API)
 _REAL_7_MODELS = [
     {
-        "uid": "ft_base_nt0fp3",
-        "tags": ["nt0-fp3"],
+        "uid": "ft_base_fixture",
+        "tags": ["fixture-base"],
         "type": "base",
         "base": None,
         "contract": {
@@ -55,23 +55,23 @@ _REAL_7_MODELS = [
     },
     {
         "uid": "ft_4hn40z6a",
-        "tags": ["nt0-fp3-pour-coffee-beans", "pour-coffee-beans"],
+        "tags": ["fixture-base-pour-coffee-beans", "pour-coffee-beans"],
         "type": "fine_tune",
-        "base": "ft_base_nt0fp3",
+        "base": "ft_base_fixture",
         "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
     },
     {
         "uid": "ft_6d0cfd51_e63fbb",
-        "tags": ["nt0-fp3-clean-table"],
+        "tags": ["fixture-base-clean-table"],
         "type": "fine_tune",
-        "base": "ft_base_nt0fp3",
+        "base": "ft_base_fixture",
         "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
     },
     {
         "uid": "ft_6d0cfd51_c9d8ba",
-        "tags": ["nt0-fp3-pour-coffee-beans-wm"],
+        "tags": ["fixture-base-pour-coffee-beans-wm"],
         "type": "fine_tune",
-        "base": "ft_base_nt0fp3",
+        "base": "ft_base_fixture",
         "contract": {"action_axes": ["x", "y", "z", "qw", "qx", "qy", "qz", "gripper"]},
     },
     {
@@ -117,7 +117,7 @@ def test_grouped_layout_three_families():
 
 
 def test_grouped_layout_base_names_lead():
-    """Base display names lead each family group — nt0-fp3 / molmoact2 / pi05_aloha.
+    """Base display names lead each family group — fixture-base / molmoact2 / pi05_aloha.
 
     The human name (primary tag) should appear first on the base line, not the
     opaque uid. A developer picking a model should find it by name.
@@ -127,7 +127,7 @@ def test_grouped_layout_base_names_lead():
     # Base lines are the non-indented ones
     base_lines = [l for l in lines if l and not l.startswith("    ")]
     names = [l.split()[0] for l in base_lines]
-    assert names == ["nt0-fp3", "molmoact2", "pi05_aloha"], (
+    assert names == ["fixture-base", "molmoact2", "pi05_aloha"], (
         f"base display names must lead each group in order: {names!r}"
     )
 
@@ -146,8 +146,8 @@ def test_grouped_layout_fine_tunes_indented():
     )
 
 
-def test_axes_appear_once_on_nt0fp3_base_only():
-    """Action axes appear exactly once: on the nt0-fp3 base line.
+def test_axes_appear_once_on_fixture_base_only():
+    """Action axes appear exactly once: on the fixture-base base line.
 
     Fine-tunes inherit axes — repeating them on every fine-tune line was noise.
     molmoact2 and pi05_aloha have no action_axes so they get none. This test
@@ -162,9 +162,9 @@ def test_axes_appear_once_on_nt0fp3_base_only():
         f"axes fragment must appear exactly once, got {len(axes_lines)}: {axes_lines!r}"
     )
 
-    # That one line must be the nt0-fp3 base line
-    assert "nt0-fp3" in axes_lines[0], (
-        f"axes line must be the nt0-fp3 base, got: {axes_lines[0]!r}"
+    # That one line must be the fixture-base base line
+    assert "fixture-base" in axes_lines[0], (
+        f"axes line must be the fixture-base base, got: {axes_lines[0]!r}"
     )
 
     # All axes present on that line
@@ -220,7 +220,7 @@ def test_uids_absent_by_default():
     """
     output = _render_models(_REAL_7_MODELS)
     for uid in [
-        "ft_base_nt0fp3",
+        "ft_base_fixture",
         "ft_4hn40z6a",
         "ft_6d0cfd51_e63fbb",
         "ft_6d0cfd51_c9d8ba",
@@ -239,7 +239,7 @@ def test_ids_flag_restores_uids():
     """
     output = _render_models(_REAL_7_MODELS, show_ids=True)
     for uid in [
-        "ft_base_nt0fp3",
+        "ft_base_fixture",
         "ft_4hn40z6a",
         "ft_6d0cfd51_e63fbb",
         "ft_6d0cfd51_c9d8ba",
@@ -258,18 +258,18 @@ def test_uid_alignment_within_family_with_ids():
     """
     output = _render_models(_REAL_7_MODELS, show_ids=True)
     lines = output.splitlines()
-    # Get the nt0-fp3 family's fine-tune lines
-    nt0_fts = []
-    in_nt0 = False
+    # Get the fixture-base family's fine-tune lines
+    fixture_fts = []
+    in_fixture = False
     for line in lines:
         if line and not line.startswith("    "):
-            in_nt0 = "nt0-fp3" in line
-        elif in_nt0 and line.startswith("    "):
-            nt0_fts.append(line)
+            in_fixture = "fixture-base" in line
+        elif in_fixture and line.startswith("    "):
+            fixture_fts.append(line)
 
     # Find the position where uid starts on each line (after padding)
     uid_positions = []
-    for line in nt0_fts:
+    for line in fixture_fts:
         # uid starts after the padded task name + 2-space separator
         parts = line.split("  ")
         # first part is "    taskname"
@@ -347,8 +347,8 @@ def test_orphan_renders_at_top_level_before_families():
             "contract": None,
         },
         {
-            "uid": "ft_base_nt0fp3",
-            "tags": ["nt0-fp3"],
+            "uid": "ft_base_fixture",
+            "tags": ["fixture-base"],
             "type": "base",
             "base": None,
             "contract": {"action_axes": ["x", "y", "z"]},
@@ -359,7 +359,7 @@ def test_orphan_renders_at_top_level_before_families():
     non_empty = [l for l in lines if l.strip()]
     # Orphan must come before any family
     orphan_idx = next(i for i, l in enumerate(non_empty) if "orphan-task" in l)
-    base_idx = next(i for i, l in enumerate(non_empty) if "nt0-fp3" in l)
+    base_idx = next(i for i, l in enumerate(non_empty) if "fixture-base" in l)
     assert orphan_idx < base_idx, "orphan must appear before family groups"
     # Orphan line is not indented
     orphan_line = non_empty[orphan_idx]
@@ -381,7 +381,7 @@ def test_models_renders_catalog(monkeypatch):
     exit_code, out, err = _run([], monkeypatch, models_return=_REAL_7_MODELS)
 
     assert exit_code == 0, f"expected exit 0, got {exit_code}; stderr={err!r}"
-    assert "nt0-fp3" in out
+    assert "fixture-base" in out
     assert "molmoact2" in out
     assert err == ""
 
@@ -391,7 +391,7 @@ def test_models_renders_catalog_with_ids(monkeypatch):
     exit_code, out, err = _run(["--ids"], monkeypatch, models_return=_REAL_7_MODELS)
 
     assert exit_code == 0, f"expected exit 0, got {exit_code}; stderr={err!r}"
-    assert "ft_base_nt0fp3" in out
+    assert "ft_base_fixture" in out
     assert "ft_base_molmoact2" in out
     assert err == ""
 
@@ -408,10 +408,10 @@ def test_models_renders_axes_from_contract(monkeypatch):
 
     assert exit_code == 0
     lines = out.splitlines()
-    nt0_base_line = next(l for l in lines if "nt0-fp3" in l and not l.startswith("    "))
+    fixture_base_line = next(l for l in lines if "fixture-base" in l and not l.startswith("    "))
 
-    assert "axes" in nt0_base_line, f"axes must render on the nt0-fp3 base line: {nt0_base_line!r}"
-    assert "gripper" in nt0_base_line, f"axis labels must appear: {nt0_base_line!r}"
+    assert "axes" in fixture_base_line, f"axes must render on the fixture-base base line: {fixture_base_line!r}"
+    assert "gripper" in fixture_base_line, f"axis labels must appear: {fixture_base_line!r}"
 
     # Fine-tune lines must NOT repeat axes
     ft_lines = [l for l in lines if l.startswith("    ")]
@@ -441,7 +441,7 @@ def test_models_json_flag_emits_valid_array(monkeypatch):
     assert isinstance(parsed, list), f"expected JSON array, got {type(parsed)}"
     assert len(parsed) == len(_REAL_7_MODELS)
     uids = [m["uid"] for m in parsed]
-    assert "ft_base_nt0fp3" in uids
+    assert "ft_base_fixture" in uids
     assert "ft_base_molmoact2" in uids
 
 

@@ -34,6 +34,7 @@ from newt._client.robot import (
     ModelContract,
     NewTheoryError,
     RegistryUnavailable,
+    _DEFAULT_MODEL_UID,
     _build_obs_frame,
     _pack,
     _resolve_contract,
@@ -137,10 +138,11 @@ def test_contract_raw_carries_unnamed_fields():
 def test_contract_resolves_by_tag_and_default_uid():
     """Resolution matches _resolve_action_axes: by tag, and model=None → default UID."""
     assert _resolve_contract(_SO101_REGISTRY, "so-101").state_shape == (6,)
-    # Default UID path: a registry whose default entry carries a contract.
-    default_registry = [{"uid": "ft_base_nt0fp3", "tags": ["nt0-fp3"],
-                         "endpoint": "wss://x", "contract": {"state_shape": [8]}}]
-    assert _resolve_contract(default_registry, None).state_shape == (8,)
+    # Default UID path: model=None resolves through _DEFAULT_MODEL_UID to the
+    # so101 base entry (the shipped default), not by guessing.
+    default_registry = [{"uid": _DEFAULT_MODEL_UID, "tags": ["so101"],
+                         "endpoint": "wss://x", "contract": {"state_shape": [6]}}]
+    assert _resolve_contract(default_registry, None).state_shape == (6,)
 
 
 def test_contract_is_none_when_no_contract_never_fabricated():

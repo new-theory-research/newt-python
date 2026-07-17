@@ -61,7 +61,7 @@ Then confirm the API answers:
 
 ```bash
 uv run python -c "from newt import Robot; print(Robot())"
-# nt0-fp3 · contract received · (50,8) · 8 labeled axes
+# so101 · contract received · (30,6) · 6 labeled axes
 ```
 
 `Robot()` reads the credentials `newt login` created — no second login, no shell export. **You've successfully communicated with the API.** Some developers stop here.

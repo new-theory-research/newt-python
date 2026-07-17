@@ -1,7 +1,7 @@
 """Offline unit tests for registry-bootstrap URL resolution (brief-233).
 
 Why this matters: the registry bootstrap is the FIRST network call every Robot()
-makes. When the default pointed at the NT0-FP3 Modal app, a cold Modal container
+makes. When the default pointed at the flagship base Modal app, a cold Modal container
 turned "import newt; Robot(...)" into a multi-second (sometimes failing) first
 experience — golden test #1 ("my first call resolves instantly, even when the
 model is cold") hinged on it. The default now points at the always-on Railway
