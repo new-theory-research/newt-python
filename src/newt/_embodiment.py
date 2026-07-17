@@ -34,15 +34,17 @@ class Embodiment(Protocol):
     read_state()
         Return an observation dict for the current sensor snapshot.
         Same shape read_state= expects: optional keys "state" (float32
-        ndarray (14,)), "images" (dict of camera arrays), "prompt" (str).
-        Missing fields are firehose-coerced server-side — partial dicts
-        (even {}) are fine.
+        ndarray, shape model-dependent — see robot.contract.state_shape),
+        "images" (dict of camera arrays keyed by robot.contract.cameras),
+        "prompt" (str). Missing fields are firehose-coerced server-side —
+        partial dicts (even {}) are fine.
 
     execute(action_chunk)
         Apply one action chunk to the hardware. Receives an ndarray of
-        shape (action_horizon, action_dim) — the same chunk execute=
-        receives in Robot.run(). Called once per inference cycle in
-        non-stream mode; never called in stream mode.
+        shape (action_horizon, action_dim) — model-dependent; see
+        robot.contract.action_shape — the same chunk execute= receives in
+        Robot.run(). Called once per inference cycle in non-stream mode;
+        never called in stream mode.
     """
 
     def read_state(self) -> dict:
