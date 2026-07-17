@@ -13,6 +13,12 @@ Public surface:
 - `newt.NewTheoryError`       — base class for all server-emitted errors; six-field
                                  envelope (code, type, message, context, docs, trace_id)
 - `newt.AuthError`            — raised when API key is rejected (WS close 4001 / HTTP 401)
+- `newt.ForbiddenError`       — raised when a valid key isn't authorized for the
+                                 requested model — it can only serve models the team
+                                 owns (WS close 4403)
+- `newt.ConnectionDroppedError` — raised when the WS connection drops mid-session with
+                                 no error envelope and no known close code (1006/1011 or
+                                 codeless); message carries a cold-load retry hint
 - `newt.EmbodimentError`      — raised when Robot(embodiment=...) receives an invalid
                                  value: a string name, a conflict with read_state=/execute=,
                                  or an object missing one or both required methods
@@ -63,10 +69,12 @@ from newt._client.robot import (
     AuthError,
     BaseNotDeployableError,
     ColdStartRetry,
+    ConnectionDroppedError,
     ContractMismatchError,
     DegradationWarning,
     EmbodimentError,
     EnvOverrideWarning,
+    ForbiddenError,
     InferenceResponse,
     ModelContract,
     ModelNotFoundError,
@@ -87,11 +95,13 @@ __all__ = [
     "AuthError",
     "BaseNotDeployableError",
     "ColdStartRetry",
+    "ConnectionDroppedError",
     "ContractMismatchError",
     "DegradationWarning",
     "Embodiment",
     "EmbodimentError",
     "EnvOverrideWarning",
+    "ForbiddenError",
     "InferenceResponse",
     "ModelContract",
     "ModelNotFoundError",
