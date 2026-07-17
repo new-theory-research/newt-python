@@ -23,6 +23,44 @@ def _c(code: str, text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Key identity — which credential this listing came from.
+#
+# Mirrors newt._cli.status._resolve_key: env var wins, credentials file is the
+# fallback (see newt._credentials for the canonical precedence statement).
+# Masking mirrors the console's own convention (apps/console/db/schema.ts,
+# `prefix` = last 8 chars of the plaintext): `nt_` + 8 bullets + last 8 chars.
+# The full key is never printed.
+# ---------------------------------------------------------------------------
+
+_KEY_SOURCE_LABELS = {
+    "env_var": "environment",
+    "credentials_file": "credentials file",
+}
+
+
+def _resolve_key() -> tuple[str | None, str]:
+    """Return (api_key, source) — source is 'env_var' | 'credentials_file' | 'none'."""
+    env_key = os.environ.get("NT_API_KEY")
+    if env_key:
+        return env_key, "env_var"
+    file_key = read_api_key()
+    if file_key:
+        return file_key, "credentials_file"
+    return None, "none"
+
+
+def _mask_key(key: str) -> str:
+    """Console-style masked key: nt_ + 8 bullets + last 8 chars. Never the full key."""
+    return "nt_" + "•" * 8 + key[-8:]
+
+
+def _identity_line(api_key: str, key_source: str) -> str:
+    """Header line naming which credential produced this listing."""
+    source_label = _KEY_SOURCE_LABELS.get(key_source, key_source)
+    return f"Key {_c(_GRAY, _mask_key(api_key))} ({source_label})"
+
+
+# ---------------------------------------------------------------------------
 # Name derivation
 # ---------------------------------------------------------------------------
 
@@ -107,15 +145,20 @@ def _axes_fragment(model: dict[str, Any]) -> str:
     return " ".join(str(a) for a in axes)
 
 
-def _render_base_line(base: dict[str, Any]) -> str:
-    """Render the family header line for a base model."""
+def _render_base_line(base: dict[str, Any], show_ids: bool) -> str:
+    """Render the family header line for a base model.
+
+    uid is a raw handle a human never acts on while browsing — it's dropped
+    from default output (tag/display name carries identity) and restored
+    with --ids for scripts/agents that want it.
+    """
     name = _display_name(base)
     uid = base.get("uid") or "—"
     axes = _axes_fragment(base)
 
     parts = [_c(_GREEN, name)]
 
-    if uid != name:
+    if show_ids and uid != name:
         parts.append(_c(_MINT, uid))
 
     if axes:
@@ -124,35 +167,57 @@ def _render_base_line(base: dict[str, Any]) -> str:
     return "  ".join(parts)
 
 
-def _render_fine_tune_line(ft: dict[str, Any], base_display: str, task_col_width: int) -> str:
+def _render_fine_tune_line(
+    ft: dict[str, Any], base_display: str, task_col_width: int, show_ids: bool
+) -> str:
     """Render a single fine-tune as an indented line under its base."""
     task = _task_name(ft, base_display)
-    uid = ft.get("uid") or "—"
 
+    if not show_ids:
+        return "    " + _c(_GREEN, task)
+
+    uid = ft.get("uid") or "—"
     task_padded = task.ljust(task_col_width)
     return "    " + _c(_GREEN, task_padded) + "  " + _c(_MINT, uid)
 
 
-def _render_orphan_line(ft: dict[str, Any]) -> str:
-    """Render an orphan fine-tune whose base isn't in the payload."""
+def _render_orphan_line(ft: dict[str, Any], show_ids: bool) -> str:
+    """Render an orphan fine-tune whose base isn't in the payload.
+
+    The `[base: ...]` reference is kept regardless of show_ids — it isn't the
+    model's own uid, it's the diagnostic naming WHY this fine-tune is orphaned
+    (its declared base is absent from the catalog).
+    """
     task = _display_name(ft)
-    uid = ft.get("uid") or "—"
     base_ref = ft.get("base") or "unknown"
-    return _c(_GREEN, task) + "  " + _c(_MINT, uid) + "  " + _c(_GRAY, f"[base: {base_ref}]")
+    parts = [_c(_GREEN, task)]
+
+    if show_ids:
+        uid = ft.get("uid") or "—"
+        if uid != task:
+            parts.append(_c(_MINT, uid))
+
+    parts.append(_c(_GRAY, f"[base: {base_ref}]"))
+    return "  ".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _render_models(models: list[dict[str, Any]]) -> str:
-    """Render the grouped human-readable model listing. Returns a string."""
+def _render_models(models: list[dict[str, Any]], show_ids: bool = False) -> str:
+    """Render the grouped human-readable model listing. Returns a string.
+
+    show_ids=False (default): tag/display name is the identity; raw uids are
+    dropped — they're a dev handle, not something a human acts on while
+    scanning the catalog. Pass show_ids=True (--ids) to restore them.
+    """
     families, orphans = _group_models(models)
     lines: list[str] = []
 
     # Orphans first (edge case — no base to group under)
     for ft in orphans:
-        lines.append(_render_orphan_line(ft))
+        lines.append(_render_orphan_line(ft, show_ids))
 
     if orphans and families:
         lines.append("")
@@ -161,7 +226,7 @@ def _render_models(models: list[dict[str, Any]]) -> str:
         if i > 0:
             lines.append("")
 
-        lines.append(_render_base_line(base))
+        lines.append(_render_base_line(base, show_ids))
 
         if fine_tunes:
             base_display = _display_name(base)
@@ -170,7 +235,9 @@ def _render_models(models: list[dict[str, Any]]) -> str:
             task_col_width = max(len(t) for t in task_names) if task_names else 0
 
             for ft in fine_tunes:
-                lines.append(_render_fine_tune_line(ft, base_display, task_col_width))
+                lines.append(
+                    _render_fine_tune_line(ft, base_display, task_col_width, show_ids)
+                )
 
     return "\n".join(lines)
 
@@ -180,8 +247,15 @@ def _usage() -> None:
     print("")
     print("  List every model your API key can drive.")
     print("")
+    print("  Human output leads with a Key line naming which credential produced")
+    print("  the listing (masked — never the full key) and its source (environment")
+    print("  or credentials file), then the catalog grouped by base with its")
+    print("  fine-tunes indented underneath. Raw uids are left out by default —")
+    print("  the tag is the identity you scan by; pass --ids to bring them back.")
+    print("")
     print("Options:")
-    print("  --json  Emit machine-readable JSON")
+    print("  --json  Emit machine-readable JSON (unchanged by any of the above)")
+    print("  --ids   Show each model's uid alongside its name")
     print("")
     print("Environment:")
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials).")
@@ -195,8 +269,9 @@ def cmd_models(args: list[str]) -> int:
         return 0
 
     as_json = "--json" in args
+    show_ids = "--ids" in args
 
-    api_key = os.environ.get("NT_API_KEY") or read_api_key()
+    api_key, key_source = _resolve_key()
     if not api_key:
         print(
             "newt: no API key found.\n"
@@ -224,9 +299,12 @@ def cmd_models(args: list[str]) -> int:
         print(json.dumps(models))
         return 0
 
+    print(_identity_line(api_key, key_source))
+    print()
+
     if not models:
         print("No models available for your key.")
         return 0
 
-    print(_render_models(models))
+    print(_render_models(models, show_ids=show_ids))
     return 0
