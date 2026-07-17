@@ -210,24 +210,53 @@ def test_name_derivation_task_tags():
     assert "bimanual-yam" in task_names, f"task names: {task_names!r}"
 
 
-def test_fine_tune_uids_visible():
-    """Fine-tune uids appear on their lines (secondary, after task name).
+def test_uids_absent_by_default():
+    """No raw uid appears anywhere in the default (human) listing.
 
-    Developers reference models by uid in code. The name is scannable; the uid
-    is the actual handle.
+    Mattie's 2026-07-17 friction report: uids on every line dominated visually
+    while serving no human action browsing the catalog. The tag/display name
+    is the identity a developer scans by; uids are dropped by default and
+    restored only with --ids (see test_ids_flag_restores_uids).
     """
     output = _render_models(_REAL_7_MODELS)
-    for uid in ["ft_4hn40z6a", "ft_6d0cfd51_e63fbb", "ft_6d0cfd51_c9d8ba", "ft_molmoact2_yam"]:
-        assert uid in output, f"fine-tune uid {uid!r} must appear in output"
+    for uid in [
+        "ft_base_nt0fp3",
+        "ft_4hn40z6a",
+        "ft_6d0cfd51_e63fbb",
+        "ft_6d0cfd51_c9d8ba",
+        "ft_base_molmoact2",
+        "ft_molmoact2_yam",
+        "ft_base_pi05_aloha",
+    ]:
+        assert uid not in output, f"uid {uid!r} must NOT appear in default output: {output!r}"
 
 
-def test_uid_alignment_within_family():
-    """Fine-tune uids are column-aligned within a family.
+def test_ids_flag_restores_uids():
+    """--ids (show_ids=True) restores every model's uid alongside its name.
+
+    Scripts and agents that still want the raw handle get it back on request;
+    the default stays clean for humans scanning the catalog.
+    """
+    output = _render_models(_REAL_7_MODELS, show_ids=True)
+    for uid in [
+        "ft_base_nt0fp3",
+        "ft_4hn40z6a",
+        "ft_6d0cfd51_e63fbb",
+        "ft_6d0cfd51_c9d8ba",
+        "ft_base_molmoact2",
+        "ft_molmoact2_yam",
+        "ft_base_pi05_aloha",
+    ]:
+        assert uid in output, f"--ids must restore uid {uid!r}: {output!r}"
+
+
+def test_uid_alignment_within_family_with_ids():
+    """With --ids, fine-tune uids are column-aligned within a family.
 
     Same leading whitespace (4 spaces) + task name padded to column width.
-    This makes the uid column visually scannable.
+    This makes the uid column visually scannable when uids are shown at all.
     """
-    output = _render_models(_REAL_7_MODELS)
+    output = _render_models(_REAL_7_MODELS, show_ids=True)
     lines = output.splitlines()
     # Get the nt0-fp3 family's fine-tune lines
     nt0_fts = []
@@ -283,7 +312,10 @@ def test_orphan_fine_tune_renders_without_crashing():
 
     An orphan appears at top level, clearly labeled with its base reference.
     This guards against partial registry payloads or future splits where a
-    base is temporarily absent.
+    base is temporarily absent. The orphan's own uid is a raw handle (hidden
+    by default, like everywhere else); the `[base: ...]` reference is kept
+    regardless — it's the diagnostic explaining WHY this fine-tune is orphaned,
+    not the model's own identity handle.
     """
     models = [
         {
@@ -296,8 +328,12 @@ def test_orphan_fine_tune_renders_without_crashing():
     ]
     # Must not raise
     output = _render_models(models)
-    assert "ft_orphan_abc123" in output, "orphan uid must appear"
+    assert "orphan-task" in output, "orphan task name must appear"
     assert "ft_base_missing" in output, "orphan base reference must appear"
+    assert "ft_orphan_abc123" not in output, "orphan's own uid must be hidden by default"
+
+    output_ids = _render_models(models, show_ids=True)
+    assert "ft_orphan_abc123" in output_ids, "--ids must restore the orphan's own uid"
 
 
 def test_orphan_renders_at_top_level_before_families():
@@ -322,7 +358,7 @@ def test_orphan_renders_at_top_level_before_families():
     lines = output.splitlines()
     non_empty = [l for l in lines if l.strip()]
     # Orphan must come before any family
-    orphan_idx = next(i for i, l in enumerate(non_empty) if "ft_orphan_abc123" in l)
+    orphan_idx = next(i for i, l in enumerate(non_empty) if "orphan-task" in l)
     base_idx = next(i for i, l in enumerate(non_empty) if "nt0-fp3" in l)
     assert orphan_idx < base_idx, "orphan must appear before family groups"
     # Orphan line is not indented
@@ -338,10 +374,21 @@ def test_orphan_renders_at_top_level_before_families():
 def test_models_renders_catalog(monkeypatch):
     """A developer who just logged in types `newt models` and sees the catalog.
 
-    The command must exit 0 and print each model's UID on its line.
-    The developer can scan the list to find the model they want.
+    The command must exit 0 and print each base's display name (tag) on its
+    line — the human identity, not the raw uid. The developer can scan the
+    list to find the model they want.
     """
     exit_code, out, err = _run([], monkeypatch, models_return=_REAL_7_MODELS)
+
+    assert exit_code == 0, f"expected exit 0, got {exit_code}; stderr={err!r}"
+    assert "nt0-fp3" in out
+    assert "molmoact2" in out
+    assert err == ""
+
+
+def test_models_renders_catalog_with_ids(monkeypatch):
+    """--ids restores the base uids in the full CLI path (not just the renderer)."""
+    exit_code, out, err = _run(["--ids"], monkeypatch, models_return=_REAL_7_MODELS)
 
     assert exit_code == 0, f"expected exit 0, got {exit_code}; stderr={err!r}"
     assert "ft_base_nt0fp3" in out
@@ -410,6 +457,99 @@ def test_models_json_unchanged_by_renderer(monkeypatch):
     # Must parse to the original list with no modification
     parsed = json.loads(out)
     assert parsed == _REAL_7_MODELS, "json output must be the raw models list, unmodified"
+
+
+def test_models_json_unaffected_by_ids_flag(monkeypatch):
+    """--json combined with --ids still emits the raw, unmodified array.
+
+    --ids is a human-output concern only; agents get the full payload either way.
+    """
+    exit_code, out, _ = _run(["--json", "--ids"], monkeypatch, models_return=_REAL_7_MODELS)
+
+    assert exit_code == 0
+    assert json.loads(out) == _REAL_7_MODELS
+
+
+# ---------------------------------------------------------------------------
+# Identity line — which credential produced this listing (masked, never raw)
+#
+# Mattie's 2026-07-17 friction report: with multiple accounts/keys, nothing
+# showed WHICH account a listing was for. The Key line answers that from data
+# already local at resolve time (the key string is in hand; the source — env
+# var vs credentials file — is known the same way `newt status` knows it).
+# No new network call, no wire change.
+# ---------------------------------------------------------------------------
+
+def test_identity_line_shows_masked_key_and_env_source(monkeypatch):
+    """Default human output leads with a Key line: masked key + env source."""
+    exit_code, out, err = _run([], monkeypatch, models_return=_REAL_7_MODELS)
+
+    assert exit_code == 0, f"stderr={err!r}"
+    assert "Key nt_" in out
+    assert "(environment)" in out
+
+
+def test_identity_line_shows_credentials_file_source(monkeypatch):
+    """When the key resolves from ~/.nt/credentials, the source label says so."""
+    import io as _io
+
+    import newt._cli.models as models_mod
+    from newt._cli.models import cmd_models
+
+    monkeypatch.delenv("NT_API_KEY", raising=False)
+    monkeypatch.setattr(models_mod, "read_api_key", lambda: "nt_ab12cd34ef56gh78840eae1f")
+    monkeypatch.setattr(newt, "list_models", lambda *a, **kw: _REAL_7_MODELS)
+
+    captured_out = _io.StringIO()
+    monkeypatch.setattr(sys, "stdout", captured_out)
+    monkeypatch.setattr(sys, "stderr", _io.StringIO())
+
+    exit_code = cmd_models([])
+    out = captured_out.getvalue()
+
+    assert exit_code == 0
+    assert "(credentials file)" in out
+    assert "840eae1f" in out
+
+
+def test_identity_line_never_leaks_full_key(monkeypatch):
+    """The full key never appears in human output — masked prefix only.
+
+    Rule 10: a masked hint is fine; the full secret landing in a terminal,
+    shell history, screen-share, or CI log is not.
+    """
+    import io as _io
+
+    import newt._cli.models as models_mod
+    from newt._cli.models import cmd_models
+
+    full_key = "nt_ab12cd34ef56gh78840eae1f"
+    monkeypatch.delenv("NT_API_KEY", raising=False)
+    monkeypatch.setattr(models_mod, "read_api_key", lambda: full_key)
+    monkeypatch.setattr(newt, "list_models", lambda *a, **kw: _REAL_7_MODELS)
+
+    captured_out = _io.StringIO()
+    monkeypatch.setattr(sys, "stdout", captured_out)
+    monkeypatch.setattr(sys, "stderr", _io.StringIO())
+
+    cmd_models([])
+    out = captured_out.getvalue()
+
+    assert full_key not in out, f"full key must never appear in output: {out!r}"
+    assert "840eae1f" in out, "masked suffix (last 8 chars) must still appear"
+    assert "•" in out, "masking bullets must appear"
+
+
+def test_mask_key_matches_console_convention():
+    """_mask_key mirrors the console's own masking: nt_ + 8 bullets + last 8 chars.
+
+    apps/console/db/schema.ts: `prefix` = last 8 chars of the plaintext key,
+    rendered as `nt_••••••••{prefix}`. Matching it means a developer recognizes
+    the SAME key across `newt models` and the console's Keys page.
+    """
+    from newt._cli.models import _mask_key
+
+    assert _mask_key("nt_ab12cd34ef56gh78840eae1f") == "nt_••••••••840eae1f"
 
 
 # ---------------------------------------------------------------------------
