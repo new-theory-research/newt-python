@@ -782,6 +782,137 @@ def test_render_terminal_train_failure_no_false_comfort():
 
 
 # ---------------------------------------------------------------------------
+# Failure VOICE — Mattie's live receipt (2026-07-17): a real run ended on the
+# bare line `Fine-tune failed at gate: train` — no why, no next step, internal
+# `gate` vocabulary. The failure render must now: translate the gate to plain
+# words in the HEADLINE (never the bare token), keep the raw gate/detail on a
+# technical line below, repeat the run page, and print concrete next steps.
+# ---------------------------------------------------------------------------
+
+# Plain phrase each known gate maps to in the headline.
+_GATE_PLAIN_EXPECTED = {
+    "intake": "while checking your dataset",
+    "train": "during training",
+    "frame-check": "while checking the trained model's frames",
+    "registry+reload": "while registering your model",
+    "serve": "while bringing your model online",
+    "eval": "during checkpoint evaluation",
+}
+
+
+@pytest.mark.parametrize("gate,phrase", sorted(_GATE_PLAIN_EXPECTED.items()))
+def test_failure_headline_is_plain_words_not_bare_gate(gate, phrase):
+    """Each known gate translates to a plain-words HEADLINE — intake/train/eval and the
+    post-train gates. The bare internal token (e.g. `registry+reload`) must NEVER be the
+    headline (Rule 10); it stays only on the technical line below."""
+    text, code = _render_terminal(_failed_at(gate))
+    assert code == 1
+    headline = text.splitlines()[0]
+    assert phrase in headline, f"[{gate}] plain phrase missing from headline: {headline!r}"
+    # The bare internal token must not be PRESENTED as the gate in the headline — no
+    # `gate: train`, no quoted `'train'`. (A plain phrase like "during training" is fine;
+    # the naive substring check would false-positive on "train" ⊂ "training".)
+    assert f"gate: {gate}" not in headline, f"[{gate}] bare-gate headline leaked: {headline!r}"
+    assert f"'{gate}'" not in headline, f"[{gate}] quoted raw token leaked into headline: {headline!r}"
+    assert "failed at gate:" not in text.lower(), "the old bare-gate headline must be gone"
+
+
+def test_failure_technical_line_carries_the_raw_gate_token():
+    """The raw gate token stays visible — on the technical line UNDER the plain headline —
+    so a developer/agent still has the exact gate. This is the ft-precedent: plain first,
+    precise underneath."""
+    text, _ = _render_terminal(_failed_at("train"))
+    assert "failed at gate 'train'" in text, f"raw gate token missing from technical line: {text!r}"
+
+
+def test_unknown_gate_falls_back_generic_headline_raw_token_below():
+    """A gate name the CLI can't place (renamed/new server gate) must NOT be guessed into
+    a plausible phrase — the headline goes generic, and the raw token shows ONLY on the
+    technical line (Rule 10: never invent meaning for an unknown token)."""
+    text, code = _render_terminal(_failed_at("some-new-gate"))
+    assert code == 1
+    headline = text.splitlines()[0]
+    assert "some-new-gate" not in headline, f"unknown token leaked into headline: {headline!r}"
+    assert "didn't finish" in headline.lower()
+    assert "failed at gate 'some-new-gate'" in text, "raw unknown token must appear on the technical line"
+
+
+def test_failure_repeats_run_page_and_prints_next_steps(monkeypatch):
+    """Mattie's exact shape: launch on `roll_the_dice`, fail at `train`. The render must
+    repeat the run page (printed at launch) AND give concrete next steps — the re-run
+    command WITH the dataset name, and where to get help."""
+    handle = {"job_handle": "fc-01KXQ", "dataset": "roll_the_dice", "status": "launched"}
+    rc, out, _err = _run(
+        ["--dataset", "roll_the_dice"], monkeypatch, launch=handle, statuses=[_failed_at("train")]
+    )
+    assert rc == 1
+    assert "it stopped during training" in out, f"plain headline missing: {out!r}"
+    assert "/runs/fc-01KXQ" in out, "the run page must be repeated at failure"
+    assert "newt finetune --dataset roll_the_dice" in out, "re-run command with the dataset must be present"
+    assert "newtheory-docs.vercel.app" in out, "a where-to-get-help pointer must be present"
+
+
+def test_failure_no_detail_prints_honest_line_no_invented_cause(monkeypatch):
+    """When the wire carries NO detail beyond the gate name (today's reality — the console
+    status route drops the pipeline's `error`), the CLI says so honestly and never invents
+    a cause. The honesty line points at the run page for more."""
+    handle = {"job_handle": "fc-01KXQ", "dataset": "roll_the_dice", "status": "launched"}
+    rc, out, _err = _run(
+        ["--dataset", "roll_the_dice"], monkeypatch, launch=handle, statuses=[_failed_at("train")]
+    )
+    assert rc == 1
+    assert "this is all the run reported" in out.lower(), f"honesty line missing: {out!r}"
+    # No invented cause: the only failure vocabulary is the gate + the honest lines.
+    for invented in ("because", "likely", "probably", "out of memory", "OOM", "diverged"):
+        assert invented.lower() not in out.lower(), f"invented cause leaked: {invented!r}"
+
+
+def test_failure_renders_server_detail_when_wire_carries_it():
+    """When the wire DOES carry a failure detail (once portal passes the pipeline's cause
+    through), it surfaces verbatim on the technical line — like promote's 409 detail — and
+    the 'this is all the run reported' honesty line drops (there IS more)."""
+    status = {"status": "failed", "gate": "train", "detail": "loss diverged at step 5000", "tag": None, "report_card": None}
+    text, code = _render_terminal(status, console="https://c", job_handle="fc-1")
+    assert code == 1
+    assert "loss diverged at step 5000" in text, "server detail must render verbatim"
+    assert "this is all the run reported" not in text.lower(), "honesty line must drop when detail is present"
+
+
+def test_failure_reads_error_field_as_detail_too():
+    """The pipeline's own field name for the cause is `error` (str(exc)). The CLI reads
+    both `detail` and `error`, so a real cause reaches the developer the moment EITHER
+    lands on the wire — no waiting on a field rename."""
+    status = {"status": "failed", "gate": "train", "error": "[finetune-pipeline] gate 'train' failed: CUDA OOM", "tag": None, "report_card": None}
+    text, _ = _render_terminal(status)
+    assert "CUDA OOM" in text, "the pipeline's `error` text must surface on the technical line"
+
+
+def test_json_failure_is_unchanged(monkeypatch):
+    """--json is machine-readable and must stay stable: the same keys, gate passed through
+    as the raw token (agents branch on it). Additive-only is allowed; a removed/renamed key
+    is not."""
+    handle = {"job_handle": "fc-1", "dataset": "d", "status": "launched"}
+    rc, out, _err = _run(
+        ["--dataset", "d", "--json"], monkeypatch, launch=handle, statuses=[_failed_at("train")]
+    )
+    assert rc == 1
+    parsed = json.loads(out)
+    assert {"job_handle", "status", "gate", "tag", "report_card", "steps", "name"} <= set(parsed)
+    assert parsed["status"] == "failed"
+    assert parsed["gate"] == "train", "the raw gate token must pass through --json unchanged"
+
+
+def test_status_oneshot_failure_repeats_run_page(monkeypatch):
+    """The one-shot --status path also repeats the run page at failure (console+handle are
+    in scope there) — it just can't offer a re-run command, since --status doesn't carry
+    the dataset (omitted, never fabricated)."""
+    rc, out, _err = _run(["--handle", "fc-xyz", "--status"], monkeypatch, statuses=[_failed_at("train")])
+    assert rc == 0  # --status exits 0 on a successful fetch, even of a failed run
+    assert "it stopped during training" in out
+    assert "/runs/fc-xyz" in out, "the run page must be repeated on the --status failure render"
+
+
+# ---------------------------------------------------------------------------
 # `newt finetune --list` — the caller's recent runs. Owner-scoping is enforced
 # server-side (the route's bun tests); here we prove the CLI faithfully renders
 # only what its own key's row-set returns, emits the raw list under --json, and
