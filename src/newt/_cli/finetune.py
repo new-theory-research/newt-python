@@ -873,6 +873,13 @@ def cmd_finetune(args: list[str]) -> int:
         print(f"  check later:  newt finetune --handle {job_handle} --status", file=out)
         print(f"  re-attach:    newt finetune --handle {job_handle}", file=out)
         print("", file=out)
+        # What to expect — training runs on New Theory's GPUs, so be explicit about the
+        # phases and the cold-start latency; silence should never read as "stuck".
+        print(_c(_GRAY, "  Runs on New Theory's GPUs. What happens next:"), file=out)
+        print(_c(_GRAY, "    1. starting up  — container boot + base-checkpoint download (a few min, up to ~15 on a cold start)"), file=out)
+        print(_c(_GRAY, "    2. training     — live step / loss / throughput / ETA stream below"), file=out)
+        print(_c(_GRAY, "    3. wrap-up      — checkpoint registered, model goes live"), file=out)
+        print("", file=out)
 
     print(f"Watching {job_handle} … (Ctrl-C to stop watching; the run keeps going)", file=out, flush=True)
 
@@ -905,11 +912,30 @@ def cmd_finetune(args: list[str]) -> int:
     return code
 
 
+def _watch_line(status: dict, waited_s: float) -> str:
+    """The one live line the watch loop shows each update.
+
+    Training/warm-up telemetry (step/loss/ETA, or "starting up — …") when the run is
+    reporting it; otherwise an honest "waiting for the trainer to start" with elapsed —
+    so the watch is NEVER a silent, uninformative "still running" (Rule 10: real state or
+    an honest 'not yet', never a fabricated one)."""
+    live = _render_progress(status) if isinstance(status, dict) else None
+    if live:
+        return f"  {live}"
+    waited = _fmt_duration(waited_s) or "0s"
+    return f"  … waiting for the trainer to start · {waited} elapsed"
+
+
 def _watch(console: str, api_key: str, job_handle: str, *, out) -> dict | None:
     """Poll until the run is terminal; return the terminal status dict, or None after
-    surfacing a loud error. Never returns a fabricated 'succeeded'."""
+    surfacing a loud error. Never returns a fabricated 'succeeded'.
+
+    The live line updates as soon as the run's state changes (warm-up appears, a step
+    lands) and at least every heartbeat interval otherwise — never a silent stretch."""
     deadline = time.monotonic() + _MAX_WAIT_S
-    last_heartbeat = time.monotonic()
+    started = time.monotonic()
+    last_line: str | None = None
+    last_print = 0.0
     while time.monotonic() < deadline:
         try:
             status = _poll_status(console, api_key, job_handle)
@@ -931,16 +957,14 @@ def _watch(console: str, api_key: str, job_handle: str, *, out) -> dict | None:
         if state in _TERMINAL:
             return status
 
+        line = _watch_line(status if isinstance(status, dict) else {}, time.monotonic() - started)
         now = time.monotonic()
-        if now - last_heartbeat >= _HEARTBEAT_EVERY_S:
-            # Prefer live telemetry (step/loss/ETA) when the run is reporting it; fall
-            # back to the honest bare-state line before the first progress lands.
-            live = _render_progress(status) if isinstance(status, dict) else None
-            if live:
-                print(f"  {live}", file=out, flush=True)
-            else:
-                print(f"  … still {state or 'running'}", file=out, flush=True)
-            last_heartbeat = now
+        # Print immediately when the line changes (new phase / step / elapsed tick), and at
+        # least every heartbeat otherwise so a long-running phase still shows a pulse.
+        if line != last_line or (now - last_print) >= _HEARTBEAT_EVERY_S:
+            print(line, file=out, flush=True)
+            last_line = line
+            last_print = now
         time.sleep(_POLL_INTERVAL_S)
 
     print(
