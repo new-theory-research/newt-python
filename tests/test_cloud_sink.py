@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -17,6 +18,16 @@ import pytest
 _FAKE_KEY = "nt_" + "a" * 40
 _NAMESPACE = "0123456789abcdef"
 _BUCKET = "nt-episodes"
+
+
+def _future_expiry() -> str:
+    """A FRESH signed-URL expiry (now + 15 min, the real TTL) — reflects reality, where a
+    just-minted URL is not expired. A hardcoded literal goes stale and would wrongly trip the
+    client's expiry guard (issue #52)."""
+    return (
+        (datetime.now(timezone.utc) + timedelta(minutes=15))
+        .strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    )
 
 
 class _FakeHTTPResp:
@@ -38,7 +49,7 @@ def _sign_response(dataset: str, path: str) -> bytes:
         {
             "url": f"https://storage.googleapis.com/{_BUCKET}/{_NAMESPACE}/{dataset}/{path}?sig=fake",
             "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/{path}",
-            "expiresAt": "2026-07-04T23:00:00.000Z",
+            "expiresAt": _future_expiry(),
         }
     ).encode()
 
@@ -63,6 +74,8 @@ def _install_fake_urlopen(monkeypatch, dataset: str, *, upload_error: Exception 
         return _FakeHTTPResp(b"")
 
     monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    # issue #52: a repeated upload_error now RETRIES with backoff — skip the real sleeps.
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
     return calls, signed_paths
 
 
@@ -383,7 +396,7 @@ def _install_fake_batch_urlopen(monkeypatch, dataset: str, *, upload_error=None)
                         "path": p,
                         "url": f"https://storage.googleapis.com/{_BUCKET}/{_NAMESPACE}/{dataset}/{p}?sig=fake",
                         "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/{p}",
-                        "expiresAt": "2026-07-16T23:00:00.000Z",
+                        "expiresAt": _future_expiry(),
                     }
                     for p in body["paths"]
                 ]
@@ -400,6 +413,7 @@ def _install_fake_batch_urlopen(monkeypatch, dataset: str, *, upload_error=None)
         return _FakeHTTPResp(b"")
 
     monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)  # issue #52: skip real retry backoff
     return calls, batched_paths
 
 
@@ -543,7 +557,7 @@ def test_upload_directory_rejects_url_count_mismatch(monkeypatch, tmp_path):
                                 "path": p,
                                 "url": f"https://x/{p}?sig=fake",
                                 "objectPath": f"gs://{_BUCKET}/{_NAMESPACE}/{dataset}/{p}",
-                                "expiresAt": "2026-07-16T23:00:00.000Z",
+                                "expiresAt": _future_expiry(),
                             }
                         ],
                     }
@@ -556,3 +570,127 @@ def test_upload_directory_rejects_url_count_mismatch(monkeypatch, tmp_path):
     export = _make_lerobot_export(tmp_path, dataset)
     with pytest.raises(RuntimeError, match="one URL per file"):
         sink.upload_directory(export)
+
+
+# --- issue #52: per-file PUT retry, size-aware timeout, Rule-12 failure message ---------------
+
+def test_put_retries_a_stall_then_succeeds(monkeypatch):
+    """A stalled/reset PUT is retried on the SAME signed URL; a fail-fail-succeed sequence
+    lands on the third attempt (no duplicate side effect — one final success)."""
+    from newt.recording import NTCloudSink
+
+    sink = NTCloudSink("grasp-cup", api_key=_FAKE_KEY)
+    attempts = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise URLError("connection reset")
+        return _FakeHTTPResp(b"")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    sink._put_bytes_to(
+        "https://signed?sig=x", b"payload", "videos/observation.images.side/file-000.mp4",
+        failure_note="untouched.",
+    )
+    assert attempts["n"] == 3  # two stalls, one landing — exactly
+
+
+def test_put_exhausts_retries_with_a_rule12_message(monkeypatch):
+    """After N stalls, give up with a message that names the file + attempt count, blames the
+    network path (not the data), and steers to a stronger connection + a NEW dataset name."""
+    from newt.recording import NTCloudSink
+
+    sink = NTCloudSink("grasp-cup", api_key=_FAKE_KEY)
+    attempts = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        attempts["n"] += 1
+        raise URLError("timed out")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    with pytest.raises(RuntimeError) as ei:
+        sink._put_bytes_to(
+            "https://signed", b"x", "videos/observation.images.side/file-000.mp4",
+            failure_note="the export remains on local disk, untouched.",
+        )
+    assert attempts["n"] == 3  # exactly _MAX_PUT_ATTEMPTS, then gives up
+    msg = str(ei.value)
+    assert "videos/observation.images.side/file-000.mp4" in msg  # cause: the specific file
+    assert "after 3 attempts" in msg                             # cause: it kept stalling
+    assert "network path" in msg                                 # whose problem: the network
+    assert "stronger connection" in msg                          # next step
+    assert "NEW dataset name" in msg                             # write-once reality (verified)
+
+
+def test_put_4xx_is_not_retried_and_names_the_write_once_cause(monkeypatch):
+    """A 4xx means the signed URL itself was rejected — not a flaky network — so it fails on the
+    FIRST attempt, with a message distinct from the stall one."""
+    from newt.recording import NTCloudSink
+
+    sink = NTCloudSink("grasp-cup", api_key=_FAKE_KEY)
+    attempts = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        attempts["n"] += 1
+        raise HTTPError(req.full_url, 403, "Forbidden", None, None)
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    with pytest.raises(RuntimeError) as ei:
+        sink._put_bytes_to(
+            "https://signed", b"x", "videos/observation.images.side/file-000.mp4",
+            failure_note="untouched.",
+        )
+    assert attempts["n"] == 1  # a 4xx is NOT transient — no retry
+    msg = str(ei.value)
+    assert "rejected" in msg
+    assert "write-once" in msg
+    assert "NEW dataset name" in msg
+    assert "stalled" not in msg  # Rule 12: distinct from the stall-exhausted message
+
+
+def test_put_stops_retrying_once_the_signed_url_expired(monkeypatch):
+    """A retry into an already-expired URL only earns a guaranteed 4xx — the client checks the
+    expiry it was handed and fails distinctly instead of retrying a dead URL."""
+    from newt.recording import NTCloudSink
+
+    sink = NTCloudSink("grasp-cup", api_key=_FAKE_KEY)
+    attempts = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        attempts["n"] += 1
+        raise URLError("timed out")
+
+    monkeypatch.setattr("newt.recording._cloud_sink.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda *_a: None)
+
+    already_expired = datetime.now(timezone.utc) - timedelta(minutes=1)
+    with pytest.raises(RuntimeError) as ei:
+        sink._put_bytes_to(
+            "https://signed", b"x", "videos/observation.images.side/file-000.mp4",
+            failure_note="untouched.", expires_at=already_expired,
+        )
+    assert attempts["n"] == 1  # first stall, then the expiry check stops the retry
+    msg = str(ei.value)
+    assert "expired" in msg
+    assert "NEW dataset name" in msg
+    assert "after 3 attempts" not in msg  # distinct from the exhausted-stall message
+
+
+def test_put_timeout_scales_with_file_size(monkeypatch):
+    """The PUT wall-clock budget is the constructor timeout as a floor, scaled up with file
+    size at a generous floor throughput — so a big video gets the time a fixed 30s denied it."""
+    from newt.recording import NTCloudSink
+    from newt.recording._cloud_sink import _MIN_UPLOAD_BYTES_PER_SEC
+
+    sink = NTCloudSink("grasp-cup", api_key=_FAKE_KEY, timeout=30.0)
+    assert sink._put_timeout(1_000) == 30.0  # a tiny file → the floor
+    big = 500 * 1024 * 1024  # 500 MB video
+    assert sink._put_timeout(big) == pytest.approx(big / _MIN_UPLOAD_BYTES_PER_SEC)
+    assert sink._put_timeout(big) > 30.0  # far above the old fixed timeout
