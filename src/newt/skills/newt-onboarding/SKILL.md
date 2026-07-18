@@ -22,7 +22,7 @@ The finish line for milestone 1 is: **you have communicated with the API and it 
 ### Step 1 — Install newt
 
 ```bash
-uv tool install "git+ssh://git@github.com/new-theory-research/newt-python.git"
+uv tool install "git+https://github.com/new-theory-research/newt-python.git"
 ```
 
 Need `uv`? `curl -LsSf https://astral.sh/uv/install.sh | sh` then `source $HOME/.local/bin/env`.
@@ -54,7 +54,7 @@ The `newt` Python library installs into a project. Create one if you don't have 
 ```bash
 uv init my-robot
 cd my-robot
-uv add "newt @ git+ssh://git@github.com/new-theory-research/newt-python.git"
+uv add "newt @ git+https://github.com/new-theory-research/newt-python.git"
 ```
 
 Then confirm the API answers:
@@ -106,7 +106,7 @@ You've confirmed the API works. To drive a real robot:
 1. **Clone the embodiment starter fresh.** You are in a cloned starter already — use this project. If you are not, visit the [embodiment setup guide](https://newtheory-docs.vercel.app/docs/set-up-your-embodiment) to clone the starter for your hardware.
 <!-- hardware-specific-end -->
 
-   **Never use ambient machine code (~/nt, ~/nt-runway, any pre-existing local path).** The starter is the clean path; rig machines have internal research code that is not the public SDK — it will misdirect you.
+   **Never use ambient machine code (any pre-existing `~/nt*` path or local research checkout).** The starter is the clean path; rig machines may carry internal research code that is not the public SDK — it will misdirect you.
 
 2. **Install dependencies.**
 
