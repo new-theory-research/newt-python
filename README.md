@@ -83,7 +83,7 @@ All source is under `src/newt/`:
 | `_cli/` | The `newt` command line. `__init__.py:_dispatch` maps each verb to `newt._cli.<verb>.cmd_<verb>` — so `newt run` lives in `_cli/run.py`, `newt models` in `_cli/models.py`, and so on (`login`, `logout`, `models`, `status`, `run`, `skill`, `record`, `finetune`, `promote`, `episodes`, `upgrade`). |
 | `snapshots/` | Bundled camera-and-state observations for test inference. `snapshots.load(name)` / `snapshots.available()`; the frames live in `snapshots/data/`. |
 | `recording/` | Demonstration capture — `recording.Session` and its `_session.py` / `_writer.py` / `_cloud_sink.py` / `_validate.py`. Behind the `[recording]` extra; imported lazily so plain `import newt` stays light. |
-| `_embodiment.py` | `Embodiment` base class — the seam between the SDK and real hardware. |
+| `_embodiment.py` | `Embodiment` protocol (`typing.Protocol`) — the seam between the SDK and real hardware; hardware drivers satisfy it structurally, no inheritance required. |
 | `_credentials.py` | Credential resolution: `NT_API_KEY` first, then `~/.nt/credentials`. |
 | `fixtures/` | Deprecated alias for `snapshots` (warns on use). Do not add to it. |
 | `skills/newt-onboarding/` | The onboarding skill shipped inside the package (`newt skill install`). |
