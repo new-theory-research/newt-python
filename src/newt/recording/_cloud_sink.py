@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -38,9 +39,39 @@ _DEFAULT_CONSOLE_URL = "https://newtheory-console.vercel.app"
 # this is not configurable per upload.
 _UPLOAD_CONTENT_TYPE = "application/octet-stream"
 
+# Per-file PUT retry (issue #52): a large video PUT on weak venue wifi stalls and dies. A
+# stalled/reset transfer is transient, so retry the SAME signed URL a few times with
+# exponential backoff. The URL is reused, NOT re-signed: re-signing mid-upload would hit the
+# sign route's write-once guard (an object under the name already exists → the batch route
+# 409s `dataset_name_exists`), so a fresh URL isn't available mid-batch anyway. A single-shot
+# signed PUT is atomic on GCS — a failed/aborted attempt finalizes no object — so re-PUTting
+# the same URL can't leave or duplicate a partial.
+_MAX_PUT_ATTEMPTS = 3
+_RETRY_BASE_DELAY_S = 1.0  # backoff sleeps: 1s, 2s (base * 2**(attempt-1))
+
+# Timeout scaling (issue #52): urllib applies the socket `timeout` as a total deadline for the
+# whole body `sendall`, so a fixed 30s means a large PUT must complete in 30s — wrong for a
+# 500 MB video on conference wifi. Scale the PUT's wall-clock budget with file size, assuming a
+# deliberately-generous floor throughput, so a legitimately-slow-but-alive upload gets the time
+# it needs while a truly dead connection still eventually fails (and retries). The constructor
+# `timeout` stays the FLOOR (small files, and every non-PUT request).
+_MIN_UPLOAD_BYTES_PER_SEC = 1_000_000  # ~8 Mbps — a weak-but-working venue-wifi floor
+
 
 def _rfc3339_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_expiry(value: object) -> datetime | None:
+    """Parse the sign route's ``expiresAt`` (ISO 8601, e.g. ``2026-07-04T23:00:00.000Z``) into an
+    aware datetime, or ``None`` if it is absent or unparseable — an unreadable expiry degrades to
+    the reactive path (a retry that hits an expired URL fails on the 4xx) rather than crashing."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _namespace_from_object_path(object_path: str, dataset: str) -> str:
@@ -316,6 +347,7 @@ class NTCloudSink:
                 data,
                 rel,
                 failure_note="the export remains on local disk, untouched.",
+                expires_at=_parse_expiry(url_by_path[rel].get("expiresAt")),
             )
             done_bytes += len(data)
             if progress is not None:
@@ -407,29 +439,88 @@ class NTCloudSink:
         signed = self._sign(remote_path, failure_note=failure_note)
         if self._namespace is None:
             self._namespace = _namespace_from_object_path(signed["objectPath"], self._dataset)
-        self._put_bytes_to(signed["url"], data, remote_path, failure_note=failure_note)
+        self._put_bytes_to(
+            signed["url"],
+            data,
+            remote_path,
+            failure_note=failure_note,
+            expires_at=_parse_expiry(signed.get("expiresAt")),
+        )
+
+    def _put_timeout(self, size_bytes: int) -> float:
+        """The wall-clock budget for a single PUT of ``size_bytes`` — the constructor
+        ``timeout`` as a floor, scaled up by size at a generous floor throughput (issue #52).
+        urllib treats the socket timeout as the total ``sendall`` deadline, so this is the time
+        the whole body has to reach NT storage."""
+        return max(self._timeout, size_bytes / _MIN_UPLOAD_BYTES_PER_SEC)
 
     def _put_bytes_to(
-        self, url: str, data: bytes, remote_path: str, *, failure_note: str
+        self,
+        url: str,
+        data: bytes,
+        remote_path: str,
+        *,
+        failure_note: str,
+        expires_at: datetime | None = None,
     ) -> None:
-        """PUT ``data`` to an already-signed GCS URL. Shared by the single-file
-        (``_put``) and directory (``upload_directory``) paths so both cross the wire
-        the exact same way — the signature mint differs, the PUT never does."""
-        req = Request(
-            url,
-            data=data,
-            headers={"Content-Type": _UPLOAD_CONTENT_TYPE},
-            method="PUT",
-        )
-        try:
-            with urlopen(req, timeout=self._timeout):
-                pass
-        except HTTPError as exc:
-            raise RuntimeError(
-                f"NTCloudSink: upload failed for {remote_path!r} ({exc.code} {exc.reason}); "
-                f"{failure_note}"
-            ) from exc
-        except URLError as exc:
-            raise RuntimeError(
-                f"NTCloudSink: upload failed for {remote_path!r}: {exc.reason}; {failure_note}"
-            ) from exc
+        """PUT ``data`` to an already-signed GCS URL, RETRYING a stalled/reset transfer
+        (issue #52). Shared by the single-file (``_put``) and directory (``upload_directory``)
+        paths so both cross the wire the exact same way — the signature mint differs, the PUT
+        never does.
+
+        A timeout / connection-reset / stall (``URLError``) or a transient server 5xx is retried
+        on the SAME signed URL — a single-shot GCS PUT is atomic, so a failed attempt leaves no
+        partial object to collide with, and the URL can't be re-signed mid-upload anyway (the
+        sign route refuses a name that already has objects). A 4xx is NOT transient — the signed
+        URL itself was rejected — so it fails immediately, naming the likely cause distinctly."""
+        put_timeout = self._put_timeout(len(data))
+        last_error: BaseException | None = None
+        for attempt in range(1, _MAX_PUT_ATTEMPTS + 1):
+            req = Request(
+                url,
+                data=data,
+                headers={"Content-Type": _UPLOAD_CONTENT_TYPE},
+                method="PUT",
+            )
+            try:
+                with urlopen(req, timeout=put_timeout):
+                    return  # landed
+            except HTTPError as exc:
+                if exc.code < 500:
+                    # A 4xx means the signed URL was rejected, not a flaky network — retrying
+                    # won't help. Distinct from the stall message (Rule 12): the two never share
+                    # a string. 400 = the URL expired (signed URLs are short-lived); 403 = an
+                    # object already exists at that name (uploads are write-once, create-only).
+                    raise RuntimeError(
+                        f"NTCloudSink: upload rejected for {remote_path!r} "
+                        f"({exc.code} {exc.reason}) — the signed upload URL was refused. It may "
+                        f"have expired, or an object already exists at that name (uploads are "
+                        f"write-once). Re-run the upload under a NEW dataset name. {failure_note}"
+                    ) from exc
+                last_error = exc  # 5xx — transient, retry
+            except URLError as exc:
+                last_error = exc  # timeout / stall / connection reset — transient, retry
+            if attempt < _MAX_PUT_ATTEMPTS:
+                # Don't retry into a dead URL: a signed URL lives ~15 min, but a very large file on
+                # a very slow link can take longer than that across attempts. If it's already
+                # expired, retrying only earns a guaranteed 4xx — fail now, distinctly (Rule 12).
+                if expires_at is not None and datetime.now(timezone.utc) >= expires_at:
+                    raise RuntimeError(
+                        f"NTCloudSink: upload of {remote_path!r} stalled and its signed upload URL "
+                        f"expired before it could complete (signed URLs are valid ~15 min; a very "
+                        f"large file on a very slow link can outlast that). Not retrying a dead URL. "
+                        f"Re-run under a NEW dataset name on a stronger connection. {failure_note}"
+                    ) from last_error
+                time.sleep(_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+
+        # Exhausted every attempt — the transfer kept stalling (Rule 12: cause, whose problem,
+        # the next steps).
+        reason = getattr(last_error, "reason", last_error)
+        raise RuntimeError(
+            f"NTCloudSink: upload failed for {remote_path!r} — the transfer stalled and did not "
+            f"complete after {_MAX_PUT_ATTEMPTS} attempts ({reason}). This is the network path to "
+            f"NT storage, not your data. Retry on a stronger connection — a wired link or a phone "
+            f"hotspot usually beats venue wifi, and large video files need a steady one. The "
+            f"partial upload can't be resumed under the same name (uploads are write-once): re-run "
+            f"under a NEW dataset name. {failure_note}"
+        ) from last_error
