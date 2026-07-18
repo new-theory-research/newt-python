@@ -6,7 +6,7 @@ Python SDK for the [New Theory](https://newtheory.ai) inference API. Connects yo
 
 ```bash
 # 1. Install the newt CLI globally (works in every shell — nothing to activate)
-uv tool install "git+ssh://git@github.com/new-theory-research/newt-python.git"
+uv tool install "git+https://github.com/new-theory-research/newt-python.git"
 
 # 2. Log in (one browser confirm; key persists to ~/.nt/credentials)
 newt login
@@ -20,7 +20,7 @@ The library installs into a project, exactly when you have Python to write:
 ```bash
 # 4. Add the library to a project, then connect from Python
 uv init my-robot && cd my-robot
-uv add "newt @ git+ssh://git@github.com/new-theory-research/newt-python.git"
+uv add "newt @ git+https://github.com/new-theory-research/newt-python.git"
 uv run python -c "from newt import Robot; print(Robot())"
 # so101 · contract received · (30,6) · 6 labeled axes
 ```
@@ -34,7 +34,7 @@ one optional install and one verb. Recording is an extra so plain `import newt`
 stays light for everyone who only runs inference:
 
 ```bash
-uv pip install "newt[recording]"
+uv add "newt[recording] @ git+https://github.com/new-theory-research/newt-python.git"
 ```
 
 The library is the moat; the CLI is hospitality. `newt.recording.Session` holds
@@ -67,3 +67,41 @@ Recording is alpha — the surface and the format version may move.
 **[Getting started →](https://newtheory-docs.vercel.app/docs/getting-started)** — install, auth, first inference call, no robot required.
 
 For hardware setup, use a [starter kit](https://newtheory-docs.vercel.app/docs/starters). See [CHANGELOG.md](CHANGELOG.md) for version history.
+
+## Contributing
+
+Product docs live at [newtheory-docs.vercel.app](https://newtheory-docs.vercel.app). This section is for working *on* the SDK.
+
+### Repository layout
+
+All source is under `src/newt/`:
+
+| Path | What it does |
+|---|---|
+| `__init__.py` | Public API. Exports `Robot`, `snapshots`, `Embodiment`, `InferenceResponse`, `ModelContract`, the error classes, and `list_models`. |
+| `_client/robot.py` | The inference client. `Robot()`, `.infer()`, `.run()`, `.contract`, error and warning classes. The core of the library. |
+| `_cli/` | The `newt` command line. `__init__.py:_dispatch` maps each verb to `newt._cli.<verb>.cmd_<verb>` — so `newt run` lives in `_cli/run.py`, `newt models` in `_cli/models.py`, and so on (`login`, `logout`, `models`, `status`, `run`, `skill`, `record`, `finetune`, `promote`, `episodes`, `upgrade`). |
+| `snapshots/` | Bundled camera-and-state observations for test inference. `snapshots.load(name)` / `snapshots.available()`; the frames live in `snapshots/data/`. |
+| `recording/` | Demonstration capture — `recording.Session` and its `_session.py` / `_writer.py` / `_cloud_sink.py` / `_validate.py`. Behind the `[recording]` extra; imported lazily so plain `import newt` stays light. |
+| `_embodiment.py` | `Embodiment` base class — the seam between the SDK and real hardware. |
+| `_credentials.py` | Credential resolution: `NT_API_KEY` first, then `~/.nt/credentials`. |
+| `fixtures/` | Deprecated alias for `snapshots` (warns on use). Do not add to it. |
+| `skills/newt-onboarding/` | The onboarding skill shipped inside the package (`newt skill install`). |
+
+Tests are in `tests/`; runnable examples in `examples/`.
+
+### Running the tests
+
+```bash
+# Editable install with the test extra, then run the suite
+uv pip install -e ".[test]"
+pytest
+```
+
+CI (`.github/workflows/test.yml`) runs three gates on 3.11 and 3.12 — mirror them locally before opening a PR:
+
+```bash
+ruff check src/   # lint
+deptry .          # declared-vs-used dependency check
+pytest            # tests
+```

@@ -1,7 +1,7 @@
 # New Theory — Onboarding Probe
 
 You are acting as a **FRESH DEVELOPER** using New Theory for the first time.
-You have **NO insider knowledge** of this stack — no knowledge of uv, openpi, Modal, or any NT-specific tooling beyond what the public docs say.
+You have **NO insider knowledge** of this stack — no knowledge of `uv` or any NT-specific tooling beyond what the public docs say.
 
 Your job: follow the public docs **literally**, reach a first snapshot inference, and produce a structured friction report.
 
@@ -102,7 +102,7 @@ Bullets of things that were smooth and correct.
 |---|-------|-------------------------------|----------|-----------|------|
 
 Severity: 🔴 High = blocks progress; 🟡 Med = doc/code mismatch or missing step; 🟢 Low = noise/polish  
-Repo: `docs`, `newt-python`, `newt-starter-trossen-widowx`, or `nt-runway`
+Repo: `docs`, `newt-python`, or `newt-starter-trossen-widowx`
 
 **5. Recommendations** (prioritized)
 P0 / P1 / P2, each tied to friction item numbers. Concrete one-line fixes where the data supports them. Do not invent fixes beyond what the friction shows.
