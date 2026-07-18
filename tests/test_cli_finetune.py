@@ -23,6 +23,7 @@ from newt._cli.finetune import (
     cmd_finetune,
     _render_terminal,
     _render_progress,
+    _watch_line,
     _terminal_json,
     _survival_block,
     _render_jobs_table,
@@ -1344,3 +1345,19 @@ def test_render_progress_warmup_phase_before_first_step():
     assert _render_progress({"progress": {"active_gate": "train"}}) == "train"
     # no step and no phase → None (caller falls back to its bare-state line)
     assert _render_progress({"progress": {"total_steps": 10000}}) is None
+
+
+def test_watch_line_never_silent_before_progress():
+    # No progress yet → an honest, live "waiting for the trainer" with elapsed, NOT a
+    # bare "still running". This is the whole point: the watch is always informative.
+    assert _watch_line({"status": "running"}, waited_s=0) == "  … waiting for the trainer to start · 0s elapsed"
+    assert _watch_line({"status": "running"}, waited_s=135) == "  … waiting for the trainer to start · 2m elapsed"
+
+
+def test_watch_line_shows_warmup_then_training():
+    warm = {"progress": {"phase": "starting up — downloading base checkpoint", "elapsed_s": 240}}
+    assert "starting up — downloading base checkpoint" in _watch_line(warm, 240)
+    train = {"progress": {"step": 2000, "total_steps": 10000, "loss": 0.184, "eta_s": 11520}}
+    line = _watch_line(train, 999)
+    assert "step 2,000 / 10,000 (20%)" in line and "loss 0.184" in line
+    assert "waiting" not in line  # once training reports, it's the metrics, not the placeholder
