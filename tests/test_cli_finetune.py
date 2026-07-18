@@ -1334,3 +1334,13 @@ def test_terminal_json_passes_progress_through():
 def test_terminal_json_progress_null_when_absent():
     payload = json.loads(_terminal_json("fc-abc123", _SUCCEEDED))
     assert payload["progress"] is None
+
+
+def test_render_progress_warmup_phase_before_first_step():
+    # Before the first training step, no `step` yet — show the phase + elapsed, not silence.
+    line = _render_progress({"progress": {"phase": "starting up — downloading base checkpoint", "elapsed_s": 240}})
+    assert line == "starting up — downloading base checkpoint  (4m elapsed)"
+    # phase with no elapsed still renders the phase
+    assert _render_progress({"progress": {"active_gate": "train"}}) == "train"
+    # no step and no phase → None (caller falls back to its bare-state line)
+    assert _render_progress({"progress": {"total_steps": 10000}}) is None

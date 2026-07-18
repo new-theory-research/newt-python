@@ -498,6 +498,16 @@ def _render_progress(status: dict) -> str | None:
     if not isinstance(progress, dict):
         return None
 
+    # Warm-up: before the first training step, surface the phase + elapsed so a starting run
+    # isn't a silent "still running" — never a fabricated step/ETA (Rule 10).
+    step_val = progress.get("step")
+    if not (isinstance(step_val, (int, float)) and not isinstance(step_val, bool)):
+        phase = progress.get("phase") or progress.get("active_gate")
+        if not phase:
+            return None
+        elapsed = _fmt_duration(progress.get("elapsed_s"))
+        return f"{phase}" + (f"  ({elapsed} elapsed)" if elapsed else "")
+
     parts: list[str] = []
 
     gate = progress.get("active_gate") or progress.get("gate")
