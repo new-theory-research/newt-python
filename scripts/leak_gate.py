@@ -85,8 +85,8 @@ def hashed(token: str) -> str:
 def denied_tokens(line: str, digests: set[str]) -> list[str]:
     """Tokens on this line whose digest is denylisted.
 
-    Adjacent tokens are also checked joined, so `NT-0`, `nt_0` and `unproject_points`
-    are caught the same as `nt0` and `unprojectpoints` — a separator launders nothing.
+    Adjacent tokens are also checked joined, so a separator launders nothing: if `foobar`
+    is denied, then `foo-bar`, `foo_bar` and `Foo Bar` all trip too.
     """
     tokens = _TOKEN.findall(line.lower())
     candidates = tokens + [a + b for a, b in itertools.pairwise(tokens)]
@@ -158,12 +158,16 @@ def report(findings: list[tuple[str, str, str]]) -> None:
 def self_test() -> int:
     """Prove the gate can still fail. A gate nobody can trip is not a gate."""
     digests = load_terms()
-    # Split so the canary's own literal never survives tokenization of this file.
+    # Every fixture below is assembled at runtime, so no literal in this file matches a
+    # rule this file scans for. The gate scans its own source like any other tracked
+    # file — no self-exemption, because a scanner with a blind spot at its own path is
+    # exactly where residue would hide.
     canary = "leakgatecanary" + "0" * 3
+    modal, workers, org = "modal" + ".run", "workers" + ".dev", "new-theory-" + "research"
     cases = {
-        "modal-app-host": "url = 'wss://someworkspace--someapp-serve.modal.run/stream'",
-        "internal-workspace-host": "docs at https://someplace.newtheory.workers.dev/x",
-        "private-repo-ref": "pip install git+ssh://git@github.com/new-theory-research/some-private-repo.git",
+        "modal-app-host": f"url = 'wss://someworkspace--someapp-serve.{modal}/stream'",
+        "internal-workspace-host": f"docs at https://someplace.newtheory.{workers}/x",
+        "private-repo-ref": f"pip install git+ssh://git@github.com/{org}/some-private-repo.git",
         "internal-term": f"# {canary} appears in a comment with nothing incriminating near it",
     }
     failures = []
@@ -178,12 +182,12 @@ def self_test() -> int:
             probe.unlink()
 
         allowed = root / "allowed.txt"
-        allowed.write_text(f"assert 'x--y.modal.run' not in url  # {ALLOW_PRAGMA}\n")
+        allowed.write_text(f"assert 'x--y.{modal}' not in url  # {ALLOW_PRAGMA}\n")
         if scan_paths([allowed], root, digests):
             failures.append(f"the {ALLOW_PRAGMA} pragma did not suppress a finding")
 
         clean = root / "clean.txt"
-        clean.write_text("a wss://host/stream url and github.com/new-theory-research/newt-python\n")
+        clean.write_text(f"a wss://host/stream url and github.com/{org}/newt-python\n")
         if scan_paths([clean], root, digests):
             failures.append("clean fixture produced a finding — the gate is over-firing")
 
