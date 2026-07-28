@@ -1,0 +1,25 @@
+name: leak-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  leak-gate:
+    name: "Nothing internal reaches the public repo"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Run first: a gate that cannot fail would pass the real scan silently.
+      - name: Self-test — the gate can still catch what it claims
+        run: python scripts/leak_gate.py --self-test
+
+      # Whole tree, not just the diff: residue also arrives via merges and reverts,
+      # where the final push's diff is clean but the tree is not.
+      - name: Scan tracked files
+        run: python scripts/leak_gate.py
