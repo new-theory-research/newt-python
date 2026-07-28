@@ -1,0 +1,19 @@
+# newt-python leak gate — hashed internal-term denylist.
+#
+# One sha256 hex digest per line, of a lowercased token (or of two adjacent tokens
+# joined). scripts/leak_gate.py tokenizes every tracked file and compares digests.
+#
+# Why hashed: a public file listing our internal terms would be a map of what to grep
+# our history for. This is obscurity, not secrecy — short tokens are brute-forceable
+# given the digests. The point is that the public repo does not advertise the terms.
+#
+# Plaintext source + regeneration command live in the private portal repo at
+# wiki/operating-docs/leak-gate-terms.txt. Edit there, regenerate, commit both.
+
+ea922b8f0310de65c1d4fc45ab09a165c2cd109dc47f15d76a236308c19e3403
+60c5cec23f56ef0e9f60f66ef1f3f8509fc51f29cc8d0125c11f26208e152200
+778149271ccce0d590e21a0c3f2e51ecd1747efcde6ebd8035e54fa0d2d099fc
+116ab24e85f33b0c819b735d4472c1d094cb0efb7700e7bd323b7dc32e2cbf47
+dd8dde69334eac6affb2bb1bdc2751860e343771666c4bcacc62253a47091164
+51edc467c4ffa9cd85a6a180b4c74e84c8cf37baac3f3bd8cc3b481dc69da6b4
+bccd9f9303e2585c97d80f5cad4a4033cfbf42b84d4b77e2794b9e68a0af5d30

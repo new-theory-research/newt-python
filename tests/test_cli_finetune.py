@@ -69,7 +69,7 @@ _SUCCEEDED = {
     "status": "succeeded",
     "gate": None,
     "tag": "ft-placeholder-9f2a",
-    "report_card": "gs://ntdeva-reports/fc-abc123/card.json",
+    "report_card": "gs://example-reports/fc-abc123/card.json",
 }
 _FAILED_AT_TRAIN = {"status": "failed", "gate": "train", "tag": None, "report_card": None}
 

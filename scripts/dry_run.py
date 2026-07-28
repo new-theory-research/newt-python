@@ -6,7 +6,7 @@ Drives the full obs→action loop: mock state → newt.Robot → WS /stream → 
 
 Usage:
     export NT_API_KEY=<key>
-    python scripts/dry_run.py wss://newtheory--ntdeva-openpi-serve-serve.modal.run/stream
+    python scripts/dry_run.py wss://<your-inference-endpoint>/stream
 
     # Custom prompt or duration:
     python scripts/dry_run.py <url> --prompt "grasp the block" --max-duration 15
