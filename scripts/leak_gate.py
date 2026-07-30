@@ -45,7 +45,13 @@ TERMS_FILE = Path(__file__).with_name("leak_terms.sha256")
 # Repos under our GitHub org that are genuinely public. Anything else the org owns is
 # private, and naming it here tells outsiders what to go knock on. Adding to this set is
 # a deliberate act: confirm the repo is public first.
-PUBLIC_REPOS = {"newt-python", "lerobot"}
+PUBLIC_REPOS = {
+    "newt-python",
+    "lerobot",
+    "newt-starter-so101",
+    "newt-starter-yam",
+    "newt-starter-yam-bimanual",
+}
 
 # Each rule owns its own message — two different causes must never print the same string.
 STRUCTURAL_RULES = [
