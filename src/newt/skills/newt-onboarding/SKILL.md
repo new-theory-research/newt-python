@@ -21,9 +21,11 @@ The finish line for milestone 1 is: **you have communicated with the API and it 
 
 ### Step 1 — Install newt
 
+<!-- hardware-specific-start -->
 ```bash
 uv tool install "git+https://github.com/new-theory-research/newt-python.git"
 ```
+<!-- hardware-specific-end -->
 
 Need `uv`? `curl -LsSf https://astral.sh/uv/install.sh | sh` then `source $HOME/.local/bin/env`.
 
@@ -51,18 +53,22 @@ Use `newt status` to diagnose auth or connectivity issues — it shows key sourc
 
 The `newt` Python library installs into a project. Create one if you don't have it:
 
+<!-- hardware-specific-start -->
 ```bash
 uv init my-robot
 cd my-robot
 uv add "newt @ git+https://github.com/new-theory-research/newt-python.git"
 ```
+<!-- hardware-specific-end -->
 
 Then confirm the API answers:
 
+<!-- hardware-specific-start -->
 ```bash
 uv run python -c "from newt import Robot; print(Robot())"
 # so101 · contract received · (30,6) · 6 labeled axes
 ```
+<!-- hardware-specific-end -->
 
 `Robot()` reads the credentials `newt login` created — no second login, no shell export. **You've successfully communicated with the API.** Some developers stop here.
 
