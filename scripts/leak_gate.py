@@ -51,6 +51,7 @@ PUBLIC_REPOS = {
     "newt-starter-so101",
     "newt-starter-yam",
     "newt-starter-yam-bimanual",
+    "lerobot-nt",
 }
 
 # Each rule owns its own message — two different causes must never print the same string.
