@@ -30,6 +30,8 @@ import time
 import tty
 from pathlib import Path
 
+from newt._cli._source_spec import load_source
+
 
 def _usage() -> None:
     print("Usage: newt record [options]")
@@ -98,43 +100,9 @@ def _parse(args: list[str]) -> dict:
     return opts
 
 
-def _load_source(spec: str):
-    """Import a developer's ``RecordingSource`` from a ``module:factory`` spec
-    and construct it. The factory is called with no arguments — it owns
-    producing a fully formed source (descriptor included) for whatever rig it
-    wraps; the CLI never guesses at embodiment shape.
-
-    Every failure point names the spec and what went wrong (Rule 10) — no
-    silent fallback to simulate. Raises; the caller (``cmd_record``) renders
-    the message and exits, the same loud-not-traced path used for the missing-
-    extra lantern today."""
-    import importlib
-
-    if ":" not in spec:
-        raise ValueError(
-            f"--source {spec!r} is not MODULE:FACTORY shaped — expected e.g. "
-            "'mypkg.rig:make_source'"
-        )
-    module_name, _, factory_name = spec.partition(":")
-    try:
-        module = importlib.import_module(module_name)
-    except Exception as exc:
-        raise RuntimeError(
-            f"--source {spec!r}: failed to import module {module_name!r}: {exc}"
-        ) from exc
-    try:
-        factory = getattr(module, factory_name)
-    except AttributeError:
-        raise RuntimeError(
-            f"--source {spec!r}: module {module_name!r} has no attribute {factory_name!r}"
-        ) from None
-    try:
-        return factory()
-    except Exception as exc:
-        raise RuntimeError(
-            f"--source {spec!r}: factory {factory_name!r} raised while constructing "
-            f"the source: {exc}"
-        ) from exc
+# The MODULE:FACTORY contract lives in _source_spec — one definition, two verbs.
+# This alias stays because it is the name the frontend and its tests call.
+_load_source = load_source
 
 
 def _build_session(opts: dict):
