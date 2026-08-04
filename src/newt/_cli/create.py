@@ -19,6 +19,12 @@ can read a private starter kit, so it is what resolves names and serves those
 kits — the developer's ``nt_`` key is the whole story, and GitHub identity never
 enters it. When the console is unreachable, public templates still fetch direct
 from a small offline table; private ones fail with a string that says so.
+
+**Where the verb stops.** Every question about a rig — which arm is the leader,
+what the cameras are called, which values still need measuring — is asked by the
+kit's own setup step, and this verb's entire involvement is to hand it arguments
+it never reads. That handoff is at the bottom of this file, and it is deliberately
+the dumbest code here: an argv list, a working directory, and an exit code.
 """
 from __future__ import annotations
 
@@ -56,10 +62,13 @@ EXIT_KEY_REJECTED = 5
 EXIT_TARGET_EXISTS = 6
 EXIT_FETCH_FAILED = 7
 EXIT_BAD_ARCHIVE = 8
+EXIT_NO_SETUP_STEP = 9
+EXIT_SETUP_UNRUNNABLE = 10
+EXIT_SETUP_REFUSED = 11
 
 
 def _usage() -> None:
-    print("Usage: newt create <template> [directory]")
+    print("Usage: newt create <template> [directory] [--setup [-- kit arguments...]]")
     print("")
     print("  Fetch a starter kit at a pinned commit and unpack it into a directory")
     print("  that is yours: no git remote pointing back at us, no history of ours,")
@@ -72,9 +81,24 @@ def _usage() -> None:
     print("  The directory defaults to the template name, and must not already exist")
     print("  with anything in it.")
     print("")
+    print("  Every kit carries its own setup step at scripts/setup — that is what asks")
+    print("  about your rig, and this command never does. By default it is printed as")
+    print("  the next thing to run; --setup runs it here instead.")
+    print("")
     print("Options:")
     print("  --no-git   Leave the directory inert — do not run 'git init' in it")
-    print("  --json     Emit machine-readable JSON")
+    print("  --setup    Run the kit's own setup step after unpacking")
+    print("  --json     Emit machine-readable JSON (cannot be combined with --setup)")
+    print("")
+    print("  Any argument this command does not recognize is handed to the kit's setup")
+    print("  step untouched, and asking for that implies --setup:")
+    print("      newt create <template> <dir> --some-kit-flag value --non-interactive")
+    print("  The first unrecognized argument starts the handoff; everything after it")
+    print("  goes to the kit. Use '--' when the kit wants an argument this command also")
+    print("  owns, such as --json:")
+    print("      newt create <template> <dir> --setup -- --json --non-interactive")
+    print("  Run the kit's setup step with --help to see what it accepts; it differs")
+    print("  per kit, and this command has no list of them.")
     print("")
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials)")
@@ -90,6 +114,9 @@ def _usage() -> None:
     print("  6    the directory already exists and is not empty")
     print("  7    the kit's archive could not be downloaded")
     print("  8    the downloaded archive was not the shape a starter kit has")
+    print("  9    the kit landed, but it declares no setup step to run")
+    print("  10   the kit landed, but its setup step could not be started")
+    print("  11   the kit landed, and its setup step exited non-zero")
 
 
 def _console_url() -> str:
@@ -558,6 +585,162 @@ def _say_bad_archive(name: str, exc: BadArchive) -> None:
     print("        Fix: run the same command again; report it if it repeats.", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# The handoff — the kit's setup step, and the arguments this verb refuses to read.
+#
+# The kit is where rig knowledge lives, so the kit is where the asking happens.
+# A template declares its setup step by shipping one: an executable ``scripts/setup``
+# at its root. That is the whole declaration — no manifest, no schema, no version
+# negotiation. The cost of that choice is one file: a kit whose real entry point is
+# somewhere else adds a shim at that path. What it buys is that adding a starter kit
+# is still a registry row and never an SDK release, and that nothing about a kit's
+# setup has a second copy over here to drift.
+#
+# Arguments are forwarded verbatim. This verb does not know what any of them mean
+# and must never learn: the moment it parses one — an arm's address, a camera's
+# serial, how many of either there are — a fact about one rig has been compiled
+# into a library that is supposed to work for every rig.
+# ---------------------------------------------------------------------------
+
+_SETUP_REL = ("scripts", "setup")
+_SETUP_DISPLAY = "./" + "/".join(_SETUP_REL)
+
+
+class SetupUnrunnable(Exception):
+    """The setup step is declared but the OS would not start it."""
+
+
+def _setup_step(dest: pathlib.Path) -> pathlib.Path | None:
+    path = dest.joinpath(*_SETUP_REL)
+    return path if path.is_file() else None
+
+
+def _run_setup(dest: pathlib.Path, script: pathlib.Path, forwarded: list[str]) -> int:
+    """Run the kit's setup step in the kit's directory and return its exit code.
+
+    Standard streams are inherited, so what a developer reads is the kit's own
+    report — including where it put its configuration. This verb does not choose
+    that location, does not write the file, and does not paraphrase what happened.
+    """
+    if not os.access(script, os.X_OK):
+        raise SetupUnrunnable("it is not executable")
+    print("")
+    print(f"Running the kit's setup step: {' '.join([_SETUP_DISPLAY, *forwarded])}")
+    print("  Everything below is the kit's own output, including where it writes its")
+    print("  configuration — that is the kit's choice, not this command's.")
+    print("")
+    sys.stdout.flush()
+    try:
+        proc = subprocess.run([str(script), *forwarded], cwd=str(dest))
+    except OSError as exc:
+        raise SetupUnrunnable(str(exc)) from exc
+    return proc.returncode
+
+
+def _say_no_setup_step(name: str, dest: pathlib.Path, forwarded: list[str]) -> None:
+    print(
+        f"newt create: the {name!r} starter kit declares no setup step to run.",
+        file=sys.stderr,
+    )
+    print(
+        f"        A kit declares one by shipping an executable {_SETUP_DISPLAY}, and "
+        f"{dest} has no such file. Not every kit has one.",
+        file=sys.stderr,
+    )
+    if forwarded:
+        print(
+            f"        Nothing consumed these, so they were not applied: {' '.join(forwarded)}",
+            file=sys.stderr,
+        )
+    print(
+        f"        The kit itself is on disk and intact — this is only about the step "
+        f"you asked to run. Fix: read {dest}/README.md for what this kit wants next.",
+        file=sys.stderr,
+    )
+
+
+def _say_setup_unrunnable(name: str, dest: pathlib.Path, reason: str) -> None:
+    print(
+        f"newt create: the {name!r} kit's setup step at {dest / pathlib.Path(*_SETUP_REL)} "
+        f"could not be started — {reason}.",
+        file=sys.stderr,
+    )
+    print(
+        "        It was never launched, so nothing it does has happened. The kit "
+        "itself is on disk and intact.",
+        file=sys.stderr,
+    )
+    print(
+        f"        Fix: chmod +x {dest / pathlib.Path(*_SETUP_REL)} and run it yourself, "
+        "and report it — an unrunnable setup step is the kit's bug, not yours.",
+        file=sys.stderr,
+    )
+
+
+def _say_setup_refused(name: str, dest: pathlib.Path, code: int, forwarded: list[str]) -> None:
+    print(
+        f"newt create: the {name!r} kit's setup step ran and exited {code}.",
+        file=sys.stderr,
+    )
+    print(
+        "        Its own output above says what it wanted; this command forwards "
+        "arguments to it and does not read them, so it cannot say more than that.",
+        file=sys.stderr,
+    )
+    print(
+        f"        The kit is on disk and intact — do not run newt create again. Fix "
+        f"what it named, then run it directly:",
+        file=sys.stderr,
+    )
+    print(
+        f"            cd {dest} && {' '.join([_SETUP_DISPLAY, *forwarded])}",
+        file=sys.stderr,
+    )
+
+
+def _print_setup_next(dest: pathlib.Path, script: pathlib.Path | None) -> None:
+    """The default path: say what the next step is instead of taking it.
+
+    Running a script that arrived seconds ago, which writes configuration outside
+    the directory that was asked for, is not something a "make me a directory"
+    command should do without being told to.
+    """
+    print("")
+    if script is None:
+        print("  This kit ships no setup step. What it wants next is in its README:")
+        print(f"      {dest}/README.md")
+        return
+    print("  Next — the kit's own setup step, which is the part that knows your rig:")
+    print(f"      cd {dest} && {_SETUP_DISPLAY}")
+    print(f"  Run it with --help first to see what it asks for. Add --setup to")
+    print("  'newt create' to have it run right after unpacking instead.")
+
+
+def _handoff(
+    name: str, dest: pathlib.Path, run_it: bool, forwarded: list[str]
+) -> int:
+    script = _setup_step(dest)
+
+    if not run_it:
+        _print_setup_next(dest, script)
+        return EXIT_OK
+
+    if script is None:
+        _say_no_setup_step(name, dest, forwarded)
+        return EXIT_NO_SETUP_STEP
+
+    try:
+        code = _run_setup(dest, script, forwarded)
+    except SetupUnrunnable as exc:
+        _say_setup_unrunnable(name, dest, str(exc))
+        return EXIT_SETUP_UNRUNNABLE
+
+    if code != 0:
+        _say_setup_refused(name, dest, code, forwarded)
+        return EXIT_SETUP_REFUSED
+    return EXIT_OK
+
+
 def _acquire(
     template: Template,
     name: str,
@@ -567,6 +750,8 @@ def _acquire(
     *,
     do_git: bool,
     as_json: bool,
+    run_setup: bool,
+    forwarded: list[str],
 ) -> int:
     """Fetch, unpack, and say plainly what landed and where."""
     if dest.exists() and any(dest.iterdir()):
@@ -607,6 +792,11 @@ def _acquire(
     git_state = _git_init(dest) if do_git else "skipped: --no-git"
 
     if as_json:
+        # --json never runs the setup step (refused up front in cmd_create), so this
+        # payload describes a directory and names the command an agent runs next —
+        # two clean machine-readable steps rather than one with a kit's report
+        # spliced into the middle of it.
+        script = _setup_step(dest)
         print(
             json.dumps(
                 {
@@ -617,6 +807,11 @@ def _acquire(
                     "files": files,
                     "git": git_state,
                     "remote": None,
+                    "setup": {
+                        "declared": "/".join(_SETUP_REL) if script else None,
+                        "ran": False,
+                        "next": f"cd {dest} && {_SETUP_DISPLAY}" if script else None,
+                    },
                 }
             )
         )
@@ -639,23 +834,154 @@ def _acquire(
     else:
         print("")
         print(f"  NOT a git repository (--no-git). Run 'git init {dest}' if you want one.")
-    return EXIT_OK
+
+    return _handoff(name, dest, run_setup, forwarded)
+
+
+_OWN_FLAGS = ("--json", "--no-git", "--setup", "-h", "--help")
+
+
+class _Args:
+    """What this verb read, and what it refused to read.
+
+    ``forwarded`` is the second half of the command line — the kit's half. The
+    split is positional: the first argument this verb does not recognize ends its
+    own reading and everything from there on belongs to the kit, and ``--`` forces
+    that split early for a kit that wants an argument this verb also owns. The rule
+    is one sentence long on purpose; a cleverer one would need this verb to know
+    which forwarded flags take values, which is knowing about rigs.
+    """
+
+    def __init__(self) -> None:
+        self.help = False
+        self.as_json = False
+        self.do_git = True
+        self.setup = False
+        self.positional: list[str] = []
+        self.forwarded: list[str] = []
+
+
+def _parse(args: list[str]) -> _Args:
+    parsed = _Args()
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            parsed.forwarded = args[i + 1 :]
+            break
+        if a in _OWN_FLAGS:
+            if a in ("-h", "--help"):
+                parsed.help = True
+            elif a == "--json":
+                parsed.as_json = True
+            elif a == "--no-git":
+                parsed.do_git = False
+            else:
+                parsed.setup = True
+            i += 1
+            continue
+        if a.startswith("-"):
+            parsed.forwarded = args[i:]
+            break
+        parsed.positional.append(a)
+        i += 1
+    return parsed
+
+
+def _say_too_many_positionals(positional: list[str]) -> None:
+    print(
+        f"newt create: takes a template and at most one directory; got "
+        f"{len(positional)} arguments ({', '.join(positional)}).",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was written. Arguments for the kit's setup step start at the "
+        "first flag, so a bare word after the directory belongs to nothing.",
+        file=sys.stderr,
+    )
+    print(
+        f"        Fix: newt create {positional[0]} {positional[1]} "
+        f"-- {' '.join(positional[2:])}   (if those were meant for the kit)",
+        file=sys.stderr,
+    )
+
+
+def _say_json_cannot_run_setup() -> None:
+    print(
+        "newt create: --json cannot be combined with running the kit's setup step.",
+        file=sys.stderr,
+    )
+    print(
+        "        --json is this command's report on stdout, and the kit's setup step "
+        "writes its own report to the same place; splicing them would give you "
+        "neither.",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was written. Fix: run them as two steps — 'newt create "
+        "<template> <dir> --json' names the setup command in its output, then run "
+        "that command yourself.",
+        file=sys.stderr,
+    )
+
+
+def _say_no_template_named(forwarded: list[str]) -> None:
+    print(
+        f"newt create: no template named — the arguments given "
+        f"({' '.join(forwarded)}) are for a kit's setup step, and no kit was asked for.",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was written. Fix: put the template name first — "
+        "newt create <template> [directory] "
+        f"{' '.join(forwarded)}",
+        file=sys.stderr,
+    )
+    print("        Run 'newt create' with no arguments to see the templates.", file=sys.stderr)
 
 
 def cmd_create(args: list[str]) -> int:
-    if any(a in ("-h", "--help") for a in args):
+    parsed = _parse(args)
+    if parsed.help:
         _usage()
         return EXIT_OK
 
-    as_json = "--json" in args
-    do_git = "--no-git" not in args
-    positional = [a for a in args if not a.startswith("-")]
+    as_json = parsed.as_json
+    do_git = parsed.do_git
+    positional = parsed.positional
+    forwarded = parsed.forwarded
+    # Handing the kit arguments is asking for it to run. A flag that was accepted
+    # and then quietly dropped because --setup was missing is the silent kind of
+    # failure this verb is not allowed to have.
+    run_setup = parsed.setup or bool(forwarded)
 
     console = _console_url()
     api_key = _resolve_key()
 
     if not positional:
+        if forwarded:
+            _say_no_template_named(forwarded)
+            return EXIT_USAGE
+        if parsed.setup:
+            print(
+                "newt create: --setup runs a kit's setup step, and no kit was named.",
+                file=sys.stderr,
+            )
+            print(
+                "        Nothing was written. Fix: newt create <template> [directory] "
+                "--setup, or drop --setup to list the templates.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
         return _list_templates(console, api_key, as_json)
+
+    if len(positional) > 2:
+        _say_too_many_positionals(positional)
+        return EXIT_USAGE
+
+    if as_json and run_setup:
+        _say_json_cannot_run_setup()
+        return EXIT_USAGE
 
     name = positional[0]
     dest = _resolve_target(name, positional[1] if len(positional) > 1 else None)
@@ -702,5 +1028,13 @@ def cmd_create(args: list[str]) -> int:
         return EXIT_FETCH_FAILED
 
     return _acquire(
-        template, name, console, api_key, dest, do_git=do_git, as_json=as_json
+        template,
+        name,
+        console,
+        api_key,
+        dest,
+        do_git=do_git,
+        as_json=as_json,
+        run_setup=run_setup,
+        forwarded=forwarded,
     )
