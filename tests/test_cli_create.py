@@ -762,3 +762,375 @@ def test_acquisition_added_no_robot_knowledge_to_the_verb(monkeypatch, tmp_path)
     rc, out, err = _capture(["brand-new-arm", str(tmp_path / "new")], monkeypatch)
     assert rc == create_mod.EXIT_OK, err
     assert (tmp_path / "new" / "README.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# The handoff — the kit's setup step, and the arguments the verb never reads
+#
+# This is where Invariant 1 is most likely to break, because the mandate wants a
+# create flow that asks about arm IPs and camera IDs and this verb is forbidden to
+# know what either of those is. The resolution is that the asking belongs to the
+# kit and the verb's whole job is to hand over an argv list it never looks at.
+# What follows tests the seam from both sides: the arguments arrive intact, and
+# nothing about a rig ever gets read on the way.
+# ---------------------------------------------------------------------------
+
+_SETUP_OK = "#!/bin/sh\nprintf 'kit setup ran: %s\\n' \"$*\"\nexit 0\n"
+
+
+def _kit_tarball(root="starter-alpha-abc123", setup=None, mode=0o755, files=None):
+    """A GitHub-shaped archive that can carry a real, executable setup step.
+
+    ``_tarball`` above cannot set a mode bit, and the exec bit is exactly what
+    "this kit declares a setup step" means here — so these tests build their own.
+    """
+    files = dict(files if files is not None else {"README.md": "# Alpha starter kit\n"})
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel, body in files.items():
+            data = body.encode()
+            info = tarfile.TarInfo(f"{root}/{rel}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        if setup is not None:
+            data = setup.encode()
+            info = tarfile.TarInfo(f"{root}/scripts/setup")
+            info.size = len(data)
+            info.mode = mode
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _public_alpha(monkeypatch, archive):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, archive)
+
+
+def _records_setup(monkeypatch):
+    """Stub the subprocess call, capturing exactly what would have been run."""
+    seen = {}
+    real = create_mod.subprocess.run
+
+    def _run(cmd, **kw):
+        if cmd and str(cmd[0]).endswith("scripts/setup"):
+            seen["argv"] = list(cmd)
+            seen["cwd"] = kw.get("cwd")
+            return subprocess.CompletedProcess(cmd, 0)
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(create_mod.subprocess, "run", _run)
+    return seen
+
+
+# --- the default: say what the next step is, don't take it ------------------
+
+def test_the_setup_step_does_not_run_unless_it_is_asked_for(monkeypatch, tmp_path):
+    """A script that arrived seconds ago, which writes configuration outside the
+    directory that was asked for, does not get to run on 'make me a directory'."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k")], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert "argv" not in seen, "the setup step ran without being asked"
+    assert "./scripts/setup" in out, f"the next step must be named: {out!r}"
+
+
+def test_a_kit_with_no_setup_step_points_at_its_readme_instead(monkeypatch, tmp_path):
+    """Not every kit ships one — the yam starter does not — and that is information,
+    not a refusal."""
+    _public_alpha(monkeypatch, _kit_tarball())
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k")], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert "README" in out
+    assert "./scripts/setup" not in out, "a kit with no setup step must not be told to run one"
+
+
+# --- the handoff itself -----------------------------------------------------
+
+def test_setup_runs_in_the_kits_directory_when_asked(monkeypatch, tmp_path):
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--setup"], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["argv"] == [str(tmp_path / "k" / "scripts" / "setup")]
+    assert seen["cwd"] == str(tmp_path / "k"), "setup must run inside the kit it configures"
+
+
+def test_rig_flags_reach_the_kit_verbatim_and_in_order(monkeypatch, tmp_path):
+    """The invariant, as a string comparison. Every one of these arguments is a fact
+    about a robot, and the proof the verb did not learn any of them is that it
+    passed them through without changing a character or reordering a pair."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rig = ["--leader-ip", "10.0.0.2", "--follower-ip", "10.0.0.3",
+           "--camera", "right-wrist=1234", "--non-interactive"]
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), *rig], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["argv"][1:] == rig, f"arguments were not forwarded intact: {seen['argv']!r}"
+
+
+def test_giving_the_kit_arguments_is_asking_for_it_to_run(monkeypatch, tmp_path):
+    """Accepting a flag and then dropping it because --setup was missing is the
+    silent failure Rule 10 exists to forbid."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--leader-ip", "10.0.0.2"], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["argv"][1:] == ["--leader-ip", "10.0.0.2"]
+
+
+def test_a_double_dash_hands_over_an_argument_this_verb_also_owns(monkeypatch, tmp_path):
+    """Both kits' setup steps take --json, and so does this verb. Without an escape
+    hatch a kit could never be asked for its own machine-readable report."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rc, out, err = _capture(
+        ["alpha", str(tmp_path / "k"), "--setup", "--", "--json", "--non-interactive"],
+        monkeypatch,
+    )
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["argv"][1:] == ["--json", "--non-interactive"]
+
+
+def test_the_verb_stops_reading_at_the_first_argument_it_does_not_know(monkeypatch, tmp_path):
+    """One sentence of parsing rule, tested: --no-git after a forwarded flag is the
+    kit's. A verb clever enough to pick it back out would have to know which
+    forwarded flags take values, which is knowing about rigs."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rc, out, err = _capture(
+        ["alpha", str(tmp_path / "k"), "--leader-ip", "10.0.0.2", "--no-git"], monkeypatch
+    )
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["argv"][1:] == ["--leader-ip", "10.0.0.2", "--no-git"]
+    assert (tmp_path / "k" / ".git").exists(), "--no-git after the handoff was the kit's, not ours"
+
+
+# --- flags only, no TTY, all the way through --------------------------------
+
+def test_a_flags_only_run_completes_with_no_tty(monkeypatch, tmp_path):
+    """The agent door, end to end and unstubbed: a real archive, a real unpack, a
+    real process, and a file on disk that only the kit's setup step could have
+    written. Nothing here reads a keyboard."""
+    marker_script = (
+        "#!/bin/sh\n"
+        "printf '%s' \"$*\" > setup-was-here.txt\n"
+    )
+    _public_alpha(monkeypatch, _kit_tarball(setup=marker_script))
+
+    dest = tmp_path / "k"
+    rc, out, err = _capture(
+        ["alpha", str(dest), "--leader-ip", "10.0.0.2", "--non-interactive"], monkeypatch
+    )
+    assert rc == create_mod.EXIT_OK, err
+    written = (dest / "setup-was-here.txt").read_text()
+    assert written == "--leader-ip 10.0.0.2 --non-interactive", written
+
+
+def test_a_non_interactive_run_missing_an_input_names_the_flag_and_never_prompts(
+    monkeypatch, tmp_path, capfd
+):
+    """The kit is what knows an input is required, so the kit is what names it —
+    and this verb's job is to let that sentence through and exit non-zero rather
+    than reporting a directory it made as a success.
+
+    "Does not prompt" is checked twice: this run has no usable stdin and would
+    hang forever if anything asked a question, and
+    ``test_the_verb_asks_no_questions_of_its_own`` asserts the verb holds no
+    prompt of its own to ask.
+    """
+    demanding = (
+        "#!/bin/sh\n"
+        "for a in \"$@\"; do [ \"$a\" = \"--leader-ip\" ] && exit 0; done\n"
+        "echo 'setup: --leader-ip is required with --non-interactive' >&2\n"
+        "exit 2\n"
+    )
+    _public_alpha(monkeypatch, _kit_tarball(setup=demanding))
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--non-interactive"], monkeypatch)
+    assert rc == create_mod.EXIT_SETUP_REFUSED, f"a refused setup step is not a success: {out!r}"
+    assert rc != 0
+    kit_output = capfd.readouterr().err
+    assert "--leader-ip" in kit_output, f"the kit's own sentence was swallowed: {kit_output!r}"
+    assert "exited 2" in err, f"newt must say what happened, not just pass it on: {err!r}"
+    assert str(tmp_path / "k") in err, "the developer needs to be told the kit is already there"
+
+
+def test_the_verb_asks_no_questions_of_its_own():
+    """No prompt schema in ``newt``, asserted at the source. A prompt here would be
+    a prompt with no flag equivalent and, worse, a prompt that had to know what it
+    was asking about."""
+    source = pathlib.Path(create_mod.__file__).read_text()
+    assert "input(" not in source, "newt create must not prompt — the kit's setup step does that"
+    for rig_flag in ("--leader-ip", "--follower-ip", "--camera-serial", "--rig-name"):
+        assert rig_flag not in source, f"{rig_flag} is a fact about a robot; it cannot live here"
+
+
+# --- the refusals this task adds --------------------------------------------
+
+def test_asking_a_kit_with_no_setup_step_to_run_one_is_a_named_refusal(monkeypatch, tmp_path):
+    _public_alpha(monkeypatch, _kit_tarball())
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--setup"], monkeypatch)
+    assert rc == create_mod.EXIT_NO_SETUP_STEP
+    assert "declares no setup step" in err
+    assert "intact" in err, "the kit did land; say so"
+
+
+def test_arguments_nothing_can_consume_are_named_not_swallowed(monkeypatch, tmp_path):
+    """The brief's own case: a flag the verb doesn't recognize is the template's
+    business, and a flag *nothing* recognizes has to be said out loud."""
+    _public_alpha(monkeypatch, _kit_tarball())
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--leader-ip", "10.0.0.2"], monkeypatch)
+    assert rc == create_mod.EXIT_NO_SETUP_STEP
+    assert "--leader-ip 10.0.0.2" in err, f"dropped arguments must be quoted back: {err!r}"
+
+
+def test_a_setup_step_that_cannot_be_started_is_not_a_setup_step_that_failed(
+    monkeypatch, tmp_path
+):
+    """Two different problems: one is a kit that shipped a file without its exec bit,
+    the other is a kit that ran and said no. They have different fixes."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK, mode=0o644))
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--setup"], monkeypatch)
+    assert rc == create_mod.EXIT_SETUP_UNRUNNABLE
+    assert "not executable" in err
+    assert "never launched" in err, "nothing ran, so say nothing ran"
+
+
+def test_json_and_the_setup_step_refuse_to_share_stdout(monkeypatch, tmp_path):
+    """Both write a report to stdout. Splicing them gives an agent neither, so this
+    is refused before anything is fetched rather than producing unparseable output."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    dest = tmp_path / "k"
+
+    rc, out, err = _capture(["alpha", str(dest), "--json", "--setup"], monkeypatch)
+    assert rc == create_mod.EXIT_USAGE
+    assert not dest.exists(), "a usage refusal must not leave a directory behind"
+    assert "two steps" in err, "name the way through, not just the wall"
+
+
+def test_json_names_the_setup_command_it_did_not_run(monkeypatch, tmp_path):
+    """The agent's second step, in the payload, so it never has to guess the path."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    dest = tmp_path / "k"
+
+    rc, out, err = _capture(["alpha", str(dest), "--json"], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    setup = json.loads(out)["setup"]
+    assert setup == {
+        "declared": "scripts/setup",
+        "ran": False,
+        "next": f"cd {dest} && ./scripts/setup",
+    }
+
+
+def test_json_says_plainly_when_a_kit_declares_no_setup_step(monkeypatch, tmp_path):
+    _public_alpha(monkeypatch, _kit_tarball())
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "--json"], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert json.loads(out)["setup"] == {"declared": None, "ran": False, "next": None}
+
+
+def test_kit_arguments_with_no_kit_named_are_refused_before_anything_is_written(
+    monkeypatch, tmp_path
+):
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+
+    rc, out, err = _capture(["--leader-ip", "10.0.0.2"], monkeypatch)
+    assert rc == create_mod.EXIT_USAGE
+    assert "no kit was asked for" in err
+    assert "--leader-ip 10.0.0.2" in err
+
+
+def test_setup_with_no_kit_named_is_its_own_refusal(monkeypatch):
+    rc, out, err = _capture(["--setup"], monkeypatch)
+    assert rc == create_mod.EXIT_USAGE
+    assert "no kit was named" in err
+
+
+def test_a_third_bare_word_is_refused_rather_than_dropped(monkeypatch, tmp_path):
+    """Forwarding starts at the first flag, so a bare word after the directory
+    belongs to nothing at all. Silently ignoring it is how a developer discovers an
+    hour later that their argument never arrived."""
+    _public_alpha(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "k"), "extra"], monkeypatch)
+    assert rc == create_mod.EXIT_USAGE
+    assert "at most one directory" in err
+    assert not (tmp_path / "k").exists()
+
+
+def test_every_refusal_across_the_whole_verb_shares_no_string(monkeypatch, tmp_path):
+    """Rule 12 over the finished surface — resolution, acquisition, and the handoff.
+    Twelve causes, twelve opening lines, collected from real runs so that a future
+    edit collapsing two of them fails here instead of in someone's terminal."""
+    from urllib.error import URLError
+
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    collected = []
+
+    def _run(args):
+        collected.append(_capture(args, monkeypatch)[2])
+
+    _no_key(monkeypatch)
+    _serves(monkeypatch, _kit_tarball(setup=_SETUP_OK))
+    _run(["nope", str(tmp_path / "a")])
+    _run(["beta-private", str(tmp_path / "b")])
+    _run(["alpha", str(tmp_path / "c"), "--json", "--setup"])
+    _run(["alpha", str(tmp_path / "d"), "one", "two"])
+    _run(["--leader-ip", "10.0.0.2"])
+    _run(["--setup"])
+
+    occupied = tmp_path / "e"
+    occupied.mkdir()
+    (occupied / "x").write_text("x")
+    _run(["alpha", str(occupied)])
+
+    _raises(monkeypatch, _http_error(404, "Not Found"))
+    _run(["alpha", str(tmp_path / "f")])
+    _raises(monkeypatch, URLError("Connection reset by peer"))
+    _run(["alpha", str(tmp_path / "g")])
+    _serves(monkeypatch, b"not-a-tarball")
+    _run(["alpha", str(tmp_path / "h")])
+
+    _serves(monkeypatch, _kit_tarball())
+    _run(["alpha", str(tmp_path / "i"), "--setup"])
+    _serves(monkeypatch, _kit_tarball(setup=_SETUP_OK, mode=0o644))
+    _run(["alpha", str(tmp_path / "j"), "--setup"])
+    _serves(monkeypatch, _kit_tarball(setup="#!/bin/sh\nexit 3\n"))
+    _run(["alpha", str(tmp_path / "l"), "--setup"])
+
+    firsts = [s.splitlines()[0] for s in collected]
+    assert len(set(firsts)) == len(firsts), f"two causes share a message: {firsts}"
+
+
+def test_the_handoff_added_no_robot_knowledge_to_the_verb(monkeypatch, tmp_path):
+    """The fence, checked once more now that rig arguments pass through the verb:
+    a second body is still a registry row, and the handoff code is the same code
+    for a two-armed teleop rig as for a single-arm follower."""
+    _no_key(monkeypatch)
+    _console_returns(
+        monkeypatch,
+        {"templates": [{"name": "brand-new-arm", "visibility": "public",
+                        "repo": "org/newt-starter-brand-new-arm", "ref": "b" * 40}]},
+    )
+    _serves(monkeypatch, _kit_tarball(root="newt-starter-brand-new-arm-bbb", setup=_SETUP_OK))
+    seen = _records_setup(monkeypatch)
+
+    rc, out, err = _capture(
+        ["brand-new-arm", str(tmp_path / "new"), "--whatever-this-rig-wants", "7"], monkeypatch
+    )
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["argv"][1:] == ["--whatever-this-rig-wants", "7"]
