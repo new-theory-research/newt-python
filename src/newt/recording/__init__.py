@@ -19,6 +19,12 @@ The public surface:
                           cloud namespace via a server-minted signed URL per
                           file; never holds the GCS write credential.
 - ``CameraSpec``       — a configured RGB camera (lazy; needs the extra).
+- ``CameraOpenError``  — what a source raises when a camera it declared will not
+                          open; refusing the run rather than recording a quietly
+                          state-only episode.
+- ``CameraCaptureFailed`` — what ``end_episode(keep=True)`` raises when the camera
+                          bridge died mid-episode, so nothing is committed whose
+                          video ends before its joints do.
 - ``validate``         — validate an NT v0.0.3 episode directory (lazy; needs the extra).
 
 ``import newt`` stays featherweight: it does NOT import this package, and importing
@@ -34,6 +40,8 @@ from newt.recording._lantern import RecordingExtraMissing
 from newt.recording._seam import (
     BIMANUAL_DESCRIPTOR,
     SINGLE_ARM_DESCRIPTOR,
+    CameraCaptureFailed,
+    CameraOpenError,
     JointState,
     RecordingSource,
     SimulatedSource,
@@ -45,6 +53,8 @@ from newt.recording._sink import LocalSink, Sink
 
 __all__ = [
     "BIMANUAL_DESCRIPTOR",
+    "CameraCaptureFailed",
+    "CameraOpenError",
     "CameraSpec",
     "DEFAULT_STATE_HZ",
     "JointState",
