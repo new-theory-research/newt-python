@@ -169,7 +169,22 @@ def _require_source(source: Any) -> list[MovingPart]:
                 "and send_action(). See newt.teleop.TeleopSource."
             )
 
-    parts = list(source.moving_parts())
+    try:
+        parts = list(source.moving_parts())
+    except Exception as exc:
+        raise TeleopError(
+            f"The source could not say what its moving parts are "
+            f"({type(exc).__name__}: {exc}).\n"
+            "Yours: moving_parts() raised. If it queries the rig to build that list, the "
+            "rig did not answer.\n"
+            "Do now: nothing has been read and nothing has been driven — but whatever the "
+            "factory connected is still connected, and this verb was never told what it "
+            "could stop, so it has de-energized nothing. Power the rig down at the wall if "
+            "it may be holding.\n"
+            "Then: make moving_parts() a statement about the rig rather than a query of "
+            "it — declare the parts the factory already brought up."
+        ) from exc
+
     if not parts:
         raise TeleopError(
             "The source declares no moving parts, so there is nothing this verb could "
@@ -425,16 +440,37 @@ def run_session(
         print(f"\n[newt teleop] {exc}", file=sys.stderr)
         return 1
 
-    print(
-        f"[newt teleop] live at {rate_hz:g} Hz — {source.describe()}. "
-        "Ctrl+C to end (it puts the rig away first), Ctrl+H to kill (it does not).",
-        flush=True,
-    )
-
     tally = Tally()
     outcome = "error"
+    # Bound before the try, because the summary names the rig on every path —
+    # including the one where asking the rig its name is what failed.
+    rig = "unnamed (the source could not describe itself)"
     started = time.perf_counter()
     try:
+        # Asked once, inside the try that owns the ending. Once, because the
+        # banner and the summary must name the same rig and a description may be
+        # a round trip to hardware rather than a constant. Inside, because by
+        # here the factory has connected and the parts are declared: a
+        # describe() that queries a rig can fail with that rig energized, and
+        # every such path has to reach the halt instead of a traceback.
+        try:
+            rig = str(source.describe())
+        except Exception as exc:
+            raise TeleopError(
+                f"The source could not describe itself ({type(exc).__name__}: {exc}).\n"
+                "Yours: describe() raised on a source that had already declared its "
+                "parts. If it reads the rig to build that line, the rig did not answer.\n"
+                "Do now: nothing has been read and nothing has been driven; every "
+                "declared part is being de-energized.\n"
+                "Then: make describe() a statement about the rig rather than a query of "
+                "it. It is a label for the operator, not a health check."
+            ) from exc
+
+        print(
+            f"[newt teleop] live at {rate_hz:g} Hz — {rig}. "
+            "Ctrl+C to end (it puts the rig away first), Ctrl+H to kill (it does not).",
+            flush=True,
+        )
         _loop(source, rate_hz, kill, tally)
     except _KillFired:
         outcome = "emergency_stop"
@@ -457,7 +493,7 @@ def run_session(
     achieved = tally.ticks / wall_s if wall_s > 0 else 0.0
     print(
         f"\n=== teleop session ===\n"
-        f"rig:         {source.describe()}\n"
+        f"rig:         {rig}\n"
         f"outcome:     {outcome}\n"
         f"rate:        {rate_hz:g} Hz requested · {achieved:.1f} Hz achieved\n"
         f"ticks:       {tally.ticks} in {wall_s:.1f}s ({tally.overruns} over-period)\n"

@@ -177,6 +177,25 @@ class _Source:
             raise self._send_error
 
 
+class _MuteSource(_Source):
+    """A source whose one-line description is a question it asks the rig.
+
+    Plausible rather than contrived: a description that names the arms it found
+    is a description that talks to them, and a rig can stop answering between
+    coming up and being asked its name.
+    """
+
+    def describe(self) -> str:
+        raise RuntimeError("controller has not answered yet")
+
+
+class _UncountableSource(_Source):
+    """A source that cannot say what it has, because that list is a query too."""
+
+    def moving_parts(self):
+        raise OSError("no route to host")
+
+
 def _pair(log, **kwargs):
     return [_Part("left", log, **kwargs), _Part("right", log, **kwargs)]
 
@@ -509,6 +528,49 @@ def test_a_source_with_no_moving_parts_is_refused(clock, capsys):
     assert "declares no moving parts" in capsys.readouterr().err
 
 
+def test_a_source_that_cannot_describe_itself_is_still_de_energized(clock, capsys):
+    """Every exit leaves every part de-energized — including the exit taken while
+    the rig is being *named*.
+
+    Naming it happens after the factory connected and after the parts were
+    declared, which makes it the one step where the rig is live and the session
+    has not started. A failure there that walked out as a traceback would leave
+    arms holding torque on the exact path this module promises against, and no
+    ordering assertion elsewhere would catch it: this is about a call the loop
+    never reaches."""
+    log: list[str] = []
+
+    rc = run_session(_MuteSource(_pair(log), log), rate_hz=30, kill=_Kill())
+
+    assert rc == 1
+    # Never read, never driven — and stopped anyway.
+    assert log == ["halt:left", "halt:right"]
+    captured = capsys.readouterr()
+    assert "could not describe itself" in captured.err
+    assert "controller has not answered yet" in captured.err  # the cause, not swallowed
+    # The summary still runs, and does not invent a name for a rig that refused one.
+    assert "rig:         unnamed" in captured.out
+
+
+def test_a_source_that_cannot_list_its_parts_says_it_stopped_nothing(clock, capsys):
+    """The same failure one step earlier, and it must not share the message above.
+
+    Here the verb was never told what it could stop, so — alone among these
+    refusals — it de-energized nothing and the operator is the only thing that
+    can. Saying "nothing has been driven" and stopping there would read as safe."""
+    log: list[str] = []
+
+    rc = run_session(_UncountableSource(_pair(log), log), rate_hz=30, kill=_Kill())
+
+    assert rc == 1
+    assert log == []  # nothing read, nothing driven, and nothing halted either
+    err = capsys.readouterr().err
+    assert "could not say what its moving parts are" in err
+    assert "no route to host" in err
+    assert "de-energized nothing" in err
+    assert "at the wall" in err
+
+
 @pytest.mark.parametrize(
     "member", ["describe", "moving_parts", "read_action", "send_action"]
 )
@@ -660,12 +722,14 @@ def test_no_two_refusals_share_a_string(clock, capsys):
         _Source(_pair(log), log, read_error=OSError("gone"), fail_on_tick=1),
         _Source(_pair(log), log, send_error=ActionRejected("no 'wrist'"), fail_on_tick=1),
         _Source(_pair(log), log, send_error=OSError("broken pipe"), fail_on_tick=1),
+        _MuteSource(_pair(log), log),
+        _UncountableSource(_pair(log), log),
     ]
     for source in cases:
         run_session(source, rate_hz=30, kill=_Kill())
         texts.append(capsys.readouterr().err)
 
-    assert len(set(texts)) == len(texts) == 6
+    assert len(set(texts)) == len(texts) == 8
 
 
 def test_a_halt_report_carries_why_it_was_not_confirmed():
