@@ -254,6 +254,20 @@ def cmd_teleop(args: list[str]) -> int:
     try:
         try:
             source = load_source(opts["source"])
+        except KeyboardInterrupt:
+            # Bring-up is where the factory connects, and on real hardware that
+            # is seconds of blocking vendor motion — long enough for an operator
+            # to change their mind. 130, unlike the Ctrl+C that ends a live
+            # session (0): that one is the documented way to finish, this one is
+            # an abort before the session started. Putting away whatever came up
+            # is the factory's job; it is the only thing holding those handles.
+            print(
+                "\n[newt teleop] bring-up interrupted (Ctrl+C) — the session never "
+                "started. Check what the source reported about anything it had already "
+                "connected.",
+                file=sys.stderr,
+            )
+            return 130
         except Exception as exc:
             # The factory's own refusal — a missing address, a missing driver.
             # Surface it, don't trace it.
@@ -262,6 +276,6 @@ def cmd_teleop(args: list[str]) -> int:
 
         from newt.teleop import run_session
 
-        return run_session(source, rate_hz=opts["rate"], kill_key=kill_key)
+        return run_session(source, rate_hz=opts["rate"], kill=kill_key.fired)
     finally:
         kill_key.restore()

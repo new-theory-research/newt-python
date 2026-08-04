@@ -297,3 +297,49 @@ def test_source_factory_failure_reaches_the_operator_untraced(monkeypatch):
     assert rc == 1
     assert "no address" in err
     assert "Traceback" not in err
+
+
+def test_ctrl_c_during_bring_up_exits_130_not_0(monkeypatch):
+    """Bring-up is seconds of blocking vendor motion — long enough for an
+    operator to change their mind. That Ctrl+C is an abort before the session
+    started, not the documented way to finish one, so it does not share the
+    clean exit's 0. Putting away whatever came up is the factory's job; it is
+    the only thing holding those handles."""
+    def _interrupted(spec):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("newt._cli.teleop.load_source", _interrupted)
+    monkeypatch.setattr(KillKey, "arm", lambda self: True)
+    monkeypatch.setattr(KillKey, "restore", lambda self: None)
+    rc, _, err = _capture(["--source", "mypkg.rig:make_teleop"], monkeypatch)
+    assert rc == 130
+    assert "bring-up interrupted" in err
+    assert "never started" in err
+
+
+def test_the_frontend_hands_the_loop_the_rate_and_the_bare_kill_event(monkeypatch):
+    """The skin owns the keyboard; the session owns the loop. What crosses
+    between them is the parsed rate and a plain Event — nothing about terminals
+    goes behind the seam, and nothing about ticking stays in front of it."""
+    import threading
+
+    seen = {}
+
+    def _run_session(source, *, rate_hz, kill):
+        seen["source"] = source
+        seen["rate_hz"] = rate_hz
+        seen["kill"] = kill
+        return 0
+
+    monkeypatch.setattr("newt.teleop.run_session", _run_session)
+    monkeypatch.setattr("newt._cli.teleop.load_source", lambda spec: "the-source")
+    monkeypatch.setattr(KillKey, "arm", lambda self: True)
+    monkeypatch.setattr(KillKey, "restore", lambda self: None)
+
+    rc, _, _ = _capture(
+        ["--source", "mypkg.rig:make_teleop", "--rate", "45"], monkeypatch
+    )
+    assert rc == 0
+    assert seen["source"] == "the-source"
+    assert seen["rate_hz"] == 45.0
+    assert isinstance(seen["kill"], threading.Event)
