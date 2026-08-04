@@ -641,7 +641,10 @@ def test_a_console_that_cannot_dispense_says_it_is_ours_not_yours(monkeypatch, t
     _raises(monkeypatch, _http_error(503, "Service Unavailable", code="dispensing_unconfigured"))
 
     rc, _, err = _capture(["beta-private", str(tmp_path / "p")], monkeypatch)
-    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert rc == create_mod.EXIT_CONSOLE_REFUSED
+    assert rc != create_mod.EXIT_FETCH_FAILED, (
+        "the console refused before GitHub was ever asked — nothing was downloaded"
+    )
     assert "ours, not yours" in err
     assert "your key is fine" in err.lower()
 
@@ -1110,7 +1113,7 @@ def test_the_console_gets_to_say_why_in_its_own_words(monkeypatch, tmp_path):
 
     rc, out, err = _capture(["beta-private", str(tmp_path / "x")], monkeypatch)
 
-    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert rc == create_mod.EXIT_CONSOLE_REFUSED
     assert "GitHub answered 500" in err, f"the console's own sentence was dropped: {err!r}"
     assert "upstream_unavailable" in err.splitlines()[0], (
         "two console-named causes must not open with the same line"
@@ -1126,7 +1129,7 @@ def test_a_console_that_says_nothing_useful_still_gets_a_full_refusal(monkeypatc
 
     rc, out, err = _capture(["beta-private", str(tmp_path / "y")], monkeypatch)
 
-    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert rc == create_mod.EXIT_CONSOLE_REFUSED
     assert "500 Internal Server Error" in err
     assert "Fix:" in err
 
@@ -1322,6 +1325,34 @@ def test_no_refusal_goes_unread_and_no_exit_code_is_undocumented(monkeypatch, tm
     assert used - {create_mod.EXIT_OK} == documented - {create_mod.EXIT_OK}, (
         f"exit codes used {sorted(used)} vs documented {sorted(documented)}"
     )
+
+
+def test_who_refused_decides_the_number_not_what_the_transport_said(monkeypatch, tmp_path):
+    """The same HTTP shape from two different owners must not read as one cause.
+
+    Both of these are a failed attempt to get a private kit's bytes, and both would
+    once have exited 7 — whose documented meaning is that the archive could not be
+    downloaded. That is true when GitHub refused it. When the console refused, no
+    archive was ever requested, and an agent reading only the number would retry a
+    download that never started. The string above the number says which; the number
+    has to say it too.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, _http_error(404, "Not Found"))
+    github_rc, _, _ = _capture(["alpha", str(tmp_path / "a")], monkeypatch)
+
+    _with_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, _http_error(503, "Service Unavailable", code="anything_new"))
+    console_rc, _, console_err = _capture(["beta-private", str(tmp_path / "b")], monkeypatch)
+
+    assert github_rc == create_mod.EXIT_FETCH_FAILED
+    assert console_rc == create_mod.EXIT_CONSOLE_REFUSED
+    assert github_rc != console_rc
+    # And a console code this SDK has never heard of still arrives named, so the console
+    # can grow a cause without an SDK release.
+    assert "anything_new" in console_err
 
 
 def test_the_handoff_added_no_robot_knowledge_to_the_verb(monkeypatch, tmp_path):
