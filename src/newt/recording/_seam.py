@@ -70,6 +70,31 @@ class RecordingSource(Protocol):
     (counted by the Session, never swallowed). ``disable_all`` is the optional
     kill-switch hook (torque-off); a source with no actuation may omit it.
     ``close`` releases the connection; a source with nothing to release may omit it.
+
+    **Cameras are the same kind of optional member**, discovered by ``getattr`` the
+    way ``disable_all`` and ``close`` are — not part of the required surface, so a
+    state-only source implements nothing new. A source that captures video exposes
+    BOTH of:
+
+    ``cameras``
+        A list of :class:`newt.recording.CameraSpec` — one per camera the source
+        actually opened, with the id the source chose. The Session declares exactly
+        these in ``episode.json`` and opens one encoder per entry. A camera that
+        failed to open belongs nowhere in this list; refusing the whole run is the
+        source's call, and a source that quietly drops it from the list has turned
+        a hardware failure into a silently shorter episode.
+
+    ``read_frames()``
+        One read per declared camera, returned as ``{camera id: frame}`` where a
+        frame is an HxWx3 ``bgr24`` array. ``None`` (or an absent key) is a dropped
+        frame for that camera — counted, never substituted. The call may block as
+        the hardware blocks; it runs on its own thread and never delays state
+        capture.
+
+    The division of labor this expresses: **the source opens, reads and closes
+    cameras; the library encodes, timestamps and enforces the frame-count
+    invariant.** The library holds no camera identity — ids travel as opaque
+    strings the source chose, exactly as channel names already do.
     """
 
     descriptor: StateDescriptor
