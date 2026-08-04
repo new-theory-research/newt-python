@@ -66,6 +66,7 @@ EXIT_NO_SETUP_STEP = 9
 EXIT_SETUP_UNRUNNABLE = 10
 EXIT_SETUP_REFUSED = 11
 EXIT_REGISTRY_BROKEN = 12
+EXIT_CONSOLE_REFUSED = 13
 
 
 def _usage() -> None:
@@ -119,6 +120,7 @@ def _usage() -> None:
     print("  10   the kit landed, but its setup step could not be started")
     print("  11   the kit landed, and its setup step exited non-zero")
     print("  12   the registry's row for that kit is unusable — ours to fix, not yours")
+    print("  13   the console refused to serve the kit — nothing was downloaded")
 
 
 def _console_url() -> str:
@@ -811,7 +813,12 @@ def _acquire(
             _say_key_rejected(console, exc.reason)
             return EXIT_KEY_REJECTED
         _say_fetch_failed(name, console, template, exc)
-        return EXIT_FETCH_FAILED
+        # Which number this is depends on who refused, not on what went wrong. Exit 7 says
+        # the archive could not be downloaded, and for a console that refused before it ever
+        # reached GitHub that sentence is false — no archive was ever asked for. An exit code
+        # is read by an agent that will never see the string above it, so it has to be true on
+        # its own.
+        return EXIT_FETCH_FAILED if exc.source == "github" else EXIT_CONSOLE_REFUSED
 
     try:
         files = _unpack_tarball(archive, dest)
