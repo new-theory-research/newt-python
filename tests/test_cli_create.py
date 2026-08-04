@@ -39,6 +39,25 @@ from newt._cli.create import cmd_create
 # Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _sandboxed(monkeypatch, tmp_path):
+    """No test in this file may touch the network or the developer's cwd.
+
+    ``newt create`` writes directories, so an un-stubbed run must not be able to
+    scatter one into the repository. And a test that forgot to stub its fetch would
+    otherwise reach GitHub for real — slow, flaky, and a different thing than what
+    it meant to assert. Both are made impossible here rather than remembered.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def blocked(req, timeout):
+        from urllib.error import URLError
+
+        raise URLError("the network is disabled in this test")
+
+    monkeypatch.setattr(create_mod, "_read_url", blocked)
+
+
 def _capture(args, monkeypatch):
     out, err = io.StringIO(), io.StringIO()
     monkeypatch.setattr(sys, "stdout", out)
@@ -72,7 +91,7 @@ def _console_rejects_key(monkeypatch, code=401):
     from urllib.error import HTTPError
 
     def boom(*a, **kw):
-        raise HTTPError("http://console/api/templates", code, "Unauthorized", {}, None)
+        raise HTTPError("http://console/api/cli/templates", code, "Unauthorized", {}, None)
 
     monkeypatch.setattr(create_mod, "_fetch_registry", boom)
 
@@ -241,7 +260,7 @@ def test_console_answering_an_error_is_not_the_same_as_silence(monkeypatch):
     _, _, silent = _capture(["trossen-widowx"], monkeypatch)
 
     def four_oh_four(*a, **kw):
-        raise HTTPError("http://console/api/templates", 404, "Not Found", {}, None)
+        raise HTTPError("http://console/api/cli/templates", 404, "Not Found", {}, None)
 
     monkeypatch.setattr(create_mod, "_fetch_registry", four_oh_four)
     _, _, answered = _capture(["trossen-widowx"], monkeypatch)
@@ -386,3 +405,360 @@ def test_registry_rows_carry_no_rig_configuration():
         f"the registry row grew fields beyond {sorted(allowed)} — rig configuration is "
         "the kit's, not the SDK's"
     )
+
+
+# ---------------------------------------------------------------------------
+# Acquisition — the bytes, and what the directory looks like afterwards
+#
+# The claim under test is the ownership tenet, made checkable: what lands is a
+# project, not a checkout of ours. Everything else here — the stripped root, the
+# refusal to unpack onto existing work, the archive that tries to climb out of the
+# target — is in service of that directory being safe to call yours.
+# ---------------------------------------------------------------------------
+
+import subprocess
+import tarfile
+
+
+def _tarball(root="starter-alpha-abc123", files=None, extra=None):
+    """Build a GitHub-shaped archive: everything under one top-level directory."""
+    files = files if files is not None else {
+        "README.md": "# Alpha starter kit\n",
+        "pyproject.toml": "[project]\nname = 'kit'\n",
+        "conf/nt.toml.example": "# measure and replace\n",
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel, body in files.items():
+            data = body.encode()
+            info = tarfile.TarInfo(f"{root}/{rel}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for info in extra or ():
+            tar.addfile(info, io.BytesIO(b""))
+    return buf.getvalue()
+
+
+def _serves(monkeypatch, archive, record=None):
+    """Stub the one function that touches the wire, capturing what was asked for."""
+    def _read(req, timeout):
+        if record is not None:
+            record["url"] = req.full_url
+            record["auth"] = req.headers.get("Authorization")
+        return archive
+
+    monkeypatch.setattr(create_mod, "_read_url", _read)
+
+
+def _raises(monkeypatch, exc):
+    def _read(req, timeout):
+        raise exc
+
+    monkeypatch.setattr(create_mod, "_read_url", _read)
+
+
+def _http_error(status, reason, code=None):
+    from urllib.error import HTTPError
+
+    payload = json.dumps({"code": code, "error": reason}).encode() if code else b"{}"
+    return HTTPError("http://console/x", status, reason, {}, io.BytesIO(payload))
+
+
+def test_a_public_kit_lands_as_files_with_the_archive_root_stripped(monkeypatch, tmp_path):
+    """The directory a developer named holds the kit's files, not a folder named after us."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "my-arm"
+
+    rc, out, err = _capture(["alpha", str(dest)], monkeypatch)
+
+    assert rc == create_mod.EXIT_OK, err
+    assert (dest / "README.md").read_text().startswith("# Alpha")
+    assert (dest / "conf" / "nt.toml.example").exists()
+    assert not (dest / "starter-alpha-abc123").exists()
+    assert str(dest) in out
+
+
+def test_the_scaffolded_directory_has_no_remote(monkeypatch, tmp_path):
+    """THE ownership assertion: `git -C <dir> remote -v` prints nothing.
+
+    Not "no origin named ours" — nothing at all. A directory that remembers where it
+    came from is a checkout; this one is a project.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "mine"
+
+    rc, _, err = _capture(["alpha", str(dest)], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+
+    proc = subprocess.run(
+        ["git", "-C", str(dest), "remote", "-v"], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", f"the scaffold carries a remote: {proc.stdout!r}"
+    # And no history of ours to disown: the repository is empty, so the developer's
+    # first commit is the first commit.
+    log = subprocess.run(
+        ["git", "-C", str(dest), "log", "--oneline"], capture_output=True, text=True
+    )
+    assert log.returncode != 0 or log.stdout == "", log.stdout
+
+
+def test_no_git_leaves_the_directory_inert_and_says_so(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "inert"
+
+    rc, out, err = _capture(["alpha", str(dest), "--no-git"], monkeypatch)
+
+    assert rc == create_mod.EXIT_OK, err
+    assert not (dest / ".git").exists()
+    assert "NOT a git repository" in out
+
+
+def test_the_directory_defaults_to_the_template_name(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+
+    rc, out, err = _capture(["alpha"], monkeypatch)
+
+    assert rc == create_mod.EXIT_OK, err
+    assert (tmp_path / "alpha" / "README.md").exists()
+
+
+def test_an_existing_non_empty_directory_is_refused_by_name_not_overwritten(monkeypatch, tmp_path):
+    """Unpacking onto someone's work would mix two trees with no way to tell them apart."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "occupied"
+    dest.mkdir()
+    (dest / "my-notes.txt").write_text("hours of work")
+
+    rc, out, err = _capture(["alpha", str(dest)], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert str(dest) in err
+    assert (dest / "my-notes.txt").read_text() == "hours of work"
+    assert not (dest / "README.md").exists()
+
+
+def test_an_existing_empty_directory_is_fine(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "empty"
+    dest.mkdir()
+
+    rc, _, err = _capture(["alpha", str(dest)], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+
+
+def test_a_public_kit_is_fetched_direct_from_github_at_the_pinned_commit(monkeypatch, tmp_path):
+    """The cold path: no key, no console in the download, a commit not a branch."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    seen = {}
+    _serves(monkeypatch, _tarball(), seen)
+
+    rc, _, err = _capture(["alpha", str(tmp_path / "d")], monkeypatch)
+
+    assert rc == create_mod.EXIT_OK, err
+    row = next(t for t in _CONSOLE_PAYLOAD["templates"] if t["name"] == "alpha")
+    assert seen["url"] == f"https://codeload.github.com/{row['repo']}/tar.gz/{row['ref']}"
+    assert seen["auth"] is None, "a public kit must not need a credential"
+
+
+def test_a_private_kit_comes_through_the_console_against_the_developers_key(monkeypatch, tmp_path):
+    """GitHub never enters the developer's story — the console brokers, and the
+    repository path never reaches this machine."""
+    _with_key(monkeypatch, "nt_realkey")
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    seen = {}
+    _serves(monkeypatch, _tarball(root="newt-starter-widowx-def456"), seen)
+    monkeypatch.setenv("NT_CONSOLE_URL", "https://console.example")
+
+    rc, _, err = _capture(["beta-private", str(tmp_path / "p")], monkeypatch)
+
+    assert rc == create_mod.EXIT_OK, err
+    assert seen["url"] == "https://console.example/api/cli/templates/beta-private/tarball"
+    assert seen["auth"] == "Bearer nt_realkey"
+    assert "codeload" not in seen["url"]
+
+
+def test_a_private_kit_without_a_key_never_reaches_the_wire(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+
+    def never(req, timeout):
+        raise AssertionError("asked the console to broker a kit for an anonymous caller")
+
+    monkeypatch.setattr(create_mod, "_read_url", never)
+
+    rc, _, err = _capture(["beta-private", str(tmp_path / "p")], monkeypatch)
+    assert rc == create_mod.EXIT_NEEDS_KEY
+    assert "private" in err
+
+
+def test_the_console_rejecting_a_key_mid_download_is_its_own_exit(monkeypatch, tmp_path):
+    _with_key(monkeypatch, "nt_stale")
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, _http_error(401, "Unauthorized", code="key_rejected"))
+
+    rc, _, err = _capture(["beta-private", str(tmp_path / "p")], monkeypatch)
+    assert rc == create_mod.EXIT_KEY_REJECTED
+    assert not (tmp_path / "p").exists()
+
+
+def test_a_console_that_cannot_dispense_says_it_is_ours_not_yours(monkeypatch, tmp_path):
+    """The failure a developer must never read as 'you may not have this'."""
+    _with_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, _http_error(503, "Service Unavailable", code="dispensing_unconfigured"))
+
+    rc, _, err = _capture(["beta-private", str(tmp_path / "p")], monkeypatch)
+    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert "ours, not yours" in err
+    assert "your key is fine" in err.lower()
+
+
+def test_github_refusing_the_archive_is_not_a_missing_template(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, _http_error(404, "Not Found"))
+
+    rc, _, err = _capture(["alpha", str(tmp_path / "d")], monkeypatch)
+    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert "no template named" not in err.lower()
+    assert not (tmp_path / "d").exists()
+
+
+def test_a_download_that_dies_midway_writes_nothing(monkeypatch, tmp_path):
+    from urllib.error import URLError
+
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, URLError("Connection reset by peer"))
+
+    rc, _, err = _capture(["alpha", str(tmp_path / "d")], monkeypatch)
+    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert not (tmp_path / "d").exists()
+
+
+def test_an_archive_that_climbs_out_of_the_target_is_refused_whole(monkeypatch, tmp_path):
+    """Not skipped quietly — refused. A partial unpack missing the file that mattered
+    is worse than a refusal that says what happened."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    escaping = tarfile.TarInfo("starter-alpha-abc123/../../evil.txt")
+    escaping.size = 0
+    _serves(monkeypatch, _tarball(extra=[escaping]))
+    dest = tmp_path / "d"
+
+    rc, _, err = _capture(["alpha", str(dest)], monkeypatch)
+
+    assert rc == create_mod.EXIT_BAD_ARCHIVE
+    assert not (tmp_path / "evil.txt").exists()
+    assert not (dest / "README.md").exists()
+
+
+def test_an_archive_without_a_single_root_is_refused(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    stray = tarfile.TarInfo("second-root/file.txt")
+    stray.size = 0
+    _serves(monkeypatch, _tarball(extra=[stray]))
+
+    rc, _, err = _capture(["alpha", str(tmp_path / "d")], monkeypatch)
+    assert rc == create_mod.EXIT_BAD_ARCHIVE
+
+
+def test_bytes_that_are_not_an_archive_are_refused_not_unpacked(monkeypatch, tmp_path):
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, b"<html>404 not found</html>")
+
+    rc, _, err = _capture(["alpha", str(tmp_path / "d")], monkeypatch)
+    assert rc == create_mod.EXIT_BAD_ARCHIVE
+
+
+def test_json_output_names_the_directory_the_ref_and_the_absent_remote(monkeypatch, tmp_path):
+    """The agent door: everything the keyboard path prints, machine-readable."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "j"
+
+    rc, out, err = _capture(["alpha", str(dest), "--json"], monkeypatch)
+
+    assert rc == create_mod.EXIT_OK, err
+    payload = json.loads(out)
+    row = next(t for t in _CONSOLE_PAYLOAD["templates"] if t["name"] == "alpha")
+    assert payload["directory"] == str(dest)
+    assert payload["ref"] == row["ref"]
+    assert payload["remote"] is None
+    assert payload["git"] == "initialized"
+    assert payload["files"] == 3
+
+
+def test_every_acquisition_refusal_still_shares_no_string(monkeypatch, tmp_path):
+    """Rule 12 extended over the download surface. Collected from real runs, so a
+    future edit that collapses two of these fails here rather than in a developer's
+    terminal at 2am."""
+    from urllib.error import URLError
+
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    collected = []
+
+    _no_key(monkeypatch)
+    collected.append(_capture(["nope", str(tmp_path / "a")], monkeypatch)[2])
+    collected.append(_capture(["beta-private", str(tmp_path / "b")], monkeypatch)[2])
+
+    _raises(monkeypatch, _http_error(404, "Not Found"))
+    collected.append(_capture(["alpha", str(tmp_path / "c")], monkeypatch)[2])
+
+    _raises(monkeypatch, URLError("Connection reset by peer"))
+    collected.append(_capture(["alpha", str(tmp_path / "d")], monkeypatch)[2])
+
+    _with_key(monkeypatch)
+    _raises(monkeypatch, _http_error(503, "Service Unavailable", code="dispensing_unconfigured"))
+    collected.append(_capture(["beta-private", str(tmp_path / "e")], monkeypatch)[2])
+
+    _raises(monkeypatch, _http_error(502, "Bad Gateway", code="upstream_unavailable"))
+    collected.append(_capture(["beta-private", str(tmp_path / "f")], monkeypatch)[2])
+
+    _raises(monkeypatch, _http_error(401, "Unauthorized", code="key_rejected"))
+    collected.append(_capture(["beta-private", str(tmp_path / "g")], monkeypatch)[2])
+
+    _serves(monkeypatch, b"not-a-tarball")
+    collected.append(_capture(["alpha", str(tmp_path / "h")], monkeypatch)[2])
+
+    occupied = tmp_path / "i"
+    occupied.mkdir()
+    (occupied / "x").write_text("x")
+    _serves(monkeypatch, _tarball())
+    collected.append(_capture(["alpha", str(occupied)], monkeypatch)[2])
+
+    firsts = [s.splitlines()[0] for s in collected]
+    assert len(set(firsts)) == len(firsts), f"two causes share a message: {firsts}"
+
+
+def test_acquisition_added_no_robot_knowledge_to_the_verb(monkeypatch, tmp_path):
+    """The fence, re-checked after the fetch landed: unpacking is the same code for
+    every kit, so a second body still costs a registry row and nothing else."""
+    _no_key(monkeypatch)
+    _console_returns(
+        monkeypatch,
+        {"templates": [{"name": "brand-new-arm", "visibility": "public",
+                        "repo": "org/newt-starter-brand-new-arm", "ref": "b" * 40}]},
+    )
+    _serves(monkeypatch, _tarball(root="newt-starter-brand-new-arm-bbb"))
+
+    rc, out, err = _capture(["brand-new-arm", str(tmp_path / "new")], monkeypatch)
+    assert rc == create_mod.EXIT_OK, err
+    assert (tmp_path / "new" / "README.md").exists()

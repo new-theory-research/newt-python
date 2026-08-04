@@ -22,9 +22,14 @@ from a small offline table; private ones fail with a string that says so.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import pathlib
+import shutil
+import subprocess
 import sys
+import tarfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -48,7 +53,9 @@ EXIT_NO_SUCH_TEMPLATE = 2
 EXIT_NEEDS_KEY = 3
 EXIT_CONSOLE_UNREACHABLE = 4
 EXIT_KEY_REJECTED = 5
-EXIT_NOT_ACQUIRED = 70
+EXIT_TARGET_EXISTS = 6
+EXIT_FETCH_FAILED = 7
+EXIT_BAD_ARCHIVE = 8
 
 
 def _usage() -> None:
@@ -62,8 +69,12 @@ def _usage() -> None:
     print("  reach. Public kits need no key; private kits are served by the console")
     print("  against your nt_ key.")
     print("")
+    print("  The directory defaults to the template name, and must not already exist")
+    print("  with anything in it.")
+    print("")
     print("Options:")
-    print("  --json   Emit machine-readable JSON")
+    print("  --no-git   Leave the directory inert — do not run 'git init' in it")
+    print("  --json     Emit machine-readable JSON")
     print("")
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials)")
@@ -76,6 +87,9 @@ def _usage() -> None:
     print("  3    that template is private and no key was found")
     print("  4    the console could not be reached")
     print("  5    the console rejected your key")
+    print("  6    the directory already exists and is not empty")
+    print("  7    the kit's archive could not be downloaded")
+    print("  8    the downloaded archive was not the shape a starter kit has")
 
 
 def _console_url() -> str:
@@ -91,7 +105,7 @@ def _fetch_registry(console: str, api_key: str | None, *, timeout: float = 10.0)
     """GET the console's template registry. Sent with the key when there is one, so the
     response can include the private kits this developer is entitled to."""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    req = Request(f"{console}/api/templates", headers=headers, method="GET")
+    req = Request(f"{console}/api/cli/templates", headers=headers, method="GET")
     with urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
@@ -227,7 +241,7 @@ def _say_console_unreachable(name: str, console: str, exc: RegistryUnavailable) 
         )
         fix = (
             "        Fix: check NT_CONSOLE_URL points at a console that serves "
-            "/api/templates, or report it if that is the production console."
+            "/api/cli/templates, or report it if that is the production console."
         )
     else:
         print(
@@ -255,12 +269,386 @@ def _say_key_rejected(console: str, exc: RegistryUnavailable) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Acquisition — the bytes, and where they land.
+#
+# A tarball at a pinned commit, never ``git clone``. Cloning would put the kit on
+# disk with an ``origin`` pointing back at us, which is the exact thing this verb
+# exists to stop: a starter kit is a project you own, and a directory that
+# remembers where it came from is a checkout of ours wearing a project's clothes.
+# ---------------------------------------------------------------------------
+
+_CODELOAD = "https://codeload.github.com"
+
+
+class FetchFailed(Exception):
+    """The archive did not arrive.
+
+    ``source`` is which door was knocked on — ``"github"`` for a public kit fetched
+    direct, ``"console"`` for a private one brokered for us. They are different
+    problems with different fixes and they never share a message. ``code`` carries
+    the console's own machine-readable reason when it gave one.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        source: str,
+        http_status: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.source = source
+        self.http_status = http_status
+        self.code = code
+
+
+def _read_url(req: Request, timeout: float) -> bytes:
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _fetch_public_tarball(repo: str, ref: str, *, timeout: float = 120.0) -> bytes:
+    """A public kit comes straight from GitHub, unauthenticated.
+
+    This is what makes the cold path work: a machine that has never seen an NT key,
+    behind nothing but a network, can still get a starter kit. Routing it through
+    the console would make the console a dependency of a flow that does not need one.
+    """
+    url = f"{_CODELOAD}/{repo}/tar.gz/{ref}"
+    try:
+        return _read_url(Request(url, method="GET"), timeout)
+    except HTTPError as exc:
+        raise FetchFailed(
+            f"{exc.code} {exc.reason}", source="github", http_status=exc.code
+        ) from exc
+    except URLError as exc:
+        raise FetchFailed(str(exc.reason), source="github") from exc
+    except (TimeoutError, OSError) as exc:
+        raise FetchFailed(str(exc), source="github") from exc
+
+
+def _fetch_private_tarball(
+    console: str, name: str, api_key: str, *, timeout: float = 120.0
+) -> bytes:
+    """A private kit comes through the console, against the developer's ``nt_`` key.
+
+    The console holds the credential that can read the repository; the developer
+    holds a key we issued. GitHub never enters their story, and the repository path
+    never leaves the server.
+    """
+    url = f"{console}/api/cli/templates/{name}/tarball"
+    req = Request(url, headers={"Authorization": f"Bearer {api_key}"}, method="GET")
+    try:
+        return _read_url(req, timeout)
+    except HTTPError as exc:
+        # The console names its own causes. Read the code rather than guessing from
+        # the status — 401 alone cannot tell "no key" from "not your key".
+        code = None
+        try:
+            code = json.loads(exc.read()).get("code")
+        except Exception:
+            code = None
+        raise FetchFailed(
+            f"{exc.code} {exc.reason}", source="console", http_status=exc.code, code=code
+        ) from exc
+    except URLError as exc:
+        raise FetchFailed(str(exc.reason), source="console") from exc
+    except (TimeoutError, OSError) as exc:
+        raise FetchFailed(str(exc), source="console") from exc
+
+
+class BadArchive(Exception):
+    """What arrived was not the shape a repository archive has."""
+
+
+def _strip_root(tar: tarfile.TarFile) -> str:
+    """GitHub archives wrap everything in one top-level directory named after the
+    repo and the commit. That name is ours, not the developer's, so it is stripped
+    — the kit's own files land directly in the directory they asked for.
+
+    A single top-level entry is also the archive-shape check: anything else did not
+    come from where we think it did, and unpacking it would scatter files.
+    """
+    roots = {pathlib.PurePosixPath(m.name).parts[0] for m in tar.getmembers() if m.name}
+    if len(roots) != 1:
+        raise BadArchive(
+            f"expected one top-level directory, found {len(roots)}: "
+            f"{', '.join(sorted(roots)) or '(nothing)'}"
+        )
+    return roots.pop()
+
+
+def _unpack_tarball(archive: bytes, dest: pathlib.Path) -> int:
+    """Unpack into ``dest``, returning the number of files written.
+
+    Every member is checked before anything is written: a path that climbs out of
+    ``dest``, or a symlink pointing out of it, is refused for the whole archive
+    rather than skipped quietly. A partial unpack that silently dropped the file
+    that mattered is worse than a refusal.
+    """
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
+    except tarfile.TarError as exc:
+        raise BadArchive(f"not a readable gzip tar archive — {exc}") from exc
+
+    with tar:
+        root = _strip_root(tar)
+        members = []
+        for m in tar.getmembers():
+            parts = pathlib.PurePosixPath(m.name).parts
+            if not parts or parts[0] != root or len(parts) == 1:
+                continue
+            rel = pathlib.PurePosixPath(*parts[1:])
+            if rel.is_absolute() or ".." in rel.parts:
+                raise BadArchive(f"archive member escapes the target directory: {m.name}")
+            if not (m.isfile() or m.isdir() or m.issym()):
+                raise BadArchive(f"archive member is not a file, directory, or symlink: {m.name}")
+            if m.issym():
+                link = pathlib.PurePosixPath(m.linkname)
+                if link.is_absolute() or ".." in link.parts:
+                    raise BadArchive(f"archive symlink points outside the kit: {m.name}")
+            m.name = str(rel)
+            members.append(m)
+
+        dest.mkdir(parents=True, exist_ok=True)
+        # tarfile's "data" filter (the safe default from 3.12) is belt to the braces
+        # above; it does not exist on 3.11, which this package still supports, so it
+        # is applied when present rather than assumed.
+        extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        try:
+            tar.extractall(dest, members=members, **extra)
+        except tarfile.TarError as exc:
+            raise BadArchive(f"archive could not be unpacked — {exc}") from exc
+
+    return sum(1 for m in members if m.isfile())
+
+
+def _git_init(dest: pathlib.Path) -> str:
+    """Make the directory a repository with NO commits and NO remote.
+
+    The choice, stated: ``git init`` and stop. A first commit made on a developer's
+    behalf would be authored in their name for content they have not read, and
+    ``git log`` on their own project would open on a message we wrote. Leaving the
+    repository empty means the first commit in their history is genuinely the first
+    thing they decided. Doing nothing at all was the other option; it costs them a
+    ``git init`` and, more to the point, ``git -C <dir> remote -v`` on a non-repo is
+    an error rather than the silence that proves this directory is theirs.
+
+    Returns what actually happened, so the caller can print it. Never raises: git
+    missing is a real state on a real machine, and it does not make the kit that
+    just landed any less usable.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return "unavailable: git is not on PATH"
+    proc = subprocess.run(
+        [git, "init", "--quiet", str(dest)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return f"unavailable: git init exited {proc.returncode}" + (
+            f" — {detail[0]}" if detail else ""
+        )
+    return "initialized"
+
+
+def _resolve_target(name: str, given: str | None) -> pathlib.Path:
+    return pathlib.Path(given if given else name).expanduser()
+
+
+def _say_target_exists(dest: pathlib.Path) -> None:
+    print(
+        f"newt create: {dest} already exists and is not empty.",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was written. Unpacking on top of it would mix a fresh kit "
+        "into whatever is already there, and you would not be able to tell which "
+        "file came from where.",
+        file=sys.stderr,
+    )
+    print(
+        f"        Fix: name a directory that does not exist yet, or move {dest} aside.",
+        file=sys.stderr,
+    )
+
+
+def _say_fetch_failed(name: str, console: str, template: Template, exc: FetchFailed) -> None:
+    if exc.source == "github":
+        where = f"https://github.com/{template.repo}"
+        if exc.http_status is not None:
+            print(
+                f"newt create: GitHub answered {exc.reason} for the {name!r} starter kit "
+                f"at its pinned commit.",
+                file=sys.stderr,
+            )
+            print(
+                f"        {where} is public, so this is not about your credentials — the "
+                "pinned commit or the repository moved, which is ours to fix.",
+                file=sys.stderr,
+            )
+            print("        Fix: run `newt upgrade`, and report it if it persists.", file=sys.stderr)
+        else:
+            print(
+                f"newt create: could not download the {name!r} starter kit from GitHub — "
+                f"{exc.reason}.",
+                file=sys.stderr,
+            )
+            print(
+                "        The kit was found in the registry; the download itself did not "
+                "complete. Nothing was written.",
+                file=sys.stderr,
+            )
+            print("        Fix: check your network and run the same command again.", file=sys.stderr)
+        return
+
+    if exc.code == "dispensing_unconfigured":
+        print(
+            f"newt create: the console cannot serve the {name!r} starter kit right now — "
+            "it is missing the credential that reads it.",
+            file=sys.stderr,
+        )
+        print(
+            "        Your key is fine. This is ours, not yours.",
+            file=sys.stderr,
+        )
+        print("        Fix: report it — nothing you can change on this machine helps.", file=sys.stderr)
+        return
+
+    if exc.http_status is not None:
+        print(
+            f"newt create: the console at {console} answered {exc.reason} while serving the "
+            f"{name!r} starter kit.",
+            file=sys.stderr,
+        )
+        print(
+            "        The registry resolved the name, so the kit exists; handing over its "
+            "bytes is what failed.",
+            file=sys.stderr,
+        )
+        print("        Fix: try again, and report it if it persists.", file=sys.stderr)
+        return
+
+    print(
+        f"newt create: lost the connection to the console at {console} while downloading the "
+        f"{name!r} starter kit — {exc.reason}.",
+        file=sys.stderr,
+    )
+    print("        Nothing was written.", file=sys.stderr)
+    print("        Fix: check your network and run the same command again.", file=sys.stderr)
+
+
+def _say_bad_archive(name: str, exc: BadArchive) -> None:
+    print(
+        f"newt create: the archive for the {name!r} starter kit is not the shape a "
+        f"repository archive has — {exc}.",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was unpacked. This is ours, not yours: either the pinned "
+        "commit points at something unexpected, or the download was corrupted in "
+        "transit.",
+        file=sys.stderr,
+    )
+    print("        Fix: run the same command again; report it if it repeats.", file=sys.stderr)
+
+
+def _acquire(
+    template: Template,
+    name: str,
+    console: str,
+    api_key: str | None,
+    dest: pathlib.Path,
+    *,
+    do_git: bool,
+    as_json: bool,
+) -> int:
+    """Fetch, unpack, and say plainly what landed and where."""
+    if dest.exists() and any(dest.iterdir()):
+        _say_target_exists(dest)
+        return EXIT_TARGET_EXISTS
+
+    try:
+        if template.is_private:
+            # Guarded by the caller: a private kit with no key never gets this far.
+            archive = _fetch_private_tarball(console, name, api_key or "")
+        else:
+            archive = _fetch_public_tarball(template.repo or "", template.ref or "")
+    except FetchFailed as exc:
+        # The console's own vocabulary for "who are you" outranks the transport status:
+        # 401 alone cannot tell an absent key from a rejected one.
+        if exc.code == "needs_key":
+            _say_needs_key(name)
+            return EXIT_NEEDS_KEY
+        if exc.code == "key_rejected":
+            print(
+                f"newt create: the console rejected your key ({exc.reason}).", file=sys.stderr
+            )
+            print(
+                "        The key was found and sent — it was refused. Rotate it in the "
+                "console, or run `newt login` again.",
+                file=sys.stderr,
+            )
+            return EXIT_KEY_REJECTED
+        _say_fetch_failed(name, console, template, exc)
+        return EXIT_FETCH_FAILED
+
+    try:
+        files = _unpack_tarball(archive, dest)
+    except BadArchive as exc:
+        _say_bad_archive(name, exc)
+        return EXIT_BAD_ARCHIVE
+
+    git_state = _git_init(dest) if do_git else "skipped: --no-git"
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "template": name,
+                    "repo": template.repo,
+                    "ref": template.ref,
+                    "directory": str(dest),
+                    "files": files,
+                    "git": git_state,
+                    "remote": None,
+                }
+            )
+        )
+        return EXIT_OK
+
+    ref_note = f" at {template.ref[:12]}" if template.ref else ""
+    print(f"Created {dest} — the {name} starter kit{ref_note}, {files} files.")
+    print("")
+    print("  It's yours: no remote, no history of ours. The driver versions this kit")
+    print("  pinned came with it, so they match the firmware it was tested against.")
+    if git_state == "initialized":
+        print("")
+        print("  An empty git repository was initialized — no commits, no remote. Your")
+        print("  first commit is yours to make:")
+        print(f"      git -C {dest} add -A && git -C {dest} commit -m 'Initial commit'")
+    elif git_state.startswith("unavailable"):
+        print("")
+        print(f"  NOT a git repository: {git_state[len('unavailable: '):]}.")
+        print(f"      Run 'git init' in {dest} yourself once git is available.")
+    else:
+        print("")
+        print(f"  NOT a git repository (--no-git). Run 'git init {dest}' if you want one.")
+    return EXIT_OK
+
+
 def cmd_create(args: list[str]) -> int:
     if any(a in ("-h", "--help") for a in args):
         _usage()
         return EXIT_OK
 
     as_json = "--json" in args
+    do_git = "--no-git" not in args
     positional = [a for a in args if not a.startswith("-")]
 
     console = _console_url()
@@ -270,6 +658,7 @@ def cmd_create(args: list[str]) -> int:
         return _list_templates(console, api_key, as_json)
 
     name = positional[0]
+    dest = _resolve_target(name, positional[1] if len(positional) > 1 else None)
 
     try:
         templates, source = load_registry(console, api_key)
@@ -293,15 +682,25 @@ def cmd_create(args: list[str]) -> int:
         _say_no_such_template(name, templates, source)
         return EXIT_NO_SUCH_TEMPLATE
 
-    if template.is_private and not template.repo:
-        # The console answered and did not hand over a fetchable location for this kit:
-        # either no key was sent, or the key that was sent is not entitled to it.
+    if template.is_private and not api_key:
+        # No point asking the console to broker a private kit for someone who has not
+        # said who they are — and "you need a key" is a better sentence than whatever
+        # a 401 would come back with.
         _say_needs_key(name)
         return EXIT_NEEDS_KEY
 
-    print(
-        f"newt create: resolved {name!r} to {template.repo}@{(template.ref or '')[:12]}, "
-        "and stopped — this build does not fetch and unpack yet.",
-        file=sys.stderr,
+    if not template.is_private and not (template.repo and template.ref):
+        # A public row with nowhere to fetch from is a broken registry, not a missing
+        # template — and a developer must not be told to go find a key for it.
+        print(
+            f"newt create: the registry lists {name!r} as public but gives no repository "
+            "and pinned commit to fetch it from.",
+            file=sys.stderr,
+        )
+        print("        That is ours, not yours — nothing was written.", file=sys.stderr)
+        print("        Fix: report it; `newt upgrade` may already carry the correction.", file=sys.stderr)
+        return EXIT_FETCH_FAILED
+
+    return _acquire(
+        template, name, console, api_key, dest, do_git=do_git, as_json=as_json
     )
-    return EXIT_NOT_ACQUIRED

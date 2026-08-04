@@ -76,7 +76,7 @@ FALLBACK_TEMPLATES: tuple[Template, ...] = (
 
 
 def parse_templates(payload: object) -> list[Template]:
-    """Turn a console ``/api/templates`` response into rows.
+    """Turn a console ``/api/cli/templates`` response into rows.
 
     Raises ``ValueError`` on anything that is not the documented shape. A
     malformed registry is a contract violation to surface, never an empty list to
