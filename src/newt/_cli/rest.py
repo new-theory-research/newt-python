@@ -52,7 +52,8 @@ def _usage() -> None:
     print("  its own zero — it is not a calibration command.")
     print("")
     print("Exit codes:")
-    print("  0    every part rested and confirmed it ended de-energized")
+    print("  0    every part rested, de-energized, and said what state it ended")
+    print("       in — that answer is printed for you, never graded here")
     print("  1    a usage error, or the source refused to come up")
     print("  2    refused before anything was commanded — no rest sequence declared")
     print("  3    a declared step failed; that part did not finish its sequence")
@@ -104,6 +105,7 @@ def cmd_rest(args: list[str]) -> int:
         RestError,
         read_declarations,
         require_rest_source,
+        run_rest,
     )
 
     try:
@@ -134,7 +136,5 @@ def cmd_rest(args: list[str]) -> int:
     except RestError as exc:
         print(f"\n[newt rest] {exc}", file=sys.stderr)
         return EXIT_USAGE
-
-    from newt.rest import run_rest
 
     return run_rest(source, plan)
