@@ -96,6 +96,17 @@ def _console_rejects_key(monkeypatch, code=401):
     monkeypatch.setattr(create_mod, "_fetch_registry", boom)
 
 
+def _console_errors(monkeypatch, status=500, reason="Internal Server Error"):
+    """Something answered and said no — a different problem from silence, and the
+    CLI is required to tell them apart."""
+    from urllib.error import HTTPError
+
+    def boom(*a, **kw):
+        raise HTTPError("http://console/api/cli/templates", status, reason, {}, None)
+
+    monkeypatch.setattr(create_mod, "_fetch_registry", boom)
+
+
 # A registry the console might serve that is deliberately NOT the built-in table —
 # so a test asserting "the error printed the registry's real contents" can tell the
 # difference between reading the registry and reciting a hardcoded list.
@@ -457,10 +468,18 @@ def _raises(monkeypatch, exc):
     monkeypatch.setattr(create_mod, "_read_url", _read)
 
 
-def _http_error(status, reason, code=None):
+def _http_error(status, reason, code=None, error=None):
+    """A console error body — its machine-readable ``code`` and the sentence it
+    wrote for a human. ``error`` is separable from ``reason`` on purpose: the
+    console says things the CLI cannot know, and a test has to be able to prove
+    that sentence reached the developer rather than being replaced by a status."""
     from urllib.error import HTTPError
 
-    payload = json.dumps({"code": code, "error": reason}).encode() if code else b"{}"
+    payload = (
+        json.dumps({"code": code, "error": error if error is not None else reason}).encode()
+        if code
+        else b"{}"
+    )
     return HTTPError("http://console/x", status, reason, {}, io.BytesIO(payload))
 
 
@@ -1072,48 +1091,237 @@ def test_a_third_bare_word_is_refused_rather_than_dropped(monkeypatch, tmp_path)
     assert not (tmp_path / "k").exists()
 
 
-def test_every_refusal_across_the_whole_verb_shares_no_string(monkeypatch, tmp_path):
-    """Rule 12 over the finished surface — resolution, acquisition, and the handoff.
-    Twelve causes, twelve opening lines, collected from real runs so that a future
-    edit collapsing two of them fails here instead of in someone's terminal."""
+def test_the_console_gets_to_say_why_in_its_own_words(monkeypatch, tmp_path):
+    """The console knows things this side cannot — which of its credentials is
+    missing, what GitHub told it — and it writes a sentence saying so. Repeating
+    ``502 Bad Gateway`` back at a developer instead of relaying that sentence
+    throws away the only part of the message that names the cause."""
+    _with_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(
+        monkeypatch,
+        _http_error(
+            502,
+            "Bad Gateway",
+            code="upstream_unavailable",
+            error="GitHub answered 500 for the 'beta-private' starter kit at its pinned commit.",
+        ),
+    )
+
+    rc, out, err = _capture(["beta-private", str(tmp_path / "x")], monkeypatch)
+
+    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert "GitHub answered 500" in err, f"the console's own sentence was dropped: {err!r}"
+    assert "upstream_unavailable" in err.splitlines()[0], (
+        "two console-named causes must not open with the same line"
+    )
+
+
+def test_a_console_that_says_nothing_useful_still_gets_a_full_refusal(monkeypatch, tmp_path):
+    """The relay is not a dependency. A console that answers an error with no body
+    at all must still produce a message that names the cause and the next step."""
+    _with_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _raises(monkeypatch, _http_error(500, "Internal Server Error"))
+
+    rc, out, err = _capture(["beta-private", str(tmp_path / "y")], monkeypatch)
+
+    assert rc == create_mod.EXIT_FETCH_FAILED
+    assert "500 Internal Server Error" in err
+    assert "Fix:" in err
+
+
+def test_a_registry_row_with_nowhere_to_fetch_from_is_not_a_failed_download(
+    monkeypatch, tmp_path
+):
+    """A public row missing its repository and pinned commit is our registry being
+    broken. Reporting it with the download failure's exit code tells a developer —
+    and an agent reading the number — to retry something that has nowhere to retry
+    into, and it is not what the help text says that code means."""
+    _no_key(monkeypatch)
+    _console_returns(
+        monkeypatch, {"templates": [{"name": "alpha", "visibility": "public"}]}
+    )
+
+    rc, out, err = _capture(["alpha", str(tmp_path / "z")], monkeypatch)
+
+    assert rc == create_mod.EXIT_REGISTRY_BROKEN
+    assert rc != create_mod.EXIT_FETCH_FAILED
+    assert not (tmp_path / "z").exists(), "nothing may be written for a broken row"
+    assert "ours, not yours" in err
+    assert "12" in _capture_usage(), "an exit code the help text does not document"
+
+
+def _capture_usage():
+    out = io.StringIO()
+    stdout, sys.stdout = sys.stdout, out
+    try:
+        create_mod._usage()
+    finally:
+        sys.stdout = stdout
+    return out.getvalue()
+
+
+# --- Rule 12 over the whole surface -----------------------------------------
+#
+# The three tests below are deliberately checked against the *module*, not against
+# the list of cases someone remembered to write. A refusal nobody exercises is a
+# string nobody has read, and the way that happens is a new one being added a year
+# from now next to a test file that still passes.
+
+
+def _refusal_names():
+    """Every refusal in the verb, read off the module rather than listed here."""
+    return sorted(n for n in vars(create_mod) if n.startswith("_say_"))
+
+
+def _watch_refusals(monkeypatch):
+    """Record which refusal each run takes, without changing what it prints."""
+    seen: list[str] = []
+    for name in _refusal_names():
+        original = getattr(create_mod, name)
+
+        def _wrap(*a, _name=name, _original=original, **kw):
+            seen.append(_name)
+            return _original(*a, **kw)
+
+        monkeypatch.setattr(create_mod, name, _wrap)
+    return seen
+
+
+def _documented_exit_codes():
+    """The exit codes ``newt create --help`` promises, parsed out of the help text."""
+    return {int(m.group(1)) for m in re.finditer(r"^  (\d+) ", _capture_usage(), re.M)}
+
+
+def _run_every_refusal(monkeypatch, tmp_path):
+    """Take every refusing path the verb has, once, and return what each printed.
+
+    Ordered roughly as a developer would meet them: the name, the key, the
+    console, the directory, the download, the archive, the kit's own setup step.
+    """
     from urllib.error import URLError
 
-    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
-    collected = []
+    collected: list[tuple[str, int, str]] = []
 
-    def _run(args):
-        collected.append(_capture(args, monkeypatch)[2])
+    def _run(label, args):
+        rc, _out, err = _capture(args, monkeypatch)
+        collected.append((label, rc, err))
 
+    # --- resolution: the name, and who is asking -----------------------------
     _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
     _serves(monkeypatch, _kit_tarball(setup=_SETUP_OK))
-    _run(["nope", str(tmp_path / "a")])
-    _run(["beta-private", str(tmp_path / "b")])
-    _run(["alpha", str(tmp_path / "c"), "--json", "--setup"])
-    _run(["alpha", str(tmp_path / "d"), "one", "two"])
-    _run(["--leader-ip", "10.0.0.2"])
-    _run(["--setup"])
+    _run("unknown name", ["nope", str(tmp_path / "a")])
+    _run("private, no key", ["beta-private", str(tmp_path / "b")])
+    _run("--json with a setup step", ["alpha", str(tmp_path / "c"), "--json", "--setup"])
+    _run("a third bare word", ["alpha", str(tmp_path / "d"), "one", "two"])
+    _run("kit arguments, no kit", ["--leader-ip", "10.0.0.2"])
+    _run("--setup, no kit", ["--setup"])
 
+    _console_returns(
+        monkeypatch,
+        {"templates": [{"name": "alpha", "visibility": "public"}]},
+    )
+    _run("public row with nowhere to fetch from", ["alpha", str(tmp_path / "m")])
+
+    # --- the console: silent, answering an error, or refusing the key --------
+    _console_down(monkeypatch)
+    _run("console silent, private kit", ["trossen-widowx", str(tmp_path / "n")])
+    _console_errors(monkeypatch, 500, "Internal Server Error")
+    _run("console errored, private kit", ["trossen-widowx", str(tmp_path / "o")])
+    _console_rejects_key(monkeypatch)
+    _run("key refused while listing", ["alpha", str(tmp_path / "p")])
+
+    # --- the directory, and the download ------------------------------------
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
     occupied = tmp_path / "e"
     occupied.mkdir()
     (occupied / "x").write_text("x")
-    _run(["alpha", str(occupied)])
+    _run("directory in the way", ["alpha", str(occupied)])
 
     _raises(monkeypatch, _http_error(404, "Not Found"))
-    _run(["alpha", str(tmp_path / "f")])
+    _run("github refused", ["alpha", str(tmp_path / "f")])
     _raises(monkeypatch, URLError("Connection reset by peer"))
-    _run(["alpha", str(tmp_path / "g")])
+    _run("github unreachable", ["alpha", str(tmp_path / "g")])
+
+    _with_key(monkeypatch)
+    _raises(monkeypatch, _http_error(503, "Service Unavailable", code="dispensing_unconfigured"))
+    _run("console holds no credential", ["beta-private", str(tmp_path / "q")])
+    _raises(
+        monkeypatch,
+        _http_error(502, "Bad Gateway", code="upstream_unavailable",
+                    error="GitHub answered 500 for that kit at its pinned commit."),
+    )
+    _run("console could not get it", ["beta-private", str(tmp_path / "r")])
+    _raises(monkeypatch, URLError("Broken pipe"))
+    _run("console lost mid-download", ["beta-private", str(tmp_path / "s")])
+    _raises(monkeypatch, _http_error(401, "Unauthorized", code="key_rejected"))
+    _run("key refused while downloading", ["beta-private", str(tmp_path / "t")])
+
+    _no_key(monkeypatch)
     _serves(monkeypatch, b"not-a-tarball")
-    _run(["alpha", str(tmp_path / "h")])
+    _run("not an archive", ["alpha", str(tmp_path / "h")])
 
+    # --- the handoff ---------------------------------------------------------
     _serves(monkeypatch, _kit_tarball())
-    _run(["alpha", str(tmp_path / "i"), "--setup"])
+    _run("kit declares no setup step", ["alpha", str(tmp_path / "i"), "--setup"])
     _serves(monkeypatch, _kit_tarball(setup=_SETUP_OK, mode=0o644))
-    _run(["alpha", str(tmp_path / "j"), "--setup"])
+    _run("setup step will not start", ["alpha", str(tmp_path / "j"), "--setup"])
     _serves(monkeypatch, _kit_tarball(setup="#!/bin/sh\nexit 3\n"))
-    _run(["alpha", str(tmp_path / "l"), "--setup"])
+    _run("setup step exited non-zero", ["alpha", str(tmp_path / "l"), "--setup"])
 
-    firsts = [s.splitlines()[0] for s in collected]
-    assert len(set(firsts)) == len(firsts), f"two causes share a message: {firsts}"
+    return collected
+
+
+def test_every_refusal_across_the_whole_verb_shares_no_string(monkeypatch, tmp_path):
+    """Rule 12 over the finished surface — resolution, acquisition, and the handoff.
+
+    Twenty causes, collected from real runs, so that a future edit collapsing two
+    of them fails here rather than in someone's terminal at 2am. Two of the runs
+    are the *same* cause reached by different routes — a key refused while listing
+    templates and a key refused while downloading one — and they are meant to share
+    their message: one problem, one fix, one sentence.
+    """
+    collected = _run_every_refusal(monkeypatch, tmp_path)
+
+    firsts = {}
+    for label, _rc, err in collected:
+        first = err.splitlines()[0]
+        if label == "key refused while downloading":
+            assert first == firsts["key refused while listing"], (
+                "a refused key is one cause and must read the same either way"
+            )
+            continue
+        assert first not in firsts.values(), f"{label} shares a message with another cause"
+        firsts[label] = first
+
+
+def test_every_refusal_says_what_to_do_next(monkeypatch, tmp_path):
+    """The third part of Rule 12. Naming the cause and the owner is not enough —
+    a developer reading any of these has to be told what to do with it."""
+    for label, _rc, err in _run_every_refusal(monkeypatch, tmp_path):
+        assert "Fix" in err, f"{label} names no next step: {err!r}"
+
+
+def test_no_refusal_goes_unread_and_no_exit_code_is_undocumented(monkeypatch, tmp_path):
+    """The surface checked against itself.
+
+    Two ways this file could quietly stop covering the verb: someone adds a
+    refusal and no test reaches it, or someone adds an exit code and only the
+    help text knows about it. Both fail here.
+    """
+    seen = _watch_refusals(monkeypatch)
+    collected = _run_every_refusal(monkeypatch, tmp_path)
+
+    unreached = set(_refusal_names()) - set(seen)
+    assert not unreached, f"refusals no test reaches: {sorted(unreached)}"
+
+    used = {rc for _label, rc, _err in collected}
+    documented = _documented_exit_codes()
+    assert used - {create_mod.EXIT_OK} == documented - {create_mod.EXIT_OK}, (
+        f"exit codes used {sorted(used)} vs documented {sorted(documented)}"
+    )
 
 
 def test_the_handoff_added_no_robot_knowledge_to_the_verb(monkeypatch, tmp_path):

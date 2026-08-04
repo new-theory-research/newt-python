@@ -65,6 +65,7 @@ EXIT_BAD_ARCHIVE = 8
 EXIT_NO_SETUP_STEP = 9
 EXIT_SETUP_UNRUNNABLE = 10
 EXIT_SETUP_REFUSED = 11
+EXIT_REGISTRY_BROKEN = 12
 
 
 def _usage() -> None:
@@ -117,6 +118,7 @@ def _usage() -> None:
     print("  9    the kit landed, but it declares no setup step to run")
     print("  10   the kit landed, but its setup step could not be started")
     print("  11   the kit landed, and its setup step exited non-zero")
+    print("  12   the registry's row for that kit is unusable — ours to fix, not yours")
 
 
 def _console_url() -> str:
@@ -198,7 +200,7 @@ def _list_templates(console: str, api_key: str | None, as_json: bool) -> int:
         templates, source = load_registry(console, api_key)
     except RegistryUnavailable as exc:
         if exc.key_rejected:
-            _say_key_rejected(console, exc)
+            _say_key_rejected(console, exc.reason)
             return EXIT_KEY_REJECTED
         templates, source = list(FALLBACK_TEMPLATES), "fallback"
 
@@ -227,8 +229,14 @@ def _list_templates(console: str, api_key: str | None, as_json: bool) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The refusals. Five causes, five strings — no two of these may ever collapse
-# into one another, and the tests assert it.
+# The refusals — resolution first, then acquisition, then the handoff, each in
+# its own section below.
+#
+# Every one of them is a ``_say_*`` function, and that is a rule rather than a
+# habit: the tests enumerate this module's ``_say_*`` names, exercise all of
+# them, and fail if any two produce the same opening line or if one of them was
+# never reached. A refusal written inline would be a refusal nothing checks, so
+# a new one gets a name here even if it is only printed from one place.
 # ---------------------------------------------------------------------------
 
 def _say_no_such_template(name: str, templates, source: str) -> None:
@@ -287,11 +295,20 @@ def _say_console_unreachable(name: str, console: str, exc: RegistryUnavailable) 
     print(fix, file=sys.stderr)
 
 
-def _say_key_rejected(console: str, exc: RegistryUnavailable) -> None:
-    print(f"newt create: the console rejected your key ({exc.reason}).", file=sys.stderr)
+def _say_key_rejected(console: str, reason: str) -> None:
+    """One cause, one message, whichever call it surfaced on.
+
+    A key can be refused while listing templates or while downloading one. That is
+    the same problem with the same fix, so it gets the same sentence — but written
+    once, here, rather than typed out twice and left to drift apart.
+    """
+    print(f"newt create: the console rejected your key ({reason}).", file=sys.stderr)
     print(
-        "        The key was found and sent — it was refused. Rotate it in the console, "
-        "or run `newt login` again.",
+        "        The key was found and sent — it was refused.",
+        file=sys.stderr,
+    )
+    print(
+        "        Fix: rotate it in the console, or run `newt login` again.",
         file=sys.stderr,
     )
 
@@ -314,7 +331,10 @@ class FetchFailed(Exception):
     ``source`` is which door was knocked on — ``"github"`` for a public kit fetched
     direct, ``"console"`` for a private one brokered for us. They are different
     problems with different fixes and they never share a message. ``code`` carries
-    the console's own machine-readable reason when it gave one.
+    the console's own machine-readable reason when it gave one, and ``detail`` the
+    sentence it wrote for a human — the console knows things this side cannot (which
+    of its own credentials is missing, what GitHub told it), and a status line
+    repeated back is a worse error than the sentence it already sent.
     """
 
     def __init__(
@@ -324,12 +344,14 @@ class FetchFailed(Exception):
         source: str,
         http_status: int | None = None,
         code: str | None = None,
+        detail: str | None = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.source = source
         self.http_status = http_status
         self.code = code
+        self.detail = detail
 
 
 def _read_url(req: Request, timeout: float) -> bytes:
@@ -372,14 +394,20 @@ def _fetch_private_tarball(
         return _read_url(req, timeout)
     except HTTPError as exc:
         # The console names its own causes. Read the code rather than guessing from
-        # the status — 401 alone cannot tell "no key" from "not your key".
-        code = None
+        # the status — 401 alone cannot tell "no key" from "not your key" — and keep
+        # the sentence it wrote, because it is the half that knows why.
+        code = detail = None
         try:
-            code = json.loads(exc.read()).get("code")
+            body = json.loads(exc.read())
+            code, detail = body.get("code"), body.get("error")
         except Exception:
-            code = None
+            code = detail = None
         raise FetchFailed(
-            f"{exc.code} {exc.reason}", source="console", http_status=exc.code, code=code
+            f"{exc.code} {exc.reason}",
+            source="console",
+            http_status=exc.code,
+            code=code,
+            detail=detail if isinstance(detail, str) and detail.strip() else None,
         ) from exc
     except URLError as exc:
         raise FetchFailed(str(exc.reason), source="console") from exc
@@ -548,16 +576,25 @@ def _say_fetch_failed(name: str, console: str, template: Template, exc: FetchFai
         return
 
     if exc.http_status is not None:
+        # Anything the console named that this side has no action for is relayed in the
+        # console's own words. It knows which of its credentials is missing and what
+        # GitHub told it; this side knows neither, and "502 Bad Gateway" repeated back
+        # is a worse sentence than the one already sent. Naming the code in the opening
+        # line is also what keeps two console-named causes from reading identically.
+        headline = f"({exc.code})" if exc.code else f"— {exc.reason}"
         print(
-            f"newt create: the console at {console} answered {exc.reason} while serving the "
-            f"{name!r} starter kit.",
+            f"newt create: the console at {console} would not serve the {name!r} starter "
+            f"kit {headline}.",
             file=sys.stderr,
         )
-        print(
-            "        The registry resolved the name, so the kit exists; handing over its "
-            "bytes is what failed.",
-            file=sys.stderr,
-        )
+        if exc.detail:
+            print(f"        The console said: {exc.detail}", file=sys.stderr)
+        else:
+            print(
+                f"        It answered {exc.reason} and said nothing more. The registry "
+                "resolved the name, so the kit exists; handing over its bytes is what failed.",
+                file=sys.stderr,
+            )
         print("        Fix: try again, and report it if it persists.", file=sys.stderr)
         return
 
@@ -771,14 +808,7 @@ def _acquire(
             _say_needs_key(name)
             return EXIT_NEEDS_KEY
         if exc.code == "key_rejected":
-            print(
-                f"newt create: the console rejected your key ({exc.reason}).", file=sys.stderr
-            )
-            print(
-                "        The key was found and sent — it was refused. Rotate it in the "
-                "console, or run `newt login` again.",
-                file=sys.stderr,
-            )
+            _say_key_rejected(console, exc.reason)
             return EXIT_KEY_REJECTED
         _say_fetch_failed(name, console, template, exc)
         return EXIT_FETCH_FAILED
@@ -925,6 +955,37 @@ def _say_json_cannot_run_setup() -> None:
     )
 
 
+def _say_registry_row_unfetchable(name: str) -> None:
+    """A public row with nowhere to fetch from is a broken registry, not a missing
+    template — and it is not a download that failed either, which is why it has an
+    exit code of its own. A developer who reads "the archive could not be
+    downloaded" retries; there is nothing here to retry into.
+    """
+    print(
+        f"newt create: the registry lists {name!r} as public but gives no repository "
+        "and pinned commit to fetch it from.",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was written, and nothing was downloaded — there was nowhere to "
+        "download from. That is ours, not yours.",
+        file=sys.stderr,
+    )
+    print("        Fix: report it; `newt upgrade` may already carry the correction.", file=sys.stderr)
+
+
+def _say_setup_without_a_kit() -> None:
+    print(
+        "newt create: --setup runs a kit's setup step, and no kit was named.",
+        file=sys.stderr,
+    )
+    print(
+        "        Nothing was written. Fix: newt create <template> [directory] "
+        "--setup, or drop --setup to list the templates.",
+        file=sys.stderr,
+    )
+
+
 def _say_no_template_named(forwarded: list[str]) -> None:
     print(
         f"newt create: no template named — the arguments given "
@@ -963,15 +1024,7 @@ def cmd_create(args: list[str]) -> int:
             _say_no_template_named(forwarded)
             return EXIT_USAGE
         if parsed.setup:
-            print(
-                "newt create: --setup runs a kit's setup step, and no kit was named.",
-                file=sys.stderr,
-            )
-            print(
-                "        Nothing was written. Fix: newt create <template> [directory] "
-                "--setup, or drop --setup to list the templates.",
-                file=sys.stderr,
-            )
+            _say_setup_without_a_kit()
             return EXIT_USAGE
         return _list_templates(console, api_key, as_json)
 
@@ -990,7 +1043,7 @@ def cmd_create(args: list[str]) -> int:
         templates, source = load_registry(console, api_key)
     except RegistryUnavailable as exc:
         if exc.key_rejected:
-            _say_key_rejected(console, exc)
+            _say_key_rejected(console, exc.reason)
             return EXIT_KEY_REJECTED
         # The console is down. Public kits still have somewhere to come from; private
         # ones do not, and saying "no such template" here would be a lie.
@@ -1016,16 +1069,8 @@ def cmd_create(args: list[str]) -> int:
         return EXIT_NEEDS_KEY
 
     if not template.is_private and not (template.repo and template.ref):
-        # A public row with nowhere to fetch from is a broken registry, not a missing
-        # template — and a developer must not be told to go find a key for it.
-        print(
-            f"newt create: the registry lists {name!r} as public but gives no repository "
-            "and pinned commit to fetch it from.",
-            file=sys.stderr,
-        )
-        print("        That is ours, not yours — nothing was written.", file=sys.stderr)
-        print("        Fix: report it; `newt upgrade` may already carry the correction.", file=sys.stderr)
-        return EXIT_FETCH_FAILED
+        _say_registry_row_unfetchable(name)
+        return EXIT_REGISTRY_BROKEN
 
     return _acquire(
         template,
