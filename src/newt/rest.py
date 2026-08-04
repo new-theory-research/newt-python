@@ -30,12 +30,22 @@ declared halt, and the final state is whatever the part reports about itself,
 printed verbatim and compared against nothing. A verb that decided which strings
 meant "off" would be deciding it for rigs it has never seen.
 
+**A state nobody read is never reported as rested.** The promise of this verb is
+not that it sent the moves — it is that it can tell you where each part ended
+up. So a part that cannot be asked what state it is in ends the run unconfirmed
+and non-zero, whether it never answered or never declared a way to be asked.
+That is a real cost: a rig whose parts do not report a state cannot get a clean
+exit out of this verb no matter how well the sequence ran. It is the cost the
+card takes on purpose, because the alternative is a process that prints "rested"
+on the one night an arm is still holding.
+
 **It is not calibration.** Nothing here changes what an arm believes about its
 own zero. No set-zero, no factory reset, no jig. A rest sequence moves an arm to
 where its rig says to leave it, and that is all it does.
 
 Exit codes:
-  0    every part ran its declared sequence and confirmed it ended de-energized
+  0    every part ran its declared sequence, was de-energized, and answered when
+       asked what state it ended in — that answer is printed, never graded
   1    a usage error, or the source refused to come up
   2    refused before anything was commanded — a part declares no rest sequence
   3    a declared step failed; that part did not finish its sequence
@@ -44,9 +54,13 @@ Exit codes:
 """
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass
 from typing import Protocol, Sequence, runtime_checkable
 
-#: Every part ran its declared sequence and confirmed it ended de-energized.
+#: Every part ran its declared sequence, was de-energized, and said what state
+#: it ended in. The saying is what this code certifies — the state itself is
+#: printed for the operator and compared against nothing.
 EXIT_RESTED = 0
 #: A usage error, or the source refused to come up.
 EXIT_USAGE = 1
@@ -323,3 +337,290 @@ def read_declarations(parts: Sequence[Restable]) -> list[tuple[Restable, list[Re
             )
         )
     return plan
+
+
+# --------------------------------------------------------------------------- #
+# The run — everything below commands hardware
+# --------------------------------------------------------------------------- #
+
+#: The declared sequence ran to the end.
+RESTED = "rested"
+#: A step raised. The part stopped where that step left it.
+STEP_FAILED = "step failed"
+#: Ctrl+C landed before this part's sequence ran. It never moved.
+ABANDONED = "abandoned"
+
+
+@dataclass(frozen=True)
+class PartOutcome:
+    """Where one part ended up, and how much of that this process actually knows.
+
+    ``sequence`` and ``confirmed`` are deliberately separate. A part can run
+    every declared step and still end unconfirmed, and that combination is the
+    one the summary must not round off: the moves were sent, and nobody can tell
+    you what the arm did with them.
+    """
+
+    part: str
+    #: RESTED, STEP_FAILED, or ABANDONED.
+    sequence: str
+    #: Step names that ran to completion, in order.
+    steps_done: tuple[str, ...]
+    #: What the part says about itself afterward, verbatim and interpreted by
+    #: nothing here. None when it did not say.
+    state: str | None
+    #: True only when the part was de-energized *and* said so afterward.
+    confirmed: bool
+    #: Why the sequence stopped short. None when it did not.
+    sequence_detail: str | None = None
+    #: Why the final state is unknown. None when it is known.
+    unconfirmed_because: str | None = None
+
+
+def _say(line: str, *, error: bool = False) -> None:
+    """Print as it happens, never saved for the summary.
+
+    The operator may be walking toward the rig while this runs, so a line about
+    an arm that would not stop has to reach them before the run ends.
+    """
+    print(f"[newt rest] {line}", file=sys.stderr if error else sys.stdout, flush=True)
+
+
+def _run_sequence(part: Restable, steps: Sequence[RestStep]) -> tuple[str, tuple[str, ...], str | None]:
+    """Drive one part through its declared steps, in the order the rig gave them.
+
+    Returns (sequence outcome, the steps that completed, what went wrong).
+
+    A step that raises ends *this part's* sequence and no other's. It ends this
+    part's because the next step is a move commanded from a position this
+    process can no longer account for — the rig said "then go here," and "here"
+    was reached from somewhere the rig did not plan on. It ends no other part's
+    because an arm that stopped answering is not a reason to leave the arm next
+    to it standing.
+    """
+    done: list[str] = []
+    for step in steps:
+        try:
+            _say(f"{part.name}: {step.name}…")
+            step.run()
+        except Exception as exc:
+            _say(
+                f"{part.name} stopped on {step.name!r} ({type(exc).__name__}: {exc}). "
+                "It is wherever that step left it, and the rest of its sequence is "
+                "NOT being run — the next move would start from a place this process "
+                "cannot account for. It is still going to be de-energized.",
+                error=True,
+            )
+            return STEP_FAILED, tuple(done), f"stopped on {step.name!r} ({type(exc).__name__}: {exc})"
+        done.append(step.name)
+    return RESTED, tuple(done), None
+
+
+def _de_energize(part: Restable) -> tuple[bool, str | None, str | None]:
+    """Halt one part and ask it what state it is in.
+
+    Returns (confirmed, the state it declared, why it is unconfirmed).
+
+    Three ways this ends unconfirmed, three sentences, because they want three
+    different next moves: the halt itself was refused, the part declares no way
+    to be asked, or it was asked and would not answer. What they share is the
+    exit code, because the operator does the same physical thing for all three.
+    """
+    try:
+        part.halt()
+    except Exception as exc:
+        _say(
+            f"HALT UNANSWERED on {part.name} ({type(exc).__name__}: {exc}). That part "
+            "may STILL BE HOLDING TORQUE — power it down at the wall before "
+            "approaching it. This process could not de-energize it and cannot tell you "
+            "what it is doing.",
+            error=True,
+        )
+        return False, None, f"the halt was refused ({type(exc).__name__}: {exc})"
+
+    reporter = getattr(part, "motor_state", None)
+    if not callable(reporter):
+        _say(
+            f"{part.name} was de-energized, but it declares no motor_state(), so this "
+            "process cannot tell you what state it actually ended in — only that the "
+            "halt call returned. Treat it as unconfirmed until you have looked at it.",
+            error=True,
+        )
+        return False, None, "it declares no motor_state(), so it was never asked"
+
+    try:
+        state = reporter()
+    except Exception as exc:
+        _say(
+            f"{part.name} was de-energized, but would not say what state it is in "
+            f"({type(exc).__name__}: {exc}). The halt call returned; the read back did "
+            "not. Treat it as unconfirmed until you have looked at it.",
+            error=True,
+        )
+        return False, None, f"it was asked and did not answer ({type(exc).__name__}: {exc})"
+
+    if state is None:
+        _say(
+            f"{part.name} was de-energized, but its motor_state() came back empty, so "
+            "there is nothing to report about where it ended. Treat it as unconfirmed "
+            "until you have looked at it.",
+            error=True,
+        )
+        return False, None, "its motor_state() came back empty"
+
+    text = str(state)
+    _say(f"{part.name} de-energized — it reports: {text}")
+    return True, text, None
+
+
+def _describe(source: object) -> str:
+    """One line naming the rig, or a line saying it would not give one.
+
+    A describe() that raises does not stop this run, which is where this verb
+    parts company with ``newt teleop``: teleop is about to drive a rig for
+    minutes and a rig that will not answer is reason enough not to start, but
+    this verb is the thing an operator reaches for *after* something already
+    broke. Refusing to put arms away because the rig would not state its own
+    name would be refusing at exactly the wrong moment. The label is never
+    invented — it says what happened.
+    """
+    try:
+        return str(source.describe())
+    except Exception as exc:
+        return f"unnamed ({type(exc).__name__} from describe(): {exc})"
+
+
+def _exit_code(outcomes: Sequence[PartOutcome], interrupted: bool) -> int:
+    """The single number, chosen by what the operator would do differently.
+
+    Unconfirmed outranks everything, including the interrupt: it is the only
+    outcome that asks for something physical before anyone walks up to the rig,
+    and an exit code that reported "you pressed Ctrl+C" over "an arm may be
+    holding" would rank the operator's last keystroke above their safety.
+    """
+    if any(not o.confirmed for o in outcomes):
+        return EXIT_UNCONFIRMED
+    if interrupted:
+        return 130
+    if any(o.sequence != RESTED for o in outcomes):
+        return EXIT_STEP_FAILED
+    return EXIT_RESTED
+
+
+def _report(rig: str, outcomes: Sequence[PartOutcome], interrupted: bool) -> None:
+    """Print the summary — one line per part, and the loud line if one is owed."""
+    width = max((len(o.part) for o in outcomes), default=0) + 1
+    lines = []
+    for o in outcomes:
+        state = o.state if o.confirmed else f"UNCONFIRMED — {o.unconfirmed_because}"
+        detail = f" ({o.sequence_detail})" if o.sequence_detail else ""
+        lines.append(f"  {(o.part + ':').ljust(width)} {o.sequence}{detail} · {state}")
+
+    unconfirmed = [o.part for o in outcomes if not o.confirmed]
+    print(
+        "\n=== newt rest ===\n"
+        f"rig:         {rig}\n"
+        # About the run, not about the rig: "completed" says every part was
+        # reached, and says nothing about how any of them went. Each part's own
+        # line below carries that, so one word can never stand in for two.
+        f"run:         {'interrupted (Ctrl+C)' if interrupted else 'completed'}\n"
+        "parts:\n" + "\n".join(lines) + "\n"
+        f"ended:       "
+        + (
+            # Not "all parts off". Every part was halted and every part answered
+            # when asked; what the answers mean is the rig's vocabulary, printed
+            # above and graded by the person reading it.
+            "EVERY PART ANSWERED — read the state each one reports above"
+            if not unconfirmed
+            else "NOT CONFIRMED: " + ", ".join(unconfirmed)
+        ),
+        # Flushed so the summary lands before the loud line below it in a piped
+        # log, not after it — an operator reading a captured run should see the
+        # same order they would have seen at the terminal.
+        flush=True,
+    )
+
+    if unconfirmed:
+        # Louder than the exit code, because this is the one outcome where the
+        # operator has to do something physical before walking up to the rig.
+        # The kit set this wording the first time an arm dropped mid-session.
+        print(
+            f"\n[newt rest] {', '.join(unconfirmed)} did not confirm de-energized. Power "
+            "it down at the wall before approaching it — this process cannot tell you "
+            "whether it is holding.",
+            file=sys.stderr,
+        )
+
+
+def run_rest(source: object, plan: Sequence[tuple[Restable, Sequence[RestStep]]]) -> int:
+    """Run every part's already-read declaration, de-energize, report, return the code.
+
+    Called only after :func:`require_rest_source` and :func:`read_declarations`
+    have accepted the rig, so by here every part has a name, a halt, and a
+    non-empty sequence of named, runnable steps. Nothing below re-checks that;
+    the refusals all happened while the rig was still standing.
+
+    The order is fixed and it is the whole design: every part's sequence, in the
+    order the rig declared its parts, then a de-energize pass over *every* part
+    including the ones whose sequences failed, then the read-back, then one
+    summary. The de-energize pass is not conditional on anything — an arm that
+    fell over mid-sequence is exactly the arm that must not be left holding.
+
+    Ctrl+C abandons the remaining moves and nothing else. Whatever has already
+    been driven is still de-energized and still reported, because a rest run
+    interrupted half-way is the state most in need of an honest summary.
+    """
+    rig = _describe(source)
+    _say(f"putting away — {rig}. Ctrl+C abandons the remaining moves; every part is "
+         "still de-energized and reported.")
+
+    sequences: list[tuple[Restable, str, tuple[str, ...], str | None]] = []
+    interrupted = False
+    for part, steps in plan:
+        if interrupted:
+            sequences.append((part, ABANDONED, (), "Ctrl+C landed before it ran"))
+            continue
+        try:
+            outcome, done, detail = _run_sequence(part, steps)
+        except KeyboardInterrupt:
+            interrupted = True
+            _say(
+                f"interrupted (Ctrl+C) during {part.name}'s sequence — the remaining "
+                "moves are NOT being run. Every part is still being de-energized.",
+                error=True,
+            )
+            sequences.append((part, ABANDONED, (), "Ctrl+C landed mid-sequence"))
+            continue
+        sequences.append((part, outcome, done, detail))
+
+    outcomes: list[PartOutcome] = []
+    for part, outcome, done, detail in sequences:
+        # Every part, every time, in its own try. One arm that will not stop is
+        # not a reason to stop asking the next one.
+        try:
+            confirmed, state, because = _de_energize(part)
+        except KeyboardInterrupt:
+            # A second Ctrl+C during the de-energize pass. Do not honour it as a
+            # way out — the remaining parts have not been stopped yet.
+            interrupted = True
+            confirmed, state, because = False, None, "Ctrl+C landed during the halt"
+            _say(
+                f"Ctrl+C during {part.name}'s halt — it may still be holding, and this "
+                "process is continuing through the remaining parts rather than leaving "
+                "them energized.",
+                error=True,
+            )
+        outcomes.append(
+            PartOutcome(
+                part=part.name,
+                sequence=outcome,
+                steps_done=done,
+                state=state,
+                confirmed=confirmed,
+                sequence_detail=detail,
+                unconfirmed_because=because,
+            )
+        )
+
+    _report(rig, outcomes, interrupted)
+    return _exit_code(outcomes, interrupted)
