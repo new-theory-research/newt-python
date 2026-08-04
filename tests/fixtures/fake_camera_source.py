@@ -12,7 +12,12 @@ of hiding in a wall of identical pixels.
 """
 from __future__ import annotations
 
-from newt.recording import SINGLE_ARM_DESCRIPTOR, CameraSpec, SimulatedSource
+from newt.recording import (
+    SINGLE_ARM_DESCRIPTOR,
+    CameraOpenError,
+    CameraSpec,
+    SimulatedSource,
+)
 
 
 class FakeCameraSource(SimulatedSource):
@@ -62,6 +67,74 @@ class FakeCameraSource(SimulatedSource):
 def make_camera_source():
     """Factory the CLI's --source loader calls with no arguments — one camera."""
     return FakeCameraSource()
+
+
+class DyingCameraSource(FakeCameraSource):
+    """A camera that answers a few reads and then stops — the mid-episode death.
+
+    Standing in for a unit that re-enumerates on the USB bus half-way through a
+    take. The reads that succeeded were real; the ones after it never arrive, and
+    nothing is substituted to cover them.
+    """
+
+    def __init__(self, *, raise_after: int = 1, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._raise_after = raise_after
+
+    def read_frames(self) -> dict:
+        if self._frame_tick >= self._raise_after:
+            raise OSError("device disconnected mid-stream")
+        return super().read_frames()
+
+
+class _UnencodableFrame:
+    """A frame the encoder path cannot take: it refuses to become pixels.
+
+    A real one is a frame whose layout is not the bgr24 its CameraSpec declared.
+    This double reaches the same place — the write that turns a frame into bytes —
+    without needing a camera that lies about its own format.
+    """
+
+    def __array__(self, *args, **kwargs):
+        raise ValueError("frame is not the bgr24 layout its camera declared")
+
+
+class UnencodableFrameSource(FakeCameraSource):
+    """Delivers frames the writer cannot encode. The episode must be refused, not
+    committed with the frames that happened to make it in."""
+
+    def read_frames(self) -> dict:
+        self._frame_tick += 1
+        return {cam.id: _UnencodableFrame() for cam in self.cameras}
+
+
+def make_camera_that_will_not_open():
+    """A rig whose declared camera never comes up. The source refuses the whole
+    run rather than returning a shorter camera list — a camera quietly dropped
+    from the list is a silently state-only episode."""
+    raise CameraOpenError(
+        "wrist", "no device on the bus answered (simulated bring-up failure)"
+    )
+
+
+def make_dying_camera_source():
+    """Answers one read, then stops answering."""
+    return DyingCameraSource(raise_after=1)
+
+
+def make_unencodable_frame_source():
+    return UnencodableFrameSource()
+
+
+def make_mismatched_camera_source():
+    """Two cameras whose streams disagree in shape — the episode format carries
+    one width/height/fps for the whole set, so this cannot be declared honestly."""
+    return FakeCameraSource(
+        cameras=[
+            CameraSpec("cam0", 64, 48, 30),
+            CameraSpec("cam1", 128, 96, 15),
+        ]
+    )
 
 
 def make_three_camera_source():

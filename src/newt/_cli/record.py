@@ -15,6 +15,9 @@ The rhythm (the Phase-0 bench grammar):
 - a live frame counter + a moving joint readout print during capture;
 - Ctrl+H kills: Session.kill() torques off via the source and leaves no partial
   dir, then the process exits 130;
+- a camera bridge that died mid-episode makes the keep a refusal: the Session
+  raises, nothing is committed, and the process exits 3 — a distinct code from
+  the bad-invocation 1 and the frontend's own refusal 2;
 - a kept-count toward ``--target``;
 - ``--json`` drives the same Session from line-delimited stdin commands and emits
   line-delimited events — for an agent. Agents are a door, not load-bearing.
@@ -207,6 +210,8 @@ _CTRL_H = "\x08"
 
 
 def _run_interactive(session, opts: dict) -> int:
+    from newt.recording import CameraCaptureFailed
+
     if not _print_preflight(session, as_json=False):
         session.close()
         return 2
@@ -230,6 +235,12 @@ def _run_interactive(session, opts: dict) -> int:
 
             st = session.status()
             print(f"\n[rec] stopped — {st.state_count} state frames, {st.dropped_state} dropped.", flush=True)
+            if st.frame_counts:
+                cams = ", ".join(
+                    f"{cam_id}: {n} frames, {st.dropped_frames.get(cam_id, 0)} dropped"
+                    for cam_id, n in sorted(st.frame_counts.items())
+                )
+                print(f"[rec] cameras — {cams}.", flush=True)
             report = session.dropped_report()
             if report:
                 print(f"[rec] {report}", flush=True)
@@ -247,7 +258,11 @@ def _run_interactive(session, opts: dict) -> int:
                 verdict = _get_verdict()
 
             if verdict == "keep":
-                path = session.end_episode(keep=True)
+                try:
+                    path = session.end_episode(keep=True)
+                except CameraCaptureFailed as exc:
+                    print(f"\n[newt record] EPISODE REFUSED — {exc}", file=sys.stderr, flush=True)
+                    return 3
                 print(f"[verdict] KEPT — {path}", flush=True)
             else:
                 session.end_episode(keep=False)
@@ -333,7 +348,14 @@ def _live_indicator(st) -> None:
         pos = " ".join(f"{p:+.2f}" for p in first)
     else:
         pos = "(waiting for first read)"
-    sys.stdout.write(f"\r[rec] frames={st.state_count:5d}  dropped={st.dropped_state:3d}  pos[{pos}]")
+    line = f"\r[rec] frames={st.state_count:5d}  dropped={st.dropped_state:3d}  pos[{pos}]"
+    if st.frame_counts:
+        cams = " ".join(f"{cam_id}={n}" for cam_id, n in sorted(st.frame_counts.items()))
+        line += f"  cam[{cams}]"
+        camdrop = sum(st.dropped_frames.values())
+        if camdrop:
+            line += f" camdrop={camdrop}"
+    sys.stdout.write(line)
     sys.stdout.flush()
 
 
@@ -367,6 +389,8 @@ def _run_json(session, opts: dict) -> int:
     command: {"cmd": "start"} | {"cmd": "stop", "keep": true|false} |
     {"cmd": "status"} | {"cmd": "close"}. Every action emits a JSON event line.
     A door for agents — it drives the library, holds no behavior of its own."""
+    from newt.recording import CameraCaptureFailed
+
     if not _print_preflight(session, as_json=True):
         session.close()
         return 2
@@ -389,8 +413,13 @@ def _run_json(session, opts: dict) -> int:
                 _emit({"event": "started", "episode_id": ep_id})
             elif action == "stop":
                 keep = bool(cmd.get("keep", True))
-                path = session.end_episode(keep=keep)
+                try:
+                    path = session.end_episode(keep=keep)
+                except CameraCaptureFailed as exc:
+                    _emit({"event": "refused", "cause": exc.cause, "reason": str(exc)})
+                    return 3
                 state_count, dropped_state = session.last_episode_counts
+                frame_counts, dropped_frames = session.last_episode_frames
                 st = session.status()
                 _emit({
                     "event": "stopped",
@@ -398,6 +427,8 @@ def _run_json(session, opts: dict) -> int:
                     "path": str(path) if path else None,
                     "state_count": state_count,
                     "dropped_state": dropped_state,
+                    "frame_counts": frame_counts,
+                    "dropped_frames": dropped_frames,
                     "kept_total": st.kept,
                 })
                 if target is not None and st.kept >= target:
@@ -411,6 +442,8 @@ def _run_json(session, opts: dict) -> int:
                     "episode_id": st.episode_id,
                     "state_count": st.state_count,
                     "dropped_state": st.dropped_state,
+                    "frame_counts": st.frame_counts,
+                    "dropped_frames": st.dropped_frames,
                     "kept": st.kept,
                     "target": st.target,
                 })

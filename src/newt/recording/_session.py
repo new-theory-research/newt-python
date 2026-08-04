@@ -21,44 +21,20 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from newt.recording._seam import RecordingSource, StateDescriptor
+from newt.recording._seam import (
+    CameraCaptureFailed,
+    RecordingSource,
+    StateDescriptor,
+    camera_failure_message,
+)
 from newt.recording._sink import LocalSink, Sink
 
 # Community-native rate: Molmo extraction is 30fps/30Hz; this is the spec
 # state_frequency default. Override per Session for a different rig.
 DEFAULT_STATE_HZ = 30
-
-
-def _camera_failure_message(cause: str, exc: Exception) -> str:
-    """One string per cause. Two different causes never share one — a reader that
-    quit and an encoder that refused are different problems with different owners
-    and different next steps."""
-    detail = f"{type(exc).__name__}: {exc}"
-    if cause == "stopped_answering":
-        return (
-            "A camera stopped answering part-way through the episode: the source's "
-            f"read_frames() raised ({detail}).\n"
-            "Yours: the camera or its driver quit mid-capture — the frames simply "
-            "stopped arriving, and nothing was substituted to cover the gap.\n"
-            "Do now: the episode was discarded, so nothing partial was written. "
-            "Check the camera's connection (a USB re-enumeration mid-run does this) "
-            "and record again."
-        )
-    if cause == "encoder_refused":
-        return (
-            f"The video encoder refused a frame part-way through the episode ({detail}).\n"
-            "Ours: the frame reached us and we could not encode it — most often a "
-            "frame whose size or pixel layout is not the one its camera declared.\n"
-            "Do now: the episode was discarded, so nothing partial was written. "
-            "Check that every frame read_frames() returns matches the width, height "
-            "and 3-channel bgr24 layout its CameraSpec declares."
-        )
-    # Never reached through the two call sites above; kept so an added cause that
-    # forgets its string fails loudly instead of rendering an empty one.
-    raise AssertionError(f"no message written for camera failure cause {cause!r} ({detail})")
 
 
 @dataclass
@@ -73,6 +49,11 @@ class SessionStatus:
     target: int | None
     last_positions: dict[str, list[float]] | None
     closed: bool
+    # Per-camera counts for the in-flight episode. Empty on a state-only session,
+    # which is what a frontend renders against — the camera lines appear only for
+    # a rig that actually declared cameras.
+    frame_counts: dict[str, int] = field(default_factory=dict)
+    dropped_frames: dict[str, int] = field(default_factory=dict)
 
 
 class Session:
@@ -121,7 +102,11 @@ class Session:
         # (rather than in a frontend) is what keeps `newt record` a skin with no
         # camera flag and no camera identity.
         self._cameras = list(cameras) if cameras else list(getattr(source, "cameras", None) or [])
-        self._check_camera_bridge(source)
+        # Whether the source polls itself (a rig bridge) or the caller pushes with
+        # feed_frame. Only a source bridge gets a camera thread.
+        self._reads_frames = callable(getattr(source, "read_frames", None))
+        self._check_camera_bridge(source, declared_by_caller=bool(cameras))
+        self._check_cameras_are_declarable()
 
         # Provenance — declared, never verified (local-first capture).
         from newt.recording._writer import DEFAULT_AUTHOR, DEFAULT_LICENSE
@@ -139,9 +124,11 @@ class Session:
         self._last_positions: dict[str, list[float]] | None = None
         self._last_state_count = 0
         self._last_dropped_state = 0
+        self._last_frame_counts: dict[str, int] = {}
+        self._last_dropped_frames: dict[str, int] = {}
         self._closed = False
 
-    def _check_camera_bridge(self, source) -> None:
+    def _check_camera_bridge(self, source, *, declared_by_caller: bool) -> None:
         """Cameras and the read that fills them are one contract — refuse half of it.
 
         Both halves missing is the common case (state-only capture) and is fine.
@@ -149,9 +136,15 @@ class Session:
         with no reader means empty video files and an episode.json naming cameras
         that never delivered; a reader with nothing declared means frames pulled
         off hardware and thrown away while the episode claims to be state-only.
+
+        The contract is about the SOURCE's two halves, so it is checked only when
+        the source is the one declaring cameras. A caller that passes ``cameras=``
+        explicitly owns its own bridge and pushes through ``feed_frame`` — the
+        pattern that method's docstring has always described — and asking that
+        caller for a ``read_frames()`` would demand a second, racing bridge.
         """
-        has_reader = callable(getattr(source, "read_frames", None))
-        if self._cameras and not has_reader:
+        has_reader = self._reads_frames
+        if self._cameras and not has_reader and not declared_by_caller:
             raise TypeError(
                 f"This source declares {len(self._cameras)} camera(s) "
                 f"({', '.join(str(c.id) for c in self._cameras)}) but has no "
@@ -172,12 +165,40 @@ class Session:
                 "per camera the source actually opened — or drop read_frames()."
             )
 
+    def _check_cameras_are_declarable(self) -> None:
+        """Refuse a camera set the episode cannot honestly describe.
+
+        ``episode.json``'s ``camera_config`` carries ONE width, height and fps for
+        the whole set (v0.0.3), so a rig whose cameras disagree would be described
+        by whichever one came first and described wrongly for the rest. That is the
+        identity-extrinsics failure in a different costume: a shaped-right number
+        standing in for one nobody measured. Refuse at construction — before an
+        operator spends three minutes recording something the file will misdescribe.
+
+        This does not decide the format question (per-camera dimensions); it
+        refuses to answer it by accident.
+        """
+        if len(self._cameras) < 2:
+            return
+        shapes = {(c.width, c.height, c.fps) for c in self._cameras}
+        if len(shapes) == 1:
+            return
+        declared = ", ".join(f"{c.id}={c.width}x{c.height}@{c.fps}fps" for c in self._cameras)
+        raise TypeError(camera_failure_message("resolution_not_declarable", declared))
+
     @property
     def last_episode_counts(self) -> tuple[int, int]:
         """(state_count, dropped_state) of the most recently ended episode. A
         frontend reports these after end_episode(), since the live status() drops
         to zero once nothing is recording."""
         return self._last_state_count, self._last_dropped_state
+
+    @property
+    def last_episode_frames(self) -> tuple[dict[str, int], dict[str, int]]:
+        """(frames written, frames dropped) per camera id for the most recently
+        ended episode. Both empty for a state-only session — a frontend renders
+        the camera lines only when there were cameras."""
+        return dict(self._last_frame_counts), dict(self._last_dropped_frames)
 
     # --- the descriptive preflight (reverse-contract courtesy) --------------
 
@@ -264,11 +285,12 @@ class Session:
             target=self._capture_loop, name="newt-record-capture", daemon=True
         )
         self._loop_thread.start()
-        if self._cameras:
+        if self._cameras and self._reads_frames:
             # Its own thread on purpose: a camera read blocks for as long as the
             # hardware takes, and the state loop's rhythm is not this card's to
             # move. Started only when the source declared cameras, so the
-            # state-only path runs exactly the threads it ran before.
+            # state-only path runs exactly the threads it ran before — and never
+            # for a caller-owned bridge, which pushes through feed_frame itself.
             self._camera_thread = threading.Thread(
                 target=self._camera_loop, name="newt-record-cameras", daemon=True
             )
@@ -389,6 +411,8 @@ class Session:
             # nothing is recording).
             self._last_state_count = writer.state_count
             self._last_dropped_state = writer.dropped_state
+            self._last_frame_counts = writer.frame_counts
+            self._last_dropped_frames = writer.dropped_frames
 
         if not keep:
             writer.abandon()
@@ -401,7 +425,9 @@ class Session:
             cause, exc = self._camera_failure
             self._camera_failure = None
             writer.abandon()
-            raise RuntimeError(_camera_failure_message(cause, exc))
+            raise CameraCaptureFailed(
+                cause, camera_failure_message(cause, f"{type(exc).__name__}: {exc}")
+            )
 
         duration_s = writer.state_count * self._period_s
         path = writer.keep(duration_s)
@@ -426,24 +452,36 @@ class Session:
                 target=self._target,
                 last_positions=self._last_positions,
                 closed=self._closed,
+                frame_counts=w.frame_counts if w is not None else {},
+                dropped_frames=w.dropped_frames if w is not None else {},
             )
 
     def dropped_report(self) -> "str | None":
         """A human line summarizing dropped reads for the in-flight episode, or
         None when nothing is recording or nothing dropped. A frontend prints it;
-        the report itself is computed here so every frontend says the same thing."""
+        the report itself is computed here so every frontend says the same thing.
+
+        Camera drops are reported per camera and never rolled into the state
+        total: a rig that lost a tenth of one camera's frames and none of its
+        joints has a specific problem, and one blended percentage hides it."""
         with self._lock:
             w = self._writer
             if w is None:
                 return None
+            parts: list[str] = []
             total = w.state_count + w.dropped_state
-            if w.dropped_state == 0 or total == 0:
+            if w.dropped_state and total:
+                pct = 100.0 * w.dropped_state / total
+                parts.append(f"{w.dropped_state}/{total} state reads dropped ({pct:.1f}%)")
+            dropped_frames = w.dropped_frames
+            frame_counts = w.frame_counts
+            for cam_id, dropped in sorted(dropped_frames.items()):
+                reads = frame_counts.get(cam_id, 0) + dropped
+                pct = 100.0 * dropped / reads if reads else 0.0
+                parts.append(f"camera {cam_id}: {dropped}/{reads} frames dropped ({pct:.1f}%)")
+            if not parts:
                 return None
-            pct = 100.0 * w.dropped_state / total
-            return (
-                f"dropped-frame report — episode {w.episode_id}: "
-                f"{w.dropped_state}/{total} reads dropped ({pct:.1f}%)."
-            )
+            return f"dropped-frame report — episode {w.episode_id}: " + "; ".join(parts) + "."
 
     def kill(self) -> None:
         """Emergency teardown: abandon any in-flight episode (no partial dir),
