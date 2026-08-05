@@ -185,3 +185,74 @@ def test_the_dispatcher_knows_exactly_one_spelling_of_this_verb():
     assert verbs.count("rest") == 1
     for barred in ("home", "rehome", "park", "stow"):
         assert barred not in verbs
+
+
+# --------------------------------------------------------------------------- #
+# The rig declares its own source, so the recovery verb is two words
+# (newtrino-029 — the bench finding this card came from)
+# --------------------------------------------------------------------------- #
+
+class _Recorder:
+    """Stands in for the factory and remembers which spec reached it."""
+
+    def __init__(self) -> None:
+        self.spec = None
+
+    def __call__(self, spec):
+        self.spec = spec
+        raise RuntimeError("stopped at the seam — the test wanted the spec, not a rig")
+
+
+def test_a_configured_rig_puts_the_arm_away_with_no_flag(monkeypatch, tmp_path):
+    """`uv run newt rest` — the command Mattie reached for at the bench, on a rig
+    that declared its factory once. Asserted on *which* factory was reached: an
+    exit code cannot tell a resolved default from a refusal that happened to
+    match."""
+    config = tmp_path / "nt.toml"
+    config.write_text('[sources]\nrest = "declared_pkg:declared_factory"\n')
+    monkeypatch.setenv("NT_SITE_CONFIG", str(config))
+    recorder = _Recorder()
+    monkeypatch.setattr("newt._cli.rest.load_source", recorder)
+
+    _, _, err = _capture([], monkeypatch)
+    assert recorder.spec == "declared_pkg:declared_factory"
+    # The substitution is declared, not silent — this is the verb you reach for
+    # when something has already gone wrong, and it says what it is about to run.
+    assert str(config.resolve()) in err
+
+
+def test_the_flag_beats_the_file(monkeypatch, tmp_path):
+    """A flag is never overridden by a file. On this verb in particular: an
+    operator naming a source by hand at a bench is often doing it *because* the
+    declared one is the thing that went wrong."""
+    config = tmp_path / "nt.toml"
+    config.write_text('[sources]\nrest = "declared_pkg:declared_factory"\n')
+    monkeypatch.setenv("NT_SITE_CONFIG", str(config))
+    recorder = _Recorder()
+    monkeypatch.setattr("newt._cli.rest.load_source", recorder)
+
+    _capture(["--source", "typed_pkg:typed_factory"], monkeypatch)
+    assert recorder.spec == "typed_pkg:typed_factory"
+
+
+def test_a_short_name_resolves_in_the_verbs_own_namespace(monkeypatch):
+    """`newt rest --source live_pair`, not `--source rest_source:live_pair`.
+
+    The doubling Mattie named — "why do we need both --source and rest_source
+    before live_pair" — is a file-layout convention leaking into the interface.
+    The verb on the command line already carries that information, so the
+    namespace it resolves in is the verb, and the module name goes away."""
+    from newt._cli import _source_spec
+
+    monkeypatch.setattr(
+        _source_spec,
+        "_declared_sources",
+        lambda verb: [("live_pair", "rest_source:live_pair", "a-kit")]
+        if verb == "rest"
+        else [],
+    )
+    recorder = _Recorder()
+    monkeypatch.setattr("newt._cli.rest.load_source", recorder)
+
+    _capture(["--source", "live_pair"], monkeypatch)
+    assert recorder.spec == "rest_source:live_pair"
