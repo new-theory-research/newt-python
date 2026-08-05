@@ -820,6 +820,22 @@ def test_failure_headline_is_plain_words_not_bare_gate(gate, phrase):
     assert "failed at gate:" not in text.lower(), "the old bare-gate headline must be gone"
 
 
+def test_eval_has_a_phrase_but_no_position_in_the_gate_sequence():
+    """`eval` is translatable but unreachable, and the split is deliberate.
+
+    Checkpoint evaluation runs separately from a fine-tune, after the run finishes, so
+    the server never reports it as a run's failing gate. The phrase exists defensively —
+    if that ever changes, the headline is plain words instead of a bare token. The
+    sequence is a different job: it mirrors what the server can actually report, and is
+    the only thing the survival line reads. Putting `eval` in it would manufacture a
+    position for a gate the server has none for, and the survival line would then make a
+    checkpoint claim from it (Rule 10). Absent, `eval` gets the honest silence any
+    unplaceable gate gets."""
+    assert "eval" in ft._GATE_PLAIN
+    assert "eval" not in ft._PIPELINE_GATES
+    assert _survival_block("eval") is None
+
+
 def test_failure_technical_line_carries_the_raw_gate_token():
     """The raw gate token stays visible — on the technical line UNDER the plain headline —
     so a developer/agent still has the exact gate. This is the ft-precedent: plain first,
