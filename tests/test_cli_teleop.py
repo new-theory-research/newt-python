@@ -346,3 +346,58 @@ def test_the_frontend_hands_the_loop_the_rate_and_the_bare_kill_event(monkeypatc
     assert seen["source"] == "the-source"
     assert seen["rate_hz"] == 45.0
     assert isinstance(seen["kill"], threading.Event)
+
+
+# --------------------------------------------------------------------------- #
+# The rig declares its own source, so the verb is two words (newtrino-029)
+# --------------------------------------------------------------------------- #
+
+class _Recorder:
+    """Stands in for the factory and remembers which spec reached it."""
+
+    def __init__(self) -> None:
+        self.spec = None
+
+    def __call__(self, spec):
+        self.spec = spec
+        return "the-source"
+
+
+def _drive(args, monkeypatch):
+    """Run the verb far enough to see which factory it chose, with nothing real
+    on the far side of the kill key."""
+    recorder = _Recorder()
+    monkeypatch.setattr("newt._cli.teleop.load_source", recorder)
+    monkeypatch.setattr("newt.teleop.run_session", lambda *a, **k: 0)
+    monkeypatch.setattr(KillKey, "arm", lambda self: True)
+    monkeypatch.setattr(KillKey, "restore", lambda self: None)
+    rc, _, err = _capture(args, monkeypatch)
+    return rc, err, recorder
+
+
+def test_a_configured_rig_runs_the_factory_its_own_file_names(monkeypatch, tmp_path):
+    """The whole card in one assertion: `newt teleop`, no flag, on a bench that
+    said once which factory builds it. Asserted on *which* factory was reached,
+    because an exit code cannot tell a resolved default from a lucky no-op."""
+    config = tmp_path / "nt.toml"
+    config.write_text('[sources]\nteleop = "declared_pkg:declared_factory"\n')
+    monkeypatch.setenv("NT_SITE_CONFIG", str(config))
+
+    rc, err, recorder = _drive([], monkeypatch)
+    assert rc == 0
+    assert recorder.spec == "declared_pkg:declared_factory"
+    # And it says where that came from — a default nobody typed announces itself.
+    assert str(config.resolve()) in err
+
+
+def test_the_flag_beats_the_file(monkeypatch, tmp_path):
+    """The escape hatch answers to nobody. An operator overriding at the command
+    line is the case where a config file silently winning would be worst: they
+    are looking straight at the string they typed."""
+    config = tmp_path / "nt.toml"
+    config.write_text('[sources]\nteleop = "declared_pkg:declared_factory"\n')
+    monkeypatch.setenv("NT_SITE_CONFIG", str(config))
+
+    rc, _, recorder = _drive(["--source", "typed_pkg:typed_factory"], monkeypatch)
+    assert rc == 0
+    assert recorder.spec == "typed_pkg:typed_factory"
