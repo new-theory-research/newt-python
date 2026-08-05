@@ -36,7 +36,7 @@ import termios
 import threading
 import tty
 
-from newt._cli._source_spec import load_source
+from newt._cli._source_spec import SourceNotResolved, load_source, resolve_spec
 
 # Ctrl+H. The same byte `newt record` reads for the same meaning.
 _CTRL_H = "\x08"
@@ -54,7 +54,10 @@ def _usage() -> None:
     print("")
     print("Options:")
     print("  --source SPEC   Load a developer TeleopSource, MODULE:FACTORY")
-    print("                  (e.g. mypkg.rig:make_teleop). Required.")
+    print("                  (e.g. mypkg.rig:make_teleop). Optional on a configured")
+    print("                  rig: with no flag the verb reads [sources].teleop from")
+    print("                  your site config ($NT_SITE_CONFIG, else")
+    print("                  ~/.config/nt/nt.toml). The flag always wins.")
     print("  --rate HZ       Ticks per second (default: 30). The source is built")
     print("                  at the rate it is driven at — one decision, not two.")
     print("")
@@ -218,15 +221,13 @@ def cmd_teleop(args: list[str]) -> int:
         print("Run 'newt teleop --help' for usage.", file=sys.stderr)
         return 1
 
-    if not opts["source"]:
-        print(
-            "newt teleop: --source is required (the MODULE:FACTORY that builds your rig).",
-            file=sys.stderr,
-        )
-        print(
-            "        Fix: newt teleop --source mypkg.rig:make_teleop",
-            file=sys.stderr,
-        )
+    # Resolved here, where the old refusal was: before the rate check and before
+    # the kill key, so a rig that declares nothing is turned away with nothing
+    # armed and nothing connected.
+    try:
+        spec = resolve_spec("teleop", opts["source"], "mypkg.rig:make_teleop")
+    except SourceNotResolved as exc:
+        print(str(exc), file=sys.stderr)
         return 1
 
     if opts["rate"] <= 0:
@@ -253,7 +254,7 @@ def cmd_teleop(args: list[str]) -> int:
 
     try:
         try:
-            source = load_source(opts["source"])
+            source = load_source(spec)
         except KeyboardInterrupt:
             # Bring-up is where the factory connects, and on real hardware that
             # is seconds of blocking vendor motion — long enough for an operator

@@ -124,13 +124,16 @@ def test_unreadable_rate_names_what_was_passed(monkeypatch):
     assert "Hz" in err
 
 
-def test_missing_source_refuses_rather_than_guessing_a_rig(monkeypatch):
-    """No `--source` is a refusal. There is no rig to fall back to and the verb
-    does not invent one — the whole point of MODULE:FACTORY."""
+def test_undeclared_rig_refuses_rather_than_guessing_a_rig(monkeypatch, tmp_path):
+    """No `--source` and no declaration is a refusal. There is no rig to fall
+    back to and the verb does not invent one — the whole point of
+    MODULE:FACTORY. newtrino-029 gave the verb a second place to look, not
+    permission to guess when both are empty."""
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "nowhere" / "nt.toml"))
     rc, _, err = _capture([], monkeypatch)
     assert rc == 1
-    assert "--source is required" in err
-    assert "MODULE:FACTORY" in err
+    assert "--source was not given" in err
+    assert str(tmp_path / "nowhere" / "nt.toml") in err
 
 
 def test_non_positive_rate_stands_down_at_two(monkeypatch):
