@@ -28,6 +28,13 @@ rest, then de-energizes it, and exits 0. The two exits differ by exactly one
 thing — whether anything was put somewhere first — and the code knows which it
 is on.
 
+**The tick can also be a recording's clock.** ``run_session(recorder=...)`` is
+what ``newt record --teleop`` passes: after each action is sent, the source is
+asked what state that tick produced and the answer is handed to the recorder.
+One loop, because the arms take one client — and the driven channel is whatever
+the source says it is, so a rig that reports the action it was just given
+records the action that actually drove it rather than a second read of it.
+
 **A halt is never invented here.** The verb calls what the embodiment declares
 and reports what the embodiment declares afterward, verbatim. A source that
 declares no halt is refused, loudly, before anything is driven: a second
@@ -96,6 +103,29 @@ class TeleopSource(Protocol):
         ...
 
     def send_action(self, action: Any) -> None:
+        ...
+
+
+@runtime_checkable
+class TickRecorder(Protocol):
+    """Where a driven tick is written down, when the operator asked for that.
+
+    The loop knows two things about a recorder and no more: every tick has a
+    state to hand it, and the session ends either kept or discarded. What an
+    episode is, what format it is in, and where it lands are none of this
+    module's business — the frontend that passed the recorder in owns all of it,
+    the same way it owns the keyboard.
+
+    ``record_tick`` receives what ``source.read_state()`` returned for the tick
+    that has just been *sent*, and the timestamp of that tick. ``finish`` runs
+    once, before the rig is put away or de-energized: the rest move is motion
+    nobody demonstrated, and it must not land inside the recording.
+    """
+
+    def record_tick(self, channels: Any, ts_ns: int) -> None:
+        ...
+
+    def finish(self, *, keep: bool) -> None:
         ...
 
 
@@ -340,7 +370,11 @@ def _check_kill(kill: threading.Event) -> None:
 
 
 def _loop(
-    source: TeleopSource, rate_hz: float, kill: threading.Event, tally: Tally
+    source: TeleopSource,
+    rate_hz: float,
+    kill: threading.Event,
+    tally: Tally,
+    recorder: "TickRecorder | None" = None,
 ) -> None:
     """Hand each action from the source to the sink, at rate_hz, until aborted.
 
@@ -351,6 +385,13 @@ def _loop(
     so, because a gap in a dataset is a gap. Teleop cannot: the sink would sit
     still while whoever is driving keeps moving and believes it is tracking. So
     the first failure ends the session.
+
+    With a ``recorder``, this tick is also the recording's clock. The state is
+    read *after* the send and handed straight over, so what the episode holds for
+    a tick is the state of a rig that has already been told where to go — and the
+    source is the one that decides what that state is, including whether its
+    driven channel repeats the action it was just given rather than re-reading
+    it. The verb never reads twice and never looks inside either value.
     """
     period = 1.0 / rate_hz
 
@@ -401,6 +442,30 @@ def _loop(
             ) from exc
 
         tally.ticks += 1
+
+        if recorder is not None:
+            # Stamped here, not in the writer: this is the moment the rig was
+            # commanded, and a timestamp taken further down the path would date
+            # the frame by how long the path took.
+            ts_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            try:
+                channels = source.read_state()
+            except Exception as exc:
+                raise TeleopError(
+                    f"The source drove the rig but could not say what it did, on tick "
+                    f"{tally.ticks} ({type(exc).__name__}: {exc}).\n"
+                    "Yours: read_state() raised on a source that had just accepted an "
+                    "action. The rig is being driven; it is the recording half of the "
+                    "same object that stopped answering.\n"
+                    "Do now: every part is being de-energized, and the episode is kept "
+                    "with the ticks that did record — nothing was invented for this "
+                    "one.\n"
+                    "Then: a composed source's read_state() reports drops as None per "
+                    "channel; raising from it means something worse than a missed read, "
+                    "and its message says what."
+                ) from exc
+            recorder.record_tick(channels, ts_ns)
+
         remaining = period - (time.perf_counter() - started)
         if remaining > 0:
             # Event.wait, not sleep: a Ctrl+H pressed mid-period wakes the loop
@@ -420,6 +485,7 @@ def run_session(
     *,
     rate_hz: float = DEFAULT_RATE_HZ,
     kill: threading.Event,
+    recorder: "TickRecorder | None" = None,
 ) -> int:
     """Drive ``source`` at ``rate_hz`` until the kill fires or the operator ends it.
 
@@ -433,6 +499,14 @@ def run_session(
     The ending happens in a ``finally``, not after the try: an exception nobody
     expected — a bug in the loop, an OOM — must still leave every part
     de-energized before its traceback surfaces.
+
+    ``recorder``, when given, makes the tick the clock of a recording as well as
+    of the rig. It is closed out first in that ending, before anything is put
+    away: **the kill discards, every other exit keeps.** A kill leaves no
+    episode because a panic stop is not a demonstration; a fault keeps what was
+    driven up to it, because those ticks happened and throwing them away would
+    lose a take the operator gave. Which one it was is said out loud by the
+    recorder at the moment it happens, not inferred later from an exit code.
     """
     try:
         parts = _require_source(source)
@@ -471,7 +545,7 @@ def run_session(
             "Ctrl+C to end (it puts the rig away first), Ctrl+H to kill (it does not).",
             flush=True,
         )
-        _loop(source, rate_hz, kill, tally)
+        _loop(source, rate_hz, kill, tally, recorder)
     except _KillFired:
         outcome = "emergency_stop"
     except KeyboardInterrupt:
@@ -482,6 +556,23 @@ def run_session(
         print(f"\n{exc}", file=sys.stderr)
     finally:
         wall_s = time.perf_counter() - started
+        if recorder is not None:
+            # First, and never after: putting the rig away is a move nobody
+            # demonstrated, and an episode still open through it would record the
+            # arms stowing themselves as part of the task.
+            try:
+                recorder.finish(keep=outcome != "emergency_stop")
+            except Exception as exc:
+                # Loud, and then on with the ending. A recording that could not be
+                # closed out is bad; a rig left energized because closing it out
+                # raised is worse.
+                print(
+                    f"[newt teleop] the recording could not be closed out "
+                    f"({type(exc).__name__}: {exc}) — continuing to de-energize the rig. "
+                    "Check what landed on disk before trusting it.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if outcome == "interrupted":
             reports, killed_mid_rest = _put_away(parts, kill)
             if killed_mid_rest:

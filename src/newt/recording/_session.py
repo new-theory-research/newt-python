@@ -12,6 +12,12 @@ The capture loop runs on a background thread between ``start_episode()`` and
 read into the in-flight episode. A frontend that wants a live readout calls
 ``status()`` on its own cadence; it never touches the loop or the writer.
 
+One Session does not poll: ``state_pushed=True`` says the caller's own loop is
+the clock and hands each tick over through ``feed_state()``. That exists for the
+loop that is already driving the hardware it would otherwise be polled for —
+single-client arms cannot answer two clocks — and it changes who calls, never
+what is written.
+
 Generalized from rebot-bench's ``record_session.py``: the rhythm, the dropped-
 frame report, the kill-leaves-no-dir guarantee, and the simulate-via-fake-source
 pattern are all preserved — lifted out of the keyboard script into the library so
@@ -81,6 +87,7 @@ class Session:
         camera_stub_reason: str | None = None,
         target: int | None = None,
         sink: Sink | None = None,
+        state_pushed: bool = False,
     ) -> None:
         if not hasattr(source, "read_state") or not hasattr(source, "descriptor"):
             raise TypeError(
@@ -95,6 +102,13 @@ class Session:
         self._target = target
         self._camera_stub_reason = camera_stub_reason
         self._sink = sink if sink is not None else LocalSink(self._dest)
+        # Who owns the state clock. False (the default, and every existing
+        # caller) is this Session: start_episode spins the capture thread and it
+        # polls the source at the state rate. True means the caller's own loop is
+        # the clock and pushes each tick through feed_state — the case where the
+        # same tick that drives an arm is the one that has to record it, and two
+        # clocks on single-client hardware are not an option.
+        self._state_pushed = state_pushed
 
         # Camera specs (CameraSpec instances) are accepted but state-only capture
         # is the default; the writer imports lazily, so we hold raw specs here.
@@ -281,10 +295,11 @@ class Session:
         )
         self._stop_loop.clear()
         self._camera_failure = None
-        self._loop_thread = threading.Thread(
-            target=self._capture_loop, name="newt-record-capture", daemon=True
-        )
-        self._loop_thread.start()
+        if not self._state_pushed:
+            self._loop_thread = threading.Thread(
+                target=self._capture_loop, name="newt-record-capture", daemon=True
+            )
+            self._loop_thread.start()
         if self._cameras and self._reads_frames:
             # Its own thread on purpose: a camera read blocks for as long as the
             # hardware takes, and the state loop's rhythm is not this card's to
@@ -368,6 +383,48 @@ class Session:
         a race, not a refusal."""
         self._camera_failure = (cause, exc)
         self._stop_loop.set()
+
+    def feed_state(self, channels: dict, ts_ns: int | None = None) -> None:
+        """Push one tick's state into the in-flight episode. The state twin of
+        ``feed_frame``, and the same reason: the loop that already holds the
+        hardware is the one that reads it.
+
+        ``channels`` is what ``read_state()`` returns — one entry per declared
+        channel, ``None`` where that channel produced nothing this tick. A
+        ``None`` is a counted drop, exactly as it is on the polled path: nothing
+        is repeated, interpolated or zero-filled to keep the count even.
+
+        ``ts_ns`` is the tick's own timestamp, passed in rather than taken here,
+        because the honest answer to *when was this state true* is when the tick
+        that produced it ran — not when it reached the writer.
+
+        Only a Session constructed with ``state_pushed=True`` accepts this. On a
+        polled Session the capture thread is already reading the source, and a
+        second writer on a second clock would interleave two rhythms into one
+        episode with nothing in the file saying so.
+        """
+        if not self._state_pushed:
+            raise RuntimeError(
+                "feed_state() on a Session that polls its source itself.\n"
+                "Yours: this Session was constructed without state_pushed=True, so its "
+                "capture thread is already reading the source at the state rate; these "
+                "pushed frames would be a second clock writing into the same episode.\n"
+                "Fix: construct the Session with state_pushed=True when your own loop "
+                "owns the tick, or stop calling feed_state and let the Session poll."
+            )
+        with self._lock:
+            if self._writer is None:
+                return
+            ts = ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
+            shown: dict[str, list[float]] = {}
+            for key, state in channels.items():
+                if state is None:
+                    self._writer.note_dropped_state()
+                    continue
+                self._writer.write_state(key, state, ts)
+                shown[key] = list(state.positions)
+            if shown:
+                self._last_positions = shown
 
     def feed_frame(self, cam_id: str, frame, ts_ns: int | None = None) -> None:
         """Push one camera frame into the in-flight episode. A frontend that owns

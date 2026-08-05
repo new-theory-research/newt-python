@@ -22,6 +22,16 @@ The rhythm (the Phase-0 bench grammar):
 - ``--json`` drives the same Session from line-delimited stdin commands and emits
   line-delimited events — for an agent. Agents are a door, not load-bearing.
 - non-TTY without ``--json`` stands down loudly: there is no keyboard to read.
+
+``--teleop`` is a second rhythm on the same Session and a temporary door: one
+embodiment drives another and the same tick writes the episode, so one command
+records a demonstration — someone moving a rig while the rig writes down what
+they did. It borrows the teleop grammar whole — the kill key
+armed before anything connects, Ctrl+H de-energizes where the arms stand,
+Ctrl+C puts them away — and adds one decision of its own: the kill discards the
+episode, every other ending keeps it, and which one happened is printed rather
+than left to the exit code. The flag is spelled provisionally; newtrino-030
+names it.
 """
 from __future__ import annotations
 
@@ -56,6 +66,13 @@ def _usage() -> None:
     print("  --license TEXT  Declared license written to episode.json provenance.")
     print("  --drop-every N  (simulate) Inject a dropped read every N ticks.")
     print("  --json          Agent mode: line-delimited JSON events + stdin commands.")
+    print("  --teleop        TEMPORARY DOOR — record a demonstration: one embodiment")
+    print("                  drives another and the same tick writes the episode.")
+    print("                  Needs a --source that declares it does both.")
+    print("                  One episode per run; Ctrl+C ends it and keeps it,")
+    print("                  Ctrl+H kills (de-energize where it stands, no episode).")
+    print("                  This flag is a bench door pending the naming ruling in")
+    print("                  newtrino-030 — expect it to be spelled differently.")
     print("")
     print("  Recording needs the extra:  pip install \"newt[recording]\"")
 
@@ -73,8 +90,14 @@ def _parse(args: list[str]) -> dict:
         "license": None,
         "drop_every": 0,
         "json": False,
+        "teleop": False,
     }
-    flags = {"--simulate": "simulate", "--bimanual": "bimanual", "--json": "json"}
+    flags = {
+        "--simulate": "simulate",
+        "--bimanual": "bimanual",
+        "--json": "json",
+        "--teleop": "teleop",
+    }
     # option -> (key, converter)
     valued = {
         "--task": ("task", str),
@@ -458,6 +481,229 @@ def _run_json(session, opts: dict) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# --teleop: the demonstration door (temporary — newtrino-030 names it)
+#
+# The rest of this file is a skin on Session. This section is a skin on two
+# libraries at once: newt.teleop owns the tick, the kill and the two endings;
+# newt.recording.Session owns the episode. Neither learns about the other — the
+# tick hands its state to a recorder, and the recorder below is the thirty lines
+# that turn "a tick happened" into "an episode has one more frame in it".
+#
+# One process, because the arms take one client. One episode per run, because
+# the keyboard is already spoken for: Ctrl+H is the kill and Ctrl+C is the end,
+# and a SPACE rhythm on top of a live teleop loop is a second grammar this door
+# is too temporary to introduce.
+# --------------------------------------------------------------------------- #
+
+#: What a rig sets to say it does both. Asked for, never inferred: an object
+#: carrying `send_action` next to `read_state` is a shape, and a shape is not a
+#: statement that driving and recording the same rig at once is a thing this rig
+#: means to do. The name is provisional with the flag.
+_DECLARATION = "drives_and_records"
+
+
+def _refuse_composed(source) -> str | None:
+    """The refusal for a source that cannot do this, or None if it can.
+
+    Four causes, four strings. The presence checks below choose *which* message
+    an operator gets; none of them grants the capability — that is the
+    declaration's job, and the last branch is the only one that says yes.
+    """
+    drives = all(
+        callable(getattr(source, member, None))
+        for member in ("read_action", "send_action", "moving_parts")
+    )
+    records = callable(getattr(source, "read_state", None)) and getattr(
+        source, "descriptor", None
+    ) is not None
+
+    if records and not drives:
+        return (
+            "This source records the rig but does not drive it, so nothing would move "
+            "and the episode would be a rig sitting still.\n"
+            "Yours: the --source you passed is a recording source — it reads the rig and "
+            "drives none of it. Running it under --teleop is the one thing that looks "
+            "like it should work and does not.\n"
+            "Do now: nothing has been recorded. Whatever the factory connected is "
+            "connected.\n"
+            "Then: point --source at the factory that builds the pair for driving AND "
+            f"recording (it declares {_DECLARATION}), or drop --teleop and record the "
+            "arms as something else moves them."
+        )
+    if drives and not records:
+        return (
+            "This source drives the rig but has nothing to record from it, so there "
+            "would be a demonstration and no episode of it.\n"
+            "Yours: the --source you passed is a teleop source — it has read_action() "
+            "and send_action() but no descriptor/read_state() for the episode to be "
+            "written from.\n"
+            "Do now: nothing has been recorded. Whatever the factory connected is "
+            "connected.\n"
+            "Then: use the factory that builds the composed pair, or run `newt teleop "
+            "--source ...` if driving without recording is what you meant."
+        )
+    if not drives and not records:
+        return (
+            "This source neither drives nor records — it is not a rig this verb can "
+            "use at all.\n"
+            "Yours: the object --source built has neither read_action()/send_action() "
+            "nor descriptor/read_state().\n"
+            "Do now: nothing has been recorded. Whatever the factory connected is "
+            "connected.\n"
+            "Then: check that MODULE:FACTORY is the one you meant — a factory that "
+            "returns a config, a driver handle or None lands exactly here."
+        )
+    if getattr(source, _DECLARATION, False) is not True:
+        return (
+            f"This source can drive and can record, but it does not declare "
+            f"{_DECLARATION}, so this verb will not decide for it that doing both at "
+            "once is safe on this rig.\n"
+            "Yours: the object has the methods for both halves. That is a shape, not a "
+            "statement — a part built to be read can be sent actions it will refuse, "
+            "and finding that out mid-demonstration is the failure this refusal "
+            "exists to prevent.\n"
+            "Do now: nothing has been recorded. Whatever the factory connected is "
+            "connected.\n"
+            f"Then: set `{_DECLARATION} = True` on the object your factory returns, "
+            "once the part it drives is built the way driving needs."
+        )
+    return None
+
+
+class _EpisodeRecorder:
+    """One episode, fed by the teleop tick and closed out at the ending.
+
+    The frontend's translation layer and nothing else: `newt.teleop` calls two
+    methods, this calls three Session methods, and no decision about episodes
+    lives in between. It prints, because saying what happened to the recording
+    at the moment it happens is a frontend's job — and because "kept" and
+    "discarded" must never be something an operator has to infer from an exit
+    code.
+    """
+
+    def __init__(self, session) -> None:
+        self._session = session
+        self.episode_id = session.start_episode()
+        self.path: "Path | None" = None
+        self.refused = False
+
+    def record_tick(self, channels, ts_ns: int) -> None:
+        self._session.feed_state(channels, ts_ns)
+
+    def finish(self, *, keep: bool) -> None:
+        from newt.recording import CameraCaptureFailed
+
+        if not keep:
+            self._session.end_episode(keep=False)
+            print(
+                f"\n[newt record] episode {self.episode_id} DISCARDED — the kill fired, "
+                "and a panic stop is not a demonstration. No directory was written.",
+                flush=True,
+            )
+            return
+        try:
+            self.path = self._session.end_episode(keep=True)
+        except CameraCaptureFailed as exc:
+            self.refused = True
+            print(
+                f"\n[newt record] episode {self.episode_id} REFUSED — {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        state_count, dropped = self._session.last_episode_counts
+        frames, dropped_frames = self._session.last_episode_frames
+        line = (
+            f"\n[newt record] episode {self.episode_id} KEPT — {self.path}\n"
+            f"              {state_count} state frames, {dropped} dropped"
+        )
+        if frames:
+            line += "; " + ", ".join(
+                f"camera {cam_id}: {n} frames, {dropped_frames.get(cam_id, 0)} dropped"
+                for cam_id, n in sorted(frames.items())
+            )
+        print(line, flush=True)
+
+
+def _run_teleop(opts: dict) -> int:
+    """`newt record --teleop` — drive one embodiment from another, and write it down.
+
+    The order is the safety argument, and it is `newt teleop`'s: the kill key is
+    armed before the factory runs, because the factory is what connects and
+    energizes, and a session that cannot be killed must never reach it. What is
+    new is only where the episode opens — after the preflight the operator reads,
+    and before the first tick.
+    """
+    from newt._cli.teleop import KillKey, _stand_down_no_tty, _stand_down_unarmed
+    from newt.teleop import run_session
+
+    if not sys.stdin.isatty():
+        return _stand_down_no_tty()
+
+    kill_key = KillKey()
+    if not kill_key.arm():
+        return _stand_down_unarmed()
+
+    session = None
+    try:
+        try:
+            source = _load_source(opts["source"])
+        except KeyboardInterrupt:
+            print(
+                "\n[newt record] bring-up interrupted (Ctrl+C) — nothing was recorded "
+                "and the session never started. Check what the source reported about "
+                "anything it had already connected.",
+                file=sys.stderr,
+            )
+            return 130
+        except Exception as exc:
+            print(f"[newt record] {exc}", file=sys.stderr)
+            return 1
+
+        refusal = _refuse_composed(source)
+        if refusal is not None:
+            print(f"\n[newt record] REFUSING TO RECORD — {refusal}", file=sys.stderr)
+            return 2
+
+        from newt.recording import Session
+
+        session = Session(
+            source,
+            task=opts["task"],
+            output_dir=opts["dest"],
+            # One clock. The tick that drives the rig is the tick that writes
+            # the frame, so the Session must not also be polling: --hz is
+            # that one number, and the rig's own planner rate is its business.
+            state_pushed=True,
+            state_hz=opts["hz"],
+            author=opts["author"],
+            license=opts["license"],
+        )
+        if not _print_preflight(session, as_json=False):
+            return 2
+
+        recorder = _EpisodeRecorder(session)
+        print(
+            f"\n[newt record] recording episode {recorder.episode_id} while you drive. "
+            "Ctrl+C ends the session and KEEPS it; Ctrl+H kills — de-energize where "
+            "the arms stand, no episode.",
+            flush=True,
+        )
+        rc = run_session(
+            source, rate_hz=float(opts["hz"]), kill=kill_key.fired, recorder=recorder
+        )
+        if recorder.refused and rc == 0:
+            # The rig ended cleanly; the episode did not. Same code plain record
+            # uses for a recording it would not commit.
+            return 3
+        return rc
+    finally:
+        kill_key.restore()
+        if session is not None:
+            session.close()
+
+
+# --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
 
@@ -477,6 +723,49 @@ def cmd_record(args: list[str]) -> int:
         print("newt record: --task is required (the language prompt recorded per episode).", file=sys.stderr)
         print("        Fix: newt record --task \"pick up the cup\" --simulate", file=sys.stderr)
         return 1
+
+    if opts["teleop"]:
+        if not opts["source"]:
+            print(
+                "newt record --teleop: --source is required — it is what knows which "
+                "embodiment drives which, and how to build the driven one so that it "
+                "can be driven.",
+                file=sys.stderr,
+            )
+            print(
+                "        Fix: newt record --teleop --source mypkg.rig:make_demo "
+                "--task \"pick up the cup\"",
+                file=sys.stderr,
+            )
+            return 1
+        if opts["simulate"]:
+            print(
+                "[newt record] --teleop and --simulate: there is no simulated "
+                "demonstration. A recorded demonstration is a person moving a real "
+                "arm; with no rig there is nothing to move and nothing to write down.",
+                file=sys.stderr,
+            )
+            print(
+                "        Fix: drop --teleop to prove the episode format against the "
+                "simulated stream, or run --teleop on the bench with both arms up.",
+                file=sys.stderr,
+            )
+            return 1
+        if opts["json"]:
+            print(
+                "[newt record] --teleop and --json: this loop moves hardware, so it "
+                "refuses to run without a keyboard, and --json is what an agent uses "
+                "*instead* of one. There is no kill key on that path.",
+                file=sys.stderr,
+            )
+            print(
+                "        Fix: run --teleop in a real terminal. Whether an agent should "
+                "ever drive a demonstration — and what its kill would be — is "
+                "unanswered, and this verb will not answer it by accident.",
+                file=sys.stderr,
+            )
+            return 1
+        return _run_teleop(opts)
 
     # Non-TTY without --json: there is no keyboard to read. Stand down loudly.
     if not opts["json"] and not sys.stdin.isatty():
