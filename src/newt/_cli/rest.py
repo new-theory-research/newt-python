@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import sys
 
-from newt._cli._source_spec import load_source
+from newt._cli._source_spec import SourceNotResolved, load_source, resolve_spec
 
 
 def _usage() -> None:
@@ -46,7 +46,10 @@ def _usage() -> None:
     print("")
     print("Options:")
     print("  --source SPEC   Load a developer rest source, MODULE:FACTORY")
-    print("                  (e.g. mypkg.rig:make_rig). Required.")
+    print("                  (e.g. mypkg.rig:make_rig). Optional on a configured")
+    print("                  rig: with no flag the verb reads [sources].rest from")
+    print("                  your site config ($NT_SITE_CONFIG, else")
+    print("                  ~/.config/nt/nt.toml). The flag always wins.")
     print("")
     print("  This moves hardware. It does not change what any arm believes about")
     print("  its own zero — it is not a calibration command.")
@@ -90,12 +93,13 @@ def cmd_rest(args: list[str]) -> int:
         print("Run 'newt rest --help' for usage.", file=sys.stderr)
         return 1
 
-    if not opts["source"]:
-        print(
-            "newt rest: --source is required (the MODULE:FACTORY that builds your rig).",
-            file=sys.stderr,
-        )
-        print("        Fix: newt rest --source mypkg.rig:make_rig", file=sys.stderr)
+    # This is the command a tired operator types one-handed after something
+    # already went wrong. On a rig that declares its own factory, that is two
+    # words; the flag stays as the override.
+    try:
+        spec = resolve_spec("rest", opts["source"], "mypkg.rig:make_rig")
+    except SourceNotResolved as exc:
+        print(str(exc), file=sys.stderr)
         return 1
 
     from newt.rest import (
@@ -109,7 +113,7 @@ def cmd_rest(args: list[str]) -> int:
     )
 
     try:
-        source = load_source(opts["source"])
+        source = load_source(spec)
     except KeyboardInterrupt:
         # Bring-up is where the factory connects, and on real hardware that is
         # seconds of blocking work — long enough for an operator to change their

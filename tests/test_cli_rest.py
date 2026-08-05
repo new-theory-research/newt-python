@@ -114,12 +114,18 @@ def test_parse_rejects_a_source_flag_with_no_value():
     assert "--source" in str(exc.value)
 
 
-def test_missing_source_refuses_and_never_reaches_the_factory(monkeypatch):
+def test_undeclared_rig_refuses_and_never_reaches_the_factory(monkeypatch, tmp_path):
+    """No flag and no declaration is still a refusal — the verb never invents a
+    factory. What changed in newtrino-029 is only *where else it looks first*;
+    with both places empty the answer is the same one it always was, and the
+    refusal now names both."""
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "nowhere" / "nt.toml"))
     tripwire = _Tripwire()
     monkeypatch.setattr("newt._cli.rest.load_source", tripwire)
     rc, _, err = _capture([], monkeypatch)
     assert rc == 1
-    assert "--source is required" in err
+    assert "--source was not given" in err
+    assert str(tmp_path / "nowhere" / "nt.toml") in err
     assert "newt rest --source" in err
     assert not tripwire.called
 

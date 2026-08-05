@@ -30,7 +30,7 @@ import time
 import tty
 from pathlib import Path
 
-from newt._cli._source_spec import load_source
+from newt._cli._source_spec import SourceNotResolved, load_source, resolve_spec
 
 
 def _usage() -> None:
@@ -45,7 +45,10 @@ def _usage() -> None:
     print("  --simulate      Record from a fake joint stream, no hardware.")
     print("  --source SPEC   Load a developer RecordingSource, MODULE:FACTORY")
     print("                  (e.g. mypkg.rig:make_source). Mutually exclusive")
-    print("                  with --simulate.")
+    print("                  with --simulate. Optional on a configured rig: with")
+    print("                  neither flag the verb reads [sources].record from your")
+    print("                  site config ($NT_SITE_CONFIG, else ~/.config/nt/nt.toml).")
+    print("                  Either flag always wins over the file.")
     print("  --bimanual      (simulate) Drive a 2-arm leader/follower stream.")
     print("  --target N      Stop after N kept episodes.")
     print("  --hz N          State sample rate (default: 30).")
@@ -108,8 +111,13 @@ _load_source = load_source
 def _build_session(opts: dict):
     """Build the Session the frontend drives. ``--source`` loads a developer-
     supplied RecordingSource; ``--simulate`` wires the bundled SimulatedSource
-    (unchanged, byte-identical); neither refuses loudly rather than guessing a
-    rig. All of it is library construction — no behavior."""
+    (unchanged, byte-identical); with neither flag the rig's own ``[sources]``
+    declaration answers, and a rig that declares nothing is refused loudly
+    rather than guessed at. All of it is library construction — no behavior.
+
+    Precedence: either flag beats the file. ``--simulate`` in particular beats a
+    configured ``[sources].record`` — an operator asking for simulation out loud
+    is not overridden by a config file."""
     from newt.recording import (
         BIMANUAL_DESCRIPTOR,
         SINGLE_ARM_DESCRIPTOR,
@@ -120,24 +128,22 @@ def _build_session(opts: dict):
     if opts["source"] and opts["simulate"]:
         raise ValueError("--source and --simulate are mutually exclusive — pick one.")
 
-    if opts["source"]:
-        source = _load_source(opts["source"])
-    elif opts["simulate"]:
+    if opts["simulate"]:
         descriptor = BIMANUAL_DESCRIPTOR if opts["bimanual"] else SINGLE_ARM_DESCRIPTOR
         source = SimulatedSource(descriptor, drop_every=opts["drop_every"])
     else:
-        # The hardware path needs a --source; the CLI refuses loudly rather
-        # than guessing a rig.
-        print(
-            "[newt record] No embodiment wired for live capture from the CLI yet.",
-            file=sys.stderr,
-        )
-        print(
-            "        Fix: run with --simulate to exercise the rhythm, or point\n"
-            "        --source at your own MODULE:FACTORY (e.g. mypkg.rig:make_source).",
-            file=sys.stderr,
-        )
-        return None
+        try:
+            spec = resolve_spec("record", opts["source"], "mypkg.rig:make_source")
+        except SourceNotResolved as exc:
+            print(str(exc), file=sys.stderr)
+            # The one thing record can offer that teleop and rest cannot: there
+            # is a rhythm to exercise here without any rig at all.
+            print(
+                "        Or exercise the rhythm with no rig at all: newt record --simulate",
+                file=sys.stderr,
+            )
+            return None
+        source = _load_source(spec)
 
     return Session(
         source,
