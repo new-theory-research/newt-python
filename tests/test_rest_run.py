@@ -496,6 +496,45 @@ def test_a_rig_that_will_not_name_itself_is_still_put_away(monkeypatch):
     assert "unnamed" in out and "describe()" in out
 
 
+def test_the_first_line_carries_the_receipt_for_a_source_nobody_typed(monkeypatch, capsys):
+    """`rest` is typed one-handed after something already went wrong, so the
+    first line it prints is the one that gets read and everything before it is
+    in the way. The receipt rides that line (newtrino-035, ruling 1) — one line,
+    not a notice above it, and the rig's own name still leads it because that is
+    what the operator is standing in front of.
+
+    "brought up by" rather than teleop's "driving with": this verb is not
+    driving anything. It is putting away what that factory brought up, and a
+    shared phrase across verbs would be a receipt that stopped describing what
+    is happening in front of the operator."""
+    log: list[str] = []
+    rig = Rig(Arm("the left arm", log, ["to the rest pose"]))
+
+    run_rest(
+        rig,
+        read_declarations(require_rest_source(rig)),
+        source_receipt="live_pair (from the trossen-widowx kit)",
+    )
+
+    said = [ln for ln in capsys.readouterr().out.splitlines() if "putting away" in ln]
+    assert len(said) == 1
+    assert "brought up by live_pair (from the trossen-widowx kit)" in said[0]
+    assert "Ctrl+C abandons the remaining moves" in said[0]
+
+
+def test_the_first_line_is_unchanged_when_the_operator_named_the_source(monkeypatch, capsys):
+    """Nothing was substituted, so there is nothing to declare. Pinned next to
+    its twin above so a later edit that always builds the clause fails here."""
+    log: list[str] = []
+    rig = Rig(Arm("the left arm", log, ["to the rest pose"]))
+
+    run_rest(rig, read_declarations(require_rest_source(rig)))
+
+    said = [ln for ln in capsys.readouterr().out.splitlines() if "putting away" in ln]
+    assert len(said) == 1
+    assert "brought up by" not in said[0]
+
+
 def test_declared_sequences_are_still_read_before_the_run_starts():
     """The read-everything-first guarantee survives the run being implemented."""
     log: list[str] = []

@@ -763,6 +763,52 @@ def test_put_away_reports_whether_the_kill_landed_partway_through():
     assert [r.confirmed for r in reports2] == [True, True]
 
 
+def test_the_live_line_carries_the_receipt_for_a_source_nobody_typed(clock, capsys):
+    """One line, and the provenance rides in it (newtrino-035, ruling 1).
+
+    The operator is looking at this sentence — it is the one that tells them the
+    rig is live and how to stop it. So it is the one place a fact about their
+    rig can be put and be read. Asserted as *one* line rather than as a
+    substring anywhere in the output, because the whole ruling is that this
+    stopped being a second line.
+
+    The receipt arrives finished. This module does not know what a kit is, and
+    a loop that assembled "name (from the X kit)" out of parts would be the
+    library learning the packaging story — see the CLI's seam test."""
+    log: list[str] = []
+    kill = _Kill()
+    source = _Source(_pair(log), log, on_tick=lambda t: kill.set() if t == 2 else None)
+
+    run_session(
+        source,
+        rate_hz=30,
+        kill=kill,
+        source_receipt="live_pair (from the trossen-widowx kit)",
+    )
+
+    live = [ln for ln in capsys.readouterr().out.splitlines() if "live at" in ln]
+    assert len(live) == 1
+    assert "driving with live_pair (from the trossen-widowx kit)" in live[0]
+    assert "Ctrl+H to kill" in live[0]  # the receipt did not push the stop key off
+
+
+def test_the_live_line_is_unchanged_when_the_operator_named_the_source(clock, capsys):
+    """No receipt, no clause. A line that says where a source came from when the
+    operator typed it themselves is noise in the sentence that has to stay
+    readable — 029's rule, and the reason ``source_receipt`` is optional rather
+    than a string the caller always builds."""
+    log: list[str] = []
+    kill = _Kill()
+    source = _Source(_pair(log), log, on_tick=lambda t: kill.set() if t == 2 else None)
+
+    run_session(source, rate_hz=30, kill=kill)
+
+    live = [ln for ln in capsys.readouterr().out.splitlines() if "live at" in ln]
+    assert len(live) == 1
+    assert "driving with" not in live[0]
+    assert "from the" not in live[0]
+
+
 def test_the_kill_event_is_a_plain_threading_event(clock, capsys):
     """The frontend owns the keyboard and this module owns the loop; the only
     thing between them is a standard Event. Anything richer would put terminal

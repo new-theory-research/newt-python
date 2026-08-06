@@ -114,19 +114,19 @@ def test_the_precedence_ladder_walks_down_one_rung_at_a_time(monkeypatch, tmp_pa
 
     # Rung 1 — an explicit import path answers to nobody.
     assert (
-        resolve_spec("rest", "explicit_pkg:explicit_factory", REST_EXAMPLE)
+        resolve_spec("rest", "explicit_pkg:explicit_factory", REST_EXAMPLE).spec
         == "explicit_pkg:explicit_factory"
     )
 
     # Rung 2 — a short name the operator typed, resolved in the verb's namespace.
-    assert resolve_spec("rest", "handy", REST_EXAMPLE) == "short_pkg:short_factory"
+    assert resolve_spec("rest", "handy", REST_EXAMPLE).spec == "short_pkg:short_factory"
 
     # Rung 3 — no flag: the rig's own declared default.
-    assert resolve_spec("rest", None, REST_EXAMPLE) == "config_pkg:config_factory"
+    assert resolve_spec("rest", None, REST_EXAMPLE).spec == "config_pkg:config_factory"
 
     # Rung 5 — the config declares nothing for this verb, and the kit offers one.
     _config(monkeypatch, tmp_path, '[sources]\nteleop = "other_pkg:other_factory"\n')
-    assert resolve_spec("rest", None, REST_EXAMPLE) == "short_pkg:short_factory"
+    assert resolve_spec("rest", None, REST_EXAMPLE).spec == "short_pkg:short_factory"
 
     # Rung 7 — nothing typed, nothing declared anywhere. Refuse.
     _declare(monkeypatch)
@@ -135,7 +135,7 @@ def test_the_precedence_ladder_walks_down_one_rung_at_a_time(monkeypatch, tmp_pa
 
     # And the rungs above it still hold with everything below them gone, which
     # is what "the flag answers to nobody" means when the rig is bare.
-    assert resolve_spec("rest", "pkg:factory", REST_EXAMPLE) == "pkg:factory"
+    assert resolve_spec("rest", "pkg:factory", REST_EXAMPLE).spec == "pkg:factory"
     assert str(path)  # the fixture path was real; nothing here read a stale one
 
 
@@ -147,7 +147,7 @@ def test_a_short_name_in_the_config_resolves_through_the_same_registry(
     lookup the flag gets, from the other declaration surface."""
     _declare(monkeypatch, rest=[("live_pair", "rest_source:live_pair", "a-kit")])
     _config(monkeypatch, tmp_path, '[sources]\nrest = "live_pair"\n')
-    assert resolve_spec("rest", None, REST_EXAMPLE) == "rest_source:live_pair"
+    assert resolve_spec("rest", None, REST_EXAMPLE).spec == "rest_source:live_pair"
 
 
 # --------------------------------------------------------------------------- #
@@ -291,7 +291,7 @@ def test_one_declared_source_resolves_and_two_ask(monkeypatch, tmp_path):
     _no_config(monkeypatch, tmp_path)
 
     _declare(monkeypatch, record=[("live_pair", "recording_source:live_pair", "a-kit")])
-    assert resolve_spec("record", None, "mypkg.rig:make_source") == (
+    assert resolve_spec("record", None, "mypkg.rig:make_source").spec == (
         "recording_source:live_pair"
     )
 
@@ -363,20 +363,64 @@ def test_a_resolved_default_announces_itself_and_a_typed_one_does_not(
     assert captured.out == ""
 
 
-def test_a_kit_supplied_default_names_the_package_it_came_from(
+def test_a_kit_supplied_default_says_nothing_and_hands_back_a_receipt(
     monkeypatch, tmp_path, capsys
 ):
-    """Rung 5's provenance is a different line from the config one, because it
-    answers a different "where did this come from": no file was read and nothing
-    was typed, so the only honest answer names the installed distribution."""
+    """Rung 5 is a resolve that worked, so it prints nothing at all (ruling 1).
+
+    The disclosure is not dropped — Rule 10 still owns this rung, and it is the
+    rung most in need of it: nothing was typed and no file was read. What
+    changed is where it lands. A separate notice ahead of the run made a working
+    rig read a message about sources before anything started, and its second
+    clause explained why `newt` proceeded anyway — an apology for not erroring.
+    The fact now travels back as a receipt for the verb to fold into the line it
+    was already printing, which is the line the operator is definitely reading.
+
+    Two assertions carry the ruling and they are both load-bearing: **nothing on
+    either stream** (a verb that resolves cleanly is silent here), and a receipt
+    that names *both* the short name and the kit — the name because it is what
+    the operator would type to pin it, the kit because that is the thing they
+    would uninstall, reinstall, or blame.
+    """
     _no_config(monkeypatch, tmp_path)
     _declare(monkeypatch, rest=[("live_pair", "rest_source:live_pair", "widowx-kit")])
 
-    resolve_spec("rest", None, REST_EXAMPLE)
+    resolved = resolve_spec("rest", None, REST_EXAMPLE)
     captured = capsys.readouterr()
-    assert "widowx-kit" in captured.err
-    assert "rest_source:live_pair" in captured.err
+    assert captured.err == ""
     assert captured.out == ""
+
+    assert resolved.spec == "rest_source:live_pair"
+    assert "live_pair" in resolved.receipt
+    assert "widowx-kit" in resolved.receipt
+
+
+def test_only_the_kit_supplied_rung_hands_back_a_receipt(monkeypatch, tmp_path):
+    """The receipt is the verb's cue to say something, so it must not fire on a
+    rung that already spoke or on one the operator typed themselves.
+
+    Rung 3 named a file on stderr — the fact there is a path they can go open,
+    and repeating it in the startup line would state one substitution twice.
+    Rungs 1 and 2 are their own keystrokes; a receipt for what they just typed
+    is the noise 029 refused. Only the rung with no file to name and no
+    keystroke to credit owes the operator a line.
+    """
+    _declare(
+        monkeypatch,
+        rest=[
+            ("live_pair", "rest_source:live_pair", "widowx-kit"),
+            ("handy", "short_pkg:short_factory", "widowx-kit"),
+        ],
+    )
+    _config(monkeypatch, tmp_path, '[sources]\nrest = "config_pkg:config_factory"\n')
+
+    assert resolve_spec("rest", "pkg:factory", REST_EXAMPLE).receipt is None
+    assert resolve_spec("rest", "handy", REST_EXAMPLE).receipt is None
+    assert resolve_spec("rest", None, REST_EXAMPLE).receipt is None  # rung 3, the file
+
+    _no_config(monkeypatch, tmp_path)
+    _declare(monkeypatch, rest=[("live_pair", "rest_source:live_pair", "widowx-kit")])
+    assert resolve_spec("rest", None, REST_EXAMPLE).receipt is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -408,7 +452,7 @@ def test_sources_is_read_in_isolation_from_the_kits_own_tables(monkeypatch, tmp_
         "[something_nobody_has_ever_defined]\n"
         "x = 1\n",
     )
-    assert resolve_spec("rest", None, REST_EXAMPLE) == "rest_source:live_pair"
+    assert resolve_spec("rest", None, REST_EXAMPLE).spec == "rest_source:live_pair"
 
 
 # --------------------------------------------------------------------------- #

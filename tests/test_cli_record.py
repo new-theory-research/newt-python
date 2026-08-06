@@ -23,12 +23,13 @@ What these encode (the WHY, not just the WHAT):
 from __future__ import annotations
 
 import io
+import json
 import sys
 
 import pytest
 
 from newt._cli import _source_spec
-from newt._cli.record import _build_session, _parse
+from newt._cli.record import _build_session, _parse, _print_preflight
 
 
 # --------------------------------------------------------------------------- #
@@ -56,8 +57,19 @@ def _build(args, monkeypatch):
     monkeypatch.setattr("newt._cli.record._load_source", recorder)
     err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", err)
-    session = _build_session(_parse(["--task", "pick up the cup", *args]))
+    session, _receipt = _build_session(_parse(["--task", "pick up the cup", *args]))
     return session, recorder, err.getvalue()
+
+
+def _build_with_receipt(args, monkeypatch):
+    """Same build, keeping the half `_build` drops: what the frontend was handed
+    to say about where the source came from."""
+    recorder = _Recorder()
+    monkeypatch.setattr("newt._cli.record._load_source", recorder)
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    session, receipt = _build_session(_parse(["--task", "pick up the cup", *args]))
+    return session, receipt, err.getvalue()
 
 
 def _declare_config(monkeypatch, tmp_path, value):
@@ -108,6 +120,90 @@ def test_a_short_name_resolves_in_the_verbs_own_namespace(monkeypatch, tmp_path)
 
     _, recorder, _ = _build(["--source", "simulated_pair"], monkeypatch)
     assert recorder.spec == "recording_source:simulated_pair"
+
+
+def test_a_kit_declared_source_lands_in_the_preflight_and_nowhere_before_it(
+    monkeypatch, tmp_path, capsys
+):
+    """Ruling 1 for `record`: the preflight row, not a line above the block.
+
+    `record`'s startup line is a contract block, and its first row already
+    answers "what am I recording from" — so the receipt belongs *in* that row.
+    A notice printed above the block would be a second answer to a question the
+    block was already answering, which is the shape ruling 1 removed from all
+    three verbs.
+
+    Both halves are asserted: nothing on stderr while the session is built (the
+    old provenance line's stream), and the fact present in the row afterward.
+    Asserting only the silence would pass for a build that dropped the
+    disclosure entirely, which is Rule 10's failure wearing this ruling's
+    clothes."""
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "absent" / "nt.toml"))
+    monkeypatch.setattr(
+        _source_spec,
+        "_declared_sources",
+        lambda verb: [("live_pair", "recording_source:live_pair", "trossen-widowx")]
+        if verb == "record"
+        else [],
+    )
+
+    session, receipt, err = _build_with_receipt([], monkeypatch)
+    assert session is not None
+    assert err == ""
+    assert receipt == "live_pair (from the trossen-widowx kit)"
+
+    capsys.readouterr()
+    _print_preflight(session, as_json=False, source_receipt=receipt)
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if "source " in ln]
+    assert len(rows) == 1
+    assert rows[0].endswith("— live_pair (from the trossen-widowx kit)")
+
+
+def test_the_json_preflight_carries_the_receipt_beside_the_contract(
+    monkeypatch, tmp_path, capsys
+):
+    """An agent driving `--json` is owed the same fact the terminal gets.
+
+    It goes *beside* the contract, not inside it: ``contract`` is the library's
+    own preflight report, and a frontend key smuggled into it would make an
+    agent's picture of the Session disagree with the Session's. Where a source
+    came from is the CLI's answer, so it is the CLI's key.
+
+    This is also the stream the old stderr notice reached — `--json` puts a
+    machine-read stream on stdout and the provenance line went to stderr, so an
+    agent could always see it. Folding the receipt into a human block only would
+    have quietly dropped the disclosure for every non-human caller."""
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "absent" / "nt.toml"))
+    monkeypatch.setattr(
+        _source_spec,
+        "_declared_sources",
+        lambda verb: [("live_pair", "recording_source:live_pair", "trossen-widowx")]
+        if verb == "record"
+        else [],
+    )
+
+    session, receipt, _ = _build_with_receipt([], monkeypatch)
+    capsys.readouterr()
+    _print_preflight(session, as_json=True, source_receipt=receipt)
+    event = json.loads(capsys.readouterr().out.strip())
+
+    assert event["event"] == "preflight"
+    assert event["source"] == "live_pair (from the trossen-widowx kit)"
+    assert "source" not in event["contract"]  # the library's report, untouched
+
+
+def test_a_typed_source_leaves_the_preflight_row_as_it_was(monkeypatch, capsys):
+    """No receipt, no suffix. The row still says what kind of source it is —
+    that is the library's answer and it never depended on this."""
+    session, receipt, _ = _build_with_receipt(
+        ["--source", "typed_pkg:typed_factory"], monkeypatch
+    )
+    assert receipt is None
+    capsys.readouterr()
+    _print_preflight(session, as_json=False, source_receipt=receipt)
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if "source " in ln]
+    assert len(rows) == 1
+    assert "—" not in rows[0]
 
 
 # --------------------------------------------------------------------------- #
