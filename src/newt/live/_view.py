@@ -95,6 +95,8 @@ class LiveView:
         port: int = DEFAULT_PORT,
         grpc_port: int = DEFAULT_GRPC_PORT,
         application_id: str = "newt-live-session",
+        control=None,
+        page_dir: str | Path | None = None,
     ) -> None:
         self._descriptor = descriptor
         self._task = task
@@ -109,6 +111,14 @@ class LiveView:
         self._port = port
         self._grpc_port = grpc_port
         self._application_id = application_id
+        # The view stays a reader. These two are passed straight to the server it
+        # already runs, because that server is the only one on this port and a
+        # second HTTP server on a second port would make the page cross-origin
+        # against its own control routes for no gain. The view itself never calls
+        # either: it does not know what a control is, and it never reads the page
+        # directory's contents.
+        self._control = control
+        self._page_dir = page_dir
 
         self._stream = None
         self._tree = None
@@ -156,7 +166,13 @@ class LiveView:
         self._log_provenance(rr)
         self._stream.send_blueprint(self._blueprint())
 
-        self._server = serve(self._port, self._assets, self.session_json)
+        self._server = serve(
+            self._port,
+            self._assets,
+            self.session_json,
+            control=self._control,
+            page_dir=self._page_dir,
+        )
         self._started_at = time.monotonic()
         self._url = f"http://localhost:{self._port}/"
         return self._url
