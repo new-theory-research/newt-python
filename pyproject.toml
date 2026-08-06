@@ -70,7 +70,11 @@ force-include = { "src/newt/py.typed" = "newt/py.typed" }
 
 [tool.deptry]
 # Scan tests too (default excludes them) — httpx/pytest are used there, not in src/.
-exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py"]
+# scripts/ holds bench instruments, not shipped code. shoot_view.py drives a real
+# browser and is run as `uv run --with playwright python scripts/shoot_view.py` —
+# declaring playwright as a project dependency to satisfy a scan would put a
+# browser download in every install of the SDK.
+exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py", "scripts"]
 known_first_party = ["newt"]
 
 # rerun-sdk installs its modules as `rerun` (and `rerun_sdk`), which deptry cannot
