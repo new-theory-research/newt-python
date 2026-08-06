@@ -150,6 +150,70 @@ def _declared_sources(verb: str) -> list[tuple[str, str, str]]:
     return sorted(found)
 
 
+def _declaring_verbs() -> list[str]:
+    """Which verbs anything installed here publishes sources for, at all.
+
+    The companion read to ``_declared_sources``, and deliberately a second
+    function rather than an argument: that one asks *"what does this verb
+    have"*, this one asks *"is anything declaring to newt in this environment"*.
+    Same seam discipline, for the same reason — one function the suite patches
+    in one place, so no test ever reads the machine it is running on.
+
+    Walks the group names only, never the entries: the answer is a list of verb
+    names a kit chose to publish under, never a roster of factories ``newt``
+    made up."""
+    from importlib.metadata import entry_points
+
+    prefix = f"{REGISTRY_GROUP}."
+    return sorted(
+        {
+            group[len(prefix) :]
+            for group in entry_points().groups
+            if group.startswith(prefix) and group != prefix
+        }
+    )
+
+
+def _registry_state(verb: str) -> tuple[str, str]:
+    """What this environment's registry actually looks like, and whose move it is.
+
+    Until newtrino-035 the refusals below said one sentence — *"no installed kit
+    declares one for <verb> either"* — in two worlds that have nothing in common
+    but their symptom:
+
+    * **Nothing is publishing to** ``newt`` **here.** Wrong interpreter, kit
+      never installed, install never re-synced. Which interpreter is speaking is
+      then most of the answer, so it is named; and the zero-kits half is named
+      beside it, because a bench where *both* environments are empty reads a
+      lone interpreter path as "go find the other env" and there isn't one
+      (diagnosed on this bench, 2026-08-06).
+    * **Kits are publishing, and this verb is the gap.** A kit that landed three
+      verbs of four, or predates the fourth. Naming the verbs that *are* covered
+      turns "nobody told me anything" into a specific, checkable gap — and those
+      names come from declarations, never from a list inside ``newt``.
+
+    Different causes, different owners, different fixes: one string for both is
+    what Rule 12 forbids, sitting inside the family built to satisfy it.
+
+    Returns ``(noticed, move)`` — what was found, and the one thing to do about
+    it. Called only while building a refusal, so the metadata walk stays off the
+    path that resolves."""
+    covered = [other for other in _declaring_verbs() if other != verb]
+    if covered:
+        return (
+            f"Installed kits publish sources for {', '.join(covered)} — and none for {verb}.",
+            f"That gap is the kit's, not your setup's: it has to publish a "
+            f"{REGISTRY_GROUP}.{verb} entry point, and be reinstalled, before {verb} has a "
+            f"name here.",
+        )
+    return (
+        f"No installed kit publishes any source to newt in this environment — newt is "
+        f"running from {sys.executable}.",
+        "Install your rig's kit into that environment, or run newt from the one it is "
+        "already installed in.",
+    )
+
+
 def _offered(entries: list[tuple[str, str, str]]) -> str:
     """Render declared names for a refusal, disambiguating only when we must.
 
@@ -221,24 +285,22 @@ def _resolve_short(
             f"newt {command} --source {first}"
         )
 
-    # Nothing declared at all. Different cause, different fix: the name may be
-    # perfect and the kit simply isn't installed here. Saying "no source named
-    # X" alone would send them to fix a spelling that isn't wrong.
+    # Nothing declared for this verb. Different cause, different fix: the name
+    # may be perfect and the kit simply isn't installed here. Saying "no source
+    # named X" alone would send them to fix a spelling that isn't wrong — and
+    # ``_registry_state`` says which of the two registries this is, because
+    # "nothing is installed" and "the kit skipped this verb" are not one problem.
+    noticed, move = _registry_state(verb)
     if origin is None:
         raise SourceNotResolved(
-            f"newt {command}: no source named {name!r} is declared for {verb} — and neither is "
-            f"anything else. No installed kit declares any source for {verb} on this machine.\n"
-            f"        A bare name is an alias an installed kit publishes, and newt found no "
-            f"declarations at all — check that your rig's kit is installed in this environment.\n"
+            f"newt {command}: no source named {name!r} is declared for {verb}. {noticed}\n"
+            f"        A bare name is an alias an installed kit publishes. {move}\n"
             f"        Or name the code directly, which needs no declaration:  "
             f"newt {command} --source {example}"
         )
     raise SourceNotResolved(
-        f"newt {command}: {origin} = {name!r}, and no installed kit declares any source for "
-        f"{verb} on this machine.\n"
-        f"        You did not type this — it came from that file. A bare name is an alias an "
-        f"installed kit publishes, and newt found no declarations at all — check that your "
-        f"rig's kit is installed in this environment.\n"
+        f"newt {command}: {origin} = {name!r}. {noticed}\n"
+        f"        You did not type this — it came from that file. {move}\n"
         f"        Or name the code directly, which needs no declaration:  "
         f"newt {command} --source {example}"
     )
@@ -363,18 +425,20 @@ def resolve_spec(
             f'[{SOURCES_TABLE}]  {verb} = "{entries[0][0]}"'
         )
 
+    noticed, move = _registry_state(verb)
+
     if not have_config:
-        # Cause 1: nothing given, nothing to read, nothing installed that
-        # declares anything. Name every path tried — the flag that wasn't
-        # passed, the file that isn't there at its resolved absolute path and
-        # why it's that path, and the kits that declare nothing. This is the
-        # refusal that cannot enumerate, so it says plainly that it found
-        # nothing to read rather than inventing a roster to look helpful.
+        # Cause 1: nothing given, nothing to read, nothing declared for this
+        # verb. Name every path tried — the flag that wasn't passed, the file
+        # that isn't there at its resolved absolute path and why it's that path,
+        # and what the kit registry here does and doesn't hold. This is the
+        # refusal that cannot enumerate sources, so it names what it *can* read
+        # rather than inventing a roster to look helpful.
         raise SourceNotResolved(
-            f"newt {command}: no source to run. --source was not given, there is no config file "
-            f"at {path} ({provenance}), and no installed kit declares a source for {verb}.\n"
-            f"        Nothing on this machine has been told which factory builds your rig. "
-            f"Declare it once:\n"
+            f"newt {command}: no source to run. --source was not given, and there is no config "
+            f"file at {path} ({provenance}). {noticed}\n"
+            f"        {move}\n"
+            f"        Or declare the factory once:\n"
             f"            [{SOURCES_TABLE}]\n"
             f'            {verb} = "{example}"\n'
             f"        in {path}, and `newt {command}` is all you ever type again.\n"
@@ -392,7 +456,8 @@ def resolve_spec(
     )
     raise SourceNotResolved(
         f"newt {command}: your rig config at {path} ({provenance}) declares no source for "
-        f"{verb!r}. {has} No installed kit declares one for {verb} either.\n"
+        f"{verb!r}. {has} {noticed}\n"
+        f"        {move}\n"
         f"        Add the line to that file:\n"
         f"            [{SOURCES_TABLE}]\n"
         f'            {verb} = "{example}"\n'

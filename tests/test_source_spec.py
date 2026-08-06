@@ -21,7 +21,7 @@ What these encode (the WHY, not just the WHAT):
   where to declare and names nothing. Inventing a plausible roster to look
   helpful is Rule 10's failure wearing a friendly face, and the test for it
   asserts an *absence*.
-- **Eleven causes, eleven strings.** Rule 12 made executable: two different
+- **Fifteen causes, fifteen strings.** Rule 12 made executable: two different
   problems must never print the same sentence, because an operator who cannot
   tell them apart cannot fix either. Asserted pairwise, and asserted again on
   first lines alone — a shared opening line collapses two diagnoses no matter
@@ -36,6 +36,8 @@ What these encode (the WHY, not just the WHAT):
   and one message legitimately does both.
 """
 from __future__ import annotations
+
+import sys
 
 import pytest
 
@@ -56,11 +58,22 @@ def _declare(monkeypatch, **by_verb):
 
     The autouse fixture in conftest defaults this to empty for every test in the
     suite, so what a test does not declare, no test sees — including whatever
-    kits happen to be installed on the machine running pytest."""
+    kits happen to be installed on the machine running pytest.
+
+    Both reads move together, because they are two questions about one registry:
+    a verb handed entries here is a verb an installed kit publishes for, so it
+    shows up in ``_declaring_verbs`` too. A test that declared for ``teleop``
+    and left the verb list empty would be describing an environment that cannot
+    exist, and the refusals it provoked would be fiction."""
     monkeypatch.setattr(
         _source_spec,
         "_declared_sources",
         lambda verb: sorted(by_verb.get(verb, [])),
+    )
+    monkeypatch.setattr(
+        _source_spec,
+        "_declaring_verbs",
+        lambda: sorted(verb for verb, entries in by_verb.items() if entries),
     )
 
 
@@ -228,7 +241,12 @@ def test_with_nothing_declared_it_says_so_instead_of_inventing_a_roster(
 
     message = str(exc.value)
     assert str(path) in message  # the file it looked for, at its absolute path
-    assert "no installed kit declares a source for rest" in message
+    # Updated with the newtrino-035 split. The old pin — "no installed kit
+    # declares a source for rest" — was the sentence that fired in both empty
+    # registries; the fact it was guarding (that the kit registry was read and
+    # came back with nothing) is now stated by the string that only this world
+    # can produce.
+    assert "No installed kit publishes any source to newt in this environment" in message
     assert "[sources]" in message  # where to declare it
     # Nothing is offered, because nothing is known.
     assert "live_pair" not in message
@@ -248,8 +266,15 @@ def test_a_typed_name_with_nothing_installed_blames_the_install_not_the_spelling
         resolve_spec("rest", "live_pair", REST_EXAMPLE)
 
     message = str(exc.value)
-    assert "neither is anything else" in message
-    assert "installed in this environment" in message
+    # Both pins updated with the newtrino-035 split, and for one reason: the
+    # blame this test is about is now carried by a string that *only* the
+    # nothing-is-installed world can print. "neither is anything else" said the
+    # same thing about a kit that publishes for three other verbs, which is the
+    # sentence that sent Mattie's bench looking for a virtualenv that did not
+    # exist. The install is still named as the fix, not the spelling.
+    assert "No installed kit publishes any source to newt in this environment" in message
+    assert "Install your rig's kit into that environment" in message
+    assert "live_pair" in message  # the name they typed, not corrected at them
 
 
 # --------------------------------------------------------------------------- #
@@ -387,21 +412,26 @@ def test_sources_is_read_in_isolation_from_the_kits_own_tables(monkeypatch, tmp_
 
 
 # --------------------------------------------------------------------------- #
-# Eleven causes, eleven strings (card test 4)
+# Fifteen causes, fifteen strings (card test 4)
 # --------------------------------------------------------------------------- #
 
 def _every_refusal(
     monkeypatch, tmp_path, *, verb="rest", command=None, example=REST_EXAMPLE
 ) -> dict[str, str]:
-    """Provoke all eleven refusals for real and collect what each one printed.
+    """Provoke all fifteen refusals for real and collect what each one printed.
 
     Built by driving ``resolve_spec`` rather than by reading the strings out of
     the module, so a cause that stops being reachable takes this test down with
     it.
 
+    Eleven until newtrino-035, fifteen after: four of the eleven fired in two
+    environments that print one sentence between them — nothing publishing to
+    ``newt`` at all, and kits publishing for other verbs — so each of those four
+    is provoked from both. The count moved because the corpus did.
+
     ``verb`` and ``command`` are separable here for the same reason they are
     separable in the resolver: the composed path resolves in one namespace and
-    is typed as another command, and every one of these eleven has to come out
+    is typed as another command, and every one of these fifteen has to come out
     right on both."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     messages: dict[str, str] = {}
@@ -485,13 +515,48 @@ def _every_refusal(
     )
     _catch("file-declares-other-verbs", None)
 
+    # 12-15 — the same four as 7, 8, 10 and 11, in the *other* empty-registry
+    # world: kits are installed and publishing, and this verb is the gap. Same
+    # symptom, different cause, different owner, and until newtrino-035 the
+    # identical sentence. Each is a minimal pair with its twin above — same
+    # config file, same path in the message, one variable changed — so a
+    # collapse back into one string cannot hide behind a differing filename.
+    sibling_kit = {
+        sibling: [("live_pair", f"{sibling}_source:live_pair", "a-kit")]
+        for sibling in [other for other in ("rest", "record", "teleop") if other != verb][:2]
+    }
+
+    # 12 — a typed short name; kits publish, none for this verb.
+    _declare(monkeypatch, **sibling_kit)
+    _no_config(monkeypatch, tmp_path)
+    _catch("typed-name-verb-not-published", "live_pair")
+
+    # 13 — a file-declared short name; kits publish, none for this verb.
+    _config(
+        monkeypatch, tmp_path, f'[sources]\n{verb} = "live_pair"\n', name="orphan.toml"
+    )
+    _catch("config-name-verb-not-published", None)
+
+    # 14 — nothing given, no file; kits publish, none for this verb.
+    _no_config(monkeypatch, tmp_path)
+    _catch("no-file-verb-not-published", None)
+
+    # 15 — a file that declares other verbs; kits publish, none for this verb.
+    _config(
+        monkeypatch,
+        tmp_path,
+        '[sources]\nsomeotherverb = "teleop_source:live_pair"\n',
+        name="other-verbs.toml",
+    )
+    _catch("file-declares-other-verbs-verb-not-published", None)
+
     return messages
 
 
 def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
-    """The eleven as `newt rest`, plus the same eleven as the composed path.
+    """The fifteen as `newt rest`, plus the same fifteen as the composed path.
 
-    Twenty-two strings from one resolver, and no two of them may match. The
+    Thirty strings from one resolver, and no two of them may match. The
     composed half is not decoration: it is the half where the namespace and the
     command are different words, so it is the half a template that reuses one
     for the other collapses on."""
@@ -514,16 +579,21 @@ def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
     return corpus
 
 
-def test_eleven_causes_produce_eleven_distinct_strings(monkeypatch, tmp_path):
+def test_fifteen_causes_produce_fifteen_distinct_strings(monkeypatch, tmp_path):
     """Rule 12, executable. "Could any other cause produce this identical
     string?" answered by asking the code instead of the author.
 
     This is what stops a later refactor from collapsing "your file is broken"
     into "your file declares nothing" behind one template — a change that reads
     as tidying and lands as two problems wearing one face.
+
+    Twenty-two until newtrino-035. It moved to thirty because four causes each
+    became two, not because the literal was bumped to make a red test green: the
+    four minimal pairs in ``_every_refusal`` are what produce the new eight, and
+    deleting any of them takes this count with it.
     """
     messages = _both_corpora(monkeypatch, tmp_path)
-    assert len(messages) == 22, "a cause stopped being reachable"
+    assert len(messages) == 30, "a cause stopped being reachable"
 
     seen: dict[str, str] = {}
     for label, message in messages.items():
@@ -531,7 +601,7 @@ def test_eleven_causes_produce_eleven_distinct_strings(monkeypatch, tmp_path):
         seen[message] = label
 
 
-def test_the_eleven_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
+def test_the_fifteen_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
     """The diagnosis is the first line — the rest is the fix.
 
     An operator at a bench reads one line before deciding what kind of problem
@@ -557,6 +627,98 @@ def test_the_eleven_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# One empty registry was two all along (newtrino-035)
+# --------------------------------------------------------------------------- #
+
+def test_an_empty_registry_and_a_skipped_verb_are_two_different_refusals(
+    monkeypatch, tmp_path
+):
+    """The bug this card was filed for, pinned as a minimal pair.
+
+    Same config file, same path, same verb, same missing declaration — and two
+    environments that are not the same problem. Nothing is publishing to `newt`
+    here (wrong interpreter, kit not installed, install never re-synced), versus
+    a kit that is installed, visible, and simply publishes nothing for this
+    verb. The first is the operator's environment to fix; the second is the
+    kit's gap to fix, and no amount of reinstalling touches it.
+
+    Reproduced at a bench on 2026-08-06 in a throwaway environment with a kit
+    declaring `record` and `rest` and not `teleop`: it printed the same sentence
+    a machine with no kit at all printed. Rule 12 failing inside the family
+    built to satisfy it.
+
+    The interpreter path is asserted on both sides, in opposite directions. It
+    is the whole answer in the first world and noise in the second, and a later
+    edit that sprays it across every refusal to look thorough fails here.
+    """
+    _config(monkeypatch, tmp_path, "[robot_config]\nnonsense = 1\n", name="waldo.toml")
+
+    _declare(monkeypatch)
+    with pytest.raises(SourceNotResolved) as exc:
+        resolve_spec("rest", None, REST_EXAMPLE)
+    nothing_published = str(exc.value)
+
+    _declare(monkeypatch, teleop=[("live_pair", "teleop_source:live_pair", "a-kit")])
+    with pytest.raises(SourceNotResolved) as exc:
+        resolve_spec("rest", None, REST_EXAMPLE)
+    verb_not_published = str(exc.value)
+
+    assert nothing_published.splitlines()[0] != verb_not_published.splitlines()[0], (
+        "the two empty registries still open with the same diagnosis"
+    )
+
+    # World one: which interpreter is speaking is most of the answer, and the
+    # zero-kits half is named beside it — a lone path sends a reader hunting for
+    # another environment, and on this bench there wasn't one.
+    assert sys.executable in nothing_published
+    assert "No installed kit publishes any source to newt" in nothing_published
+    assert "teleop" not in nothing_published
+
+    # World two: the covered verb, read off a declaration. Never a roster of
+    # sources newt made up — the anti-divination fence still holds here.
+    assert "teleop" in verb_not_published
+    assert sys.executable not in verb_not_published
+    assert "live_pair" not in verb_not_published
+
+
+def test_no_refusal_reads_the_environment_pytest_happens_to_run_in(
+    monkeypatch, tmp_path
+):
+    """The machine-dependence trap, closed by construction rather than by care.
+
+    `conftest` patches the two entry-point reads by *function*, so any new code
+    calling `entry_points()` directly walks straight past the fence and starts
+    describing whoever's laptop is running the suite — green in CI, red at a
+    bench, or the reverse. That is a worse failure than either.
+
+    So the real read is made to explode, and the whole corpus is driven through
+    it. If a refusal ever grows a third registry probe that skips the seam, this
+    is the test that says so, on the commit that did it.
+    """
+    import importlib.metadata
+
+    def _escaped(*args, **kwargs):
+        raise AssertionError(
+            "a refusal read the real environment's entry points instead of the seam"
+        )
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", _escaped)
+
+    # The bare case first, and it is the one that matters: no `_declare` call,
+    # so nothing but conftest's autouse fence stands between this refusal and
+    # the real registry. Written this way deliberately — the corpus below patches
+    # both reads at every step, so it alone would pass with the fence deleted,
+    # and a guard that cannot fail is not a guard.
+    _no_config(monkeypatch, tmp_path)
+    with pytest.raises(SourceNotResolved) as exc:
+        resolve_spec("rest", None, REST_EXAMPLE)
+    assert "publishes any source to newt" in str(exc.value)
+
+    # Then the whole corpus, which catches a third probe that skips both seams.
+    assert len(_both_corpora(monkeypatch, tmp_path)) == 30
+
+
+# --------------------------------------------------------------------------- #
 # The namespace is not the command (newtrino-030)
 # --------------------------------------------------------------------------- #
 
@@ -568,7 +730,7 @@ def test_the_composed_path_never_tells_an_operator_to_run_a_command_that_exists_
     There is no `newt demonstration`. A refusal branded with the namespace hands
     the operator a fix instruction for a verb the dispatcher does not have, so
     they run it, get "unknown verb", and are now debugging the wrong thing.
-    Asserted across all eleven causes rather than the one that was reported,
+    Asserted across all fifteen causes rather than the one that was reported,
     because the branding came from a single argument doing two jobs and every
     string that argument reached had the same bug.
     """
@@ -579,7 +741,7 @@ def test_the_composed_path_never_tells_an_operator_to_run_a_command_that_exists_
         command=_COMPOSED_COMMAND,
         example=_COMPOSED_EXAMPLE,
     )
-    assert len(messages) == 11
+    assert len(messages) == 15
 
     for label, message in messages.items():
         assert "newt demonstration" not in message, (
