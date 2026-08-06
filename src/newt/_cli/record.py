@@ -49,6 +49,7 @@ import tty
 from pathlib import Path
 
 from newt._cli._source_spec import (
+    KitDependencyMissing,
     SourceNotResolved,
     build_source,
     import_factory,
@@ -818,6 +819,17 @@ def _run_teleop(opts: dict) -> int:
 
         try:
             factory = import_factory(spec)
+        except KitDependencyMissing as exc:
+            # Not the refusal below: that one says the factory could not be
+            # found, and this factory was found — its own imports weren't. Same
+            # site, opposite fix, so they may not share a string (Rule 12).
+            print(
+                f"\n[newt record] REFUSING TO RECORD — {exc}\n"
+                "        Nothing was called, so nothing is connected and nothing is "
+                "energized. There is nothing to put away.",
+                file=sys.stderr,
+            )
+            return 1
         except Exception as exc:  # noqa: BLE001 — see comment below: nothing was
             # called yet, so any failure here is a resolve-time problem the operator
             # needs to see as text, not as a traceback.
@@ -853,6 +865,19 @@ def _run_teleop(opts: dict) -> int:
                 file=sys.stderr,
             )
             return 130
+        except KitDependencyMissing as exc:
+            # The import failed inside the call that connects, so unlike the
+            # phase-one twin above this one cannot claim the rig is dark: a kit
+            # that acquires its driver partway through bring-up has already
+            # reached whatever it reached. Say what is known, not what is
+            # comfortable.
+            print(
+                f"\n[newt record] REFUSING TO RECORD — {exc}\n"
+                "        This is the call that connects, so if the factory had brought "
+                "anything up before the import failed, `newt rest` puts it away.",
+                file=sys.stderr,
+            )
+            return 1
         except Exception as exc:  # noqa: BLE001 — the rig's own factory can raise
             # anything while bringing arbitrary hardware up; this call is what
             # connects and energizes, so the failure must be reported (with the

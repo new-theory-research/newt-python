@@ -637,6 +637,84 @@ def resolve_spec(
     )
 
 
+class KitDependencyMissing(RuntimeError):
+    """The code a spec names is here; something it imports is not.
+
+    Its own class because the two neighbouring failures have opposite fixes and
+    a verb that renders them the same way sends the operator to the wrong one.
+    "The factory could not be found" is a spelling or an install of *the kit*;
+    this is the kit installed and its *drivers* absent, which is a different
+    command and, on the composed record path, a different account of what is
+    energized."""
+
+
+# The one repair command `newt` may name without learning what a robot is.
+# newtrino-020 made "a kit ships an executable scripts/setup" the handoff
+# contract, so citing it cites our own contract. A driver's module name would
+# be an embodiment fact in the wrong repo — stale the day a kit changes
+# hardware — and the fence is exactly there: **newt may not know what a robot
+# is; it may know what a kit promises.**
+KIT_SETUP = "./scripts/setup"
+
+
+def _reported(exc: BaseException) -> str:
+    """The failing code's own words, indented and kept whole.
+
+    Kept rather than characterised, and put *below* the isolated command rather
+    than in front of it. The receipt behind this whole card is a bench error
+    that already carried the right command and buried it — and half of what
+    buried it was `newt` wrapping a good message from a kit inside a sentence
+    of its own. Rule 10 says don't swallow it; the structure law says don't let
+    it stand where the fix should be."""
+    return "\n".join(f"            {line}" for line in str(exc).splitlines())
+
+
+def _dependency_lantern(headline: str, spec: str, exc: BaseException) -> str:
+    """The one message for "the code is installed, what it needs isn't".
+
+    One renderer, two sites (import-time and construction-time), because three
+    verbs printing three variants of this is the disagreement `_source_spec`
+    exists to prevent. The headline is what differs; everything a reader
+    retypes is written once, here.
+
+    Structure law (newtrino-035): the command alone on its line, blank lines
+    around it, directly under the diagnosis rather than at the end of the
+    paragraph."""
+    return (
+        f"{headline}\n"
+        f"\n"
+        f"    {KIT_SETUP}\n"
+        f"\n"
+        f"        Run that from the kit's own directory. A kit ships that script to "
+        f"install what its rig needs, and a plain `uv sync` resolves only the default "
+        f"dependency set — optional drivers are exactly what it leaves out.\n"
+        f"        If this source is your own code and not an installed kit, the import "
+        f"below is yours — nothing else about the spec is wrong.\n"
+        f"        The source:  {spec}\n"
+        f"        What it reported:\n"
+        f"{_reported(exc)}"
+    )
+
+
+def _spec_module_missing(exc: BaseException, module_name: str) -> bool:
+    """Did the spec's *own* module chain fail to import, or something under it?
+
+    The whole discriminator, and it never learns a driver's name.
+    ``ModuleNotFoundError`` carries the module that was not found. If that is
+    the spec's module — or a package the spec's module lives inside, which is
+    what ``import mypkg.rig`` raises when ``mypkg`` is absent — then the code
+    the operator named is not here. Anything else means the named module *was*
+    found, started importing, and something further down was missing: the
+    signature of a kit whose drivers fell out.
+
+    ``name`` is None only when a module body raises ``ModuleNotFoundError`` by
+    hand, which is the second case, not the first."""
+    name = getattr(exc, "name", None)
+    if not isinstance(exc, ImportError) or name is None:
+        return False
+    return module_name == name or module_name.startswith(f"{name}.")
+
+
 def import_factory(spec: str):
     """Phase one: find the factory a spec names. **Never calls it.**
 
@@ -654,21 +732,40 @@ def import_factory(spec: str):
 
     if ":" not in spec:
         raise ValueError(
-            f"--source {spec!r} is not MODULE:FACTORY shaped — expected e.g. "
+            f"the source {spec!r} is not MODULE:FACTORY shaped — expected e.g. "
             "'mypkg.rig:make_source'"
         )
     module_name, _, factory_name = spec.partition(":")
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
-        raise RuntimeError(
-            f"--source {spec!r}: failed to import module {module_name!r}: {exc}"
+        if _spec_module_missing(exc, module_name):
+            raise RuntimeError(
+                f"no module named {exc.name!r} could be imported, so the code this "
+                f"source names was never found.\n"
+                f"\n"
+                f'    uv run python -c "import {exc.name}"\n'
+                f"\n"
+                f"        That runs the interpreter newt is running under, which is what "
+                f"separates the two ways this happens: a spec that names a module nobody "
+                f"has (a typo, or a package never installed) from one installed somewhere "
+                f"this environment cannot see.\n"
+                f"        The source:  {spec}"
+            ) from exc
+        raise KitDependencyMissing(
+            _dependency_lantern(
+                "the code this source names is installed, but something it imports is "
+                "not — so nothing was loaded, and nothing is connected.",
+                spec,
+                exc,
+            )
         ) from exc
     try:
         return getattr(module, factory_name)
     except AttributeError:
         raise RuntimeError(
-            f"--source {spec!r}: module {module_name!r} has no attribute {factory_name!r}"
+            f"module {module_name!r} has no attribute {factory_name!r}, so the source "
+            f"{spec!r} names a factory that module does not export."
         ) from None
 
 
@@ -677,10 +774,25 @@ def build_source(spec: str, factory):
     factory_name = spec.partition(":")[2]
     try:
         return factory()
+    except ImportError as exc:
+        # A kit that guards its own driver imports does it here, inside the
+        # factory, so a missing driver arrives at construction and never at
+        # import — which is why this card covers both sites and a fix at
+        # `import_factory` alone would have missed the bench receipt entirely.
+        # `isinstance` is reporting, not divining: an ImportError out of a
+        # factory call *is* an import that failed.
+        raise KitDependencyMissing(
+            _dependency_lantern(
+                f"the factory {factory_name!r} could not import something it needs "
+                f"while bringing the rig up.",
+                spec,
+                exc,
+            )
+        ) from exc
     except Exception as exc:
         raise RuntimeError(
-            f"--source {spec!r}: factory {factory_name!r} raised while constructing "
-            f"the source: {exc}"
+            f"the factory {factory_name!r} raised while constructing the source "
+            f"{spec!r}: {exc}"
         ) from exc
 
 
