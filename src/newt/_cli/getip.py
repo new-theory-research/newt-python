@@ -1,9 +1,9 @@
 """newt getip — this machine's LAN address, for the console's rig address field.
 
 A hand-carried baton: today a developer reads the address off this verb and types it
-into the Move mirror pane themselves. Once the bridge verb's heartbeat carries the rig's
-address to the console on its own, this stops being a step in anyone's path and becomes
-a diagnostic — what you run when the automatic path has gone dark.
+into the Move mirror pane themselves. Once the bridge verb announces the rig's address
+itself, this stops being a step in anyone's path and becomes a diagnostic — what you run
+when the automatic path has gone dark.
 
 What this verb will not do: pick a port. The port is whatever the rig's motion publisher
 printed when it started, and `newt` has no way to know it. A shaped-right guess here
