@@ -90,7 +90,6 @@ from newt._client.robot import (
     list_models,
 )
 from newt._embodiment import Embodiment
-import json as _scratch_lint_proof_unused_import
 
 __all__ = [
     "AuthError",
