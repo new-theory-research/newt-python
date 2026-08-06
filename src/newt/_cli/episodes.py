@@ -378,8 +378,9 @@ def _cmd_push(rest: list[str]) -> int:
         )
         print(
             "  `newt record` writes one episode_<id> directory per kept episode. Check "
-            "you're pointing at the recording destination, not at a single episode and not "
-            "at a LeRobot export.",
+            "you're pointing at the recording destination and not at a single episode. A "
+            "training export is a different format and a different verb: `newt finetune "
+            "--dataset`.",
             file=sys.stderr,
         )
         return 1
