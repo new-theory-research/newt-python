@@ -18,7 +18,6 @@ import math
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-
 # --- the four ways the camera half of a recording fails ---------------------
 #
 # Four causes, four strings, one place. A reader who lands on one of these must
@@ -191,7 +190,7 @@ class RecordingSource(Protocol):
 
     descriptor: StateDescriptor
 
-    def read_state(self) -> dict[str, "JointState | None"]:
+    def read_state(self) -> dict[str, JointState | None]:
         ...
 
 
@@ -221,7 +220,7 @@ class SimulatedSource:
         self._drop_every = drop_every
         self.disabled = False
 
-    def read_state(self) -> dict[str, "JointState | None"]:
+    def read_state(self) -> dict[str, JointState | None]:
         self._t += 1
         out: dict[str, JointState | None] = {}
         for i, channel in enumerate(self.descriptor.channels):

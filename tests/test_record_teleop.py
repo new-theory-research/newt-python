@@ -559,19 +559,25 @@ class _Tty(io.StringIO):
         return True
 
 
-def _run_composed(args, monkeypatch):
-    """`newt record --teleop …` with the kill key stubbed and nothing real behind it."""
+def _run_composed_capturing(args, monkeypatch):
+    """As `_run_composed`, but hands back what the operator saw on stdout too."""
     from newt._cli.teleop import KillKey
 
-    err = io.StringIO()
+    out, err = io.StringIO(), io.StringIO()
     monkeypatch.setattr(sys, "stdin", _Tty())
-    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stdout", out)
     monkeypatch.setattr(sys, "stderr", err)
     monkeypatch.setattr(KillKey, "arm", lambda self: True)
     monkeypatch.setattr(KillKey, "restore", lambda self: None)
 
     rc = cmd_record(["--task", "pick up the cup", "--teleop", *args])
-    return rc, err.getvalue()
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _run_composed(args, monkeypatch):
+    """`newt record --teleop …` with the kill key stubbed and nothing real behind it."""
+    rc, _out, err = _run_composed_capturing(args, monkeypatch)
+    return rc, err
 
 
 def test_an_undeclared_factory_is_refused_without_ever_being_called(
@@ -851,7 +857,7 @@ def test_a_polled_session_refuses_a_pushed_frame():
 
 
 @needs_extra
-def test_a_pushed_session_writes_exactly_the_ticks_it_was_handed(tmp_path):
+def test_a_pushed_session_writes_exactly_the_ticks_it_was_handed(tmp_path, capsys):
     """The episode's frame count is the number of ticks that produced state.
 
     Not the number of ticks, and not the number of reads — a stale read is
@@ -877,11 +883,20 @@ def test_a_pushed_session_writes_exactly_the_ticks_it_was_handed(tmp_path):
     assert state_count == 6  # 3 ticks x 2 channels
     assert dropped == 2  # the starved read, both channels
     assert recorder.path is not None and recorder.path.is_dir()
+
+    # The operator is told, in words, which of the two fates this episode met.
+    # Asserted because deleting the print leaves every other assertion here
+    # green while the person at the bench is back to inferring it from an exit
+    # code — the thing the recorder's own docstring says must never happen.
+    said = capsys.readouterr().out
+    assert f"episode {recorder.episode_id} KEPT" in said
+    assert str(recorder.path) in said
+    assert "DISCARDED" not in said
     session.close()
 
 
 @needs_extra
-def test_the_kill_path_leaves_no_directory(tmp_path):
+def test_the_kill_path_leaves_no_directory(tmp_path, capsys):
     """A discarded episode leaves nothing behind — not an empty dir, not a temp one.
 
     A partial demonstration nobody chose to keep is indistinguishable on disk
@@ -898,6 +913,12 @@ def test_the_kill_path_leaves_no_directory(tmp_path):
 
     assert recorder.path is None
     assert list(tmp_path.glob("*/episode.json")) == []
+
+    # And the operator hears it. An empty directory is the honest disk state;
+    # it is not a message, and nobody standing at a bench reads a directory.
+    said = capsys.readouterr().out
+    assert f"episode {recorder.episode_id} DISCARDED" in said
+    assert "KEPT" not in said
     session.close()
 
 
@@ -1104,6 +1125,50 @@ def test_a_second_body_records_a_demonstration_with_no_library_change(
     channels, _ts = recorder.frames[0]
     assert sorted(channels) == ["bench_cell/gantry", "bench_cell/handwheel"]
     assert len(channels["bench_cell/handwheel"].positions) == 5
+
+
+@needs_extra
+def test_the_operator_is_told_the_arms_are_energized_before_a_tick_happens(
+    tmp_path, monkeypatch
+):
+    """Bench finding #3, answered where the person standing at the rig can read it.
+
+    What Mattie hit was plain `newt record` applying tension to two arms it was
+    only ever going to read — she could not move the follower by hand and
+    nothing had told her why. This path energizes too. The difference is that
+    here it is the point, and the difference is only real if it is said out
+    loud: an unexplained hold and a deliberate one feel identical to a hand.
+
+    Two things are asserted, and the ordering is the one that matters. The
+    statement lands after the preflight (the factory has already run, so the
+    arms are live while it is being read) and before the episode opens, because
+    an operator who reads it after the first tick has already been surprised.
+
+    Behind the extra, because the composed path builds a `Session` and that is
+    where the missing-mcap lantern fires — there is no bare run of this verb to
+    assert against. That is only safe because CI now runs the suite twice, once
+    with the extra, so this cannot sit skipped and green the way the
+    composability gate did.
+    """
+    _rig_module(tmp_path, monkeypatch, "engagement_rig", _SECOND_BODY)
+
+    _rc, out, _err = _run_composed_capturing(
+        ["--source", "engagement_rig:make_demo", "--dest", str(tmp_path / "ep")],
+        monkeypatch,
+    )
+
+    assert "both arms are up and energized" in out
+    assert "still the arm you move by hand" in out
+    assert "will not move by hand, stop" in out
+
+    said_at = out.index("both arms are up and energized")
+    assert said_at > out.index("preflight contract"), (
+        "the engagement statement printed before the preflight — it has to sit "
+        "where the operator reads it against a rig that is already up"
+    )
+    assert said_at < out.index("while you drive"), (
+        "the episode opened before the operator was told the arms are live"
+    )
 
 
 @needs_extra
