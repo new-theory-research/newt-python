@@ -842,6 +842,13 @@ def test_every_refusal_puts_one_command_where_a_reader_will_find_it(
 # was computed from the corpus as it stood *before* the copy pass — a substring
 # read of the pre-change strings, not a transcription — so this table is what
 # the family knew how to say when it was still saying it in the wrong order.
+#
+# One exception, added after the fact: ``what-a-bare-name-is``. A post-merge read
+# of this branch found the sentence that says what a short name *is* deleted from
+# three of the six refusals that had carried it, with the whole suite green — the
+# table protected every artifact and none of the explanations, and an explanation
+# is exactly what a reader who typed a name they thought was a module path needs.
+# So the one sentence that survived a deletion here is pinned by its own token.
 _DURABLE_FACTS = {
     "bad-toml": {"a-source-flag-to-type", "names-the-config-file", "the-spec-shape"},
     "unreadable": {"a-source-flag-to-type", "names-the-config-file", "the-spec-shape"},
@@ -856,11 +863,12 @@ _DURABLE_FACTS = {
         "names-the-config-file", "the-sources-table",
     },
     "typed-name-nothing-installed": {
-        "a-name-from-a-declaration", "a-source-flag-to-type", "which-interpreter",
+        "a-name-from-a-declaration", "a-source-flag-to-type", "what-a-bare-name-is",
+        "which-interpreter",
     },
     "config-name-nothing-installed": {
         "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
-        "the-sources-table", "which-interpreter",
+        "the-sources-table", "what-a-bare-name-is", "which-interpreter",
     },
     "several-candidates": {
         "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
@@ -880,10 +888,11 @@ _DURABLE_FACTS = {
     },
     "typed-name-verb-not-published": {
         "a-name-from-a-declaration", "a-source-flag-to-type", "the-entry-point-group",
+        "what-a-bare-name-is",
     },
     "config-name-verb-not-published": {
         "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
-        "the-entry-point-group", "the-sources-table",
+        "the-entry-point-group", "the-sources-table", "what-a-bare-name-is",
     },
     "no-file-verb-not-published": {
         "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
@@ -899,12 +908,13 @@ _DURABLE_FACTS = {
     },
     "typed-name-kit-is-the-cwd": {
         "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
-        "the-entry-point-group", "the-project-env-command", "which-interpreter",
+        "the-entry-point-group", "the-project-env-command", "what-a-bare-name-is",
+        "which-interpreter",
     },
     "config-name-kit-is-the-cwd": {
         "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
         "the-entry-point-group", "the-project-env-command", "the-sources-table",
-        "which-interpreter",
+        "what-a-bare-name-is", "which-interpreter",
     },
     "no-file-kit-is-the-cwd": {
         "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
@@ -934,9 +944,17 @@ def _durable_facts(message: str, tmp_path) -> set[str]:
 
     Each of these is a thing the operator can act on — a path to open, a table
     to write, a flag to type, an interpreter to check, a group for a kit author
-    to publish. None of them is a phrasing, which is the point: a copy edit that
-    changes every sentence and keeps every fact passes, and a "tightening" that
-    drops the [sources] block to make the layout cleaner does not."""
+    to publish. All but one are read structurally rather than by phrasing, which
+    is the point: a copy edit that changes every sentence and keeps every fact
+    passes, and a "tightening" that drops the [sources] block to make the layout
+    cleaner does not.
+
+    ``what-a-bare-name-is`` is the exception, and it is deliberate. It has no
+    structural token to match — the sentence *is* the fact — so it is matched on
+    the four words that carry it. A rewrite that says the same thing in other
+    words will fail here and should be re-pinned on its new phrase; that cost is
+    the price of the class this table could not otherwise see, and a deletion
+    reading as a tightening is what it is here to catch."""
     facts = set()
     if str(tmp_path) in message:
         facts.add("names-the-config-file")
@@ -954,6 +972,8 @@ def _durable_facts(message: str, tmp_path) -> set[str]:
         facts.add("the-project-env-command")
     if "MODULE:FACTORY" in message:
         facts.add("the-spec-shape")
+    if "alias an installed kit publishes" in message:
+        facts.add("what-a-bare-name-is")
     if any(name in message for name in _FIXTURE_NAMES):
         facts.add("a-name-from-a-declaration")
     return facts
