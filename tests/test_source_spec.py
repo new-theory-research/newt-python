@@ -36,7 +36,7 @@ What these encode (the WHY, not just the WHAT):
 - **The namespace a source is declared under is not the command anyone types.**
   For `rest`, `record` and `teleop` they are the same word, which is why one
   argument doing both jobs went unnoticed; `newt record --teleop` resolves under
-  `demonstration` and there is no such command. So the nineteen are provoked
+  `demonstration` and there is no such command. So the twenty-two are provoked
   twice, in one tmp dir so nothing but the branding differs, and both sets go
   into the pairwise corpus. A refusal has to name the command in every line the
   reader retypes and the verb in every line about where a declaration lives —
@@ -697,9 +697,9 @@ def _every_refusal(
 
 
 def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
-    """The nineteen as `newt rest`, plus the same nineteen as the composed path.
+    """The twenty-two as `newt rest`, plus the same twenty-two composed.
 
-    Thirty-eight strings from one resolver, and no two of them may match. The
+    Forty-four strings from one resolver, and no two of them may match. The
     composed half is not decoration: it is the half where the namespace and the
     command are different words, so it is the half a template that reuses one
     for the other collapses on."""
@@ -730,11 +730,11 @@ def test_twenty_two_causes_produce_twenty_two_distinct_strings(monkeypatch, tmp_
     into "your file declares nothing" behind one template — a change that reads
     as tidying and lands as two problems wearing one face.
 
-    Twenty-two until newtrino-035. It moved to thirty-eight because four causes
-    each became three, not because the literal was bumped to make a red test
-    green: the twelve cases in ``_every_refusal`` that share a symptom and split
-    on which world produced it are what carry the new sixteen, and deleting any
-    of them takes this count with it.
+    Twenty-two until newtrino-035 — eleven causes, each read twice. It moved to
+    forty-four because those eleven became twenty-two, not because the literal
+    was bumped to make a red test green: the cases in ``_every_refusal`` that
+    share a symptom and split on which world produced it are what carry the new
+    ones, and deleting any of them takes this count with it.
     """
     messages = _both_corpora(monkeypatch, tmp_path)
     assert len(messages) == 44, "a cause stopped being reachable"
