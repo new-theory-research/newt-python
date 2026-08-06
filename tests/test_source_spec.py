@@ -26,6 +26,14 @@ What these encode (the WHY, not just the WHAT):
   tell them apart cannot fix either. Asserted pairwise, and asserted again on
   first lines alone — a shared opening line collapses two diagnoses no matter
   what the rest of the paragraph says.
+- **The namespace a source is declared under is not the command anyone types.**
+  For `rest`, `record` and `teleop` they are the same word, which is why one
+  argument doing both jobs went unnoticed; `newt record --teleop` resolves under
+  `demonstration` and there is no such command. So the eleven are provoked
+  twice, in one tmp dir so nothing but the branding differs, and both sets go
+  into the pairwise corpus. A refusal has to name the command in every line the
+  reader retypes and the verb in every line about where a declaration lives —
+  and one message legitimately does both.
 """
 from __future__ import annotations
 
@@ -33,6 +41,7 @@ import pytest
 
 from newt._cli import _source_spec
 from newt._cli._source_spec import SourceNotResolved, resolve_spec
+from newt._cli.record import _COMPOSED_COMMAND, _COMPOSED_EXAMPLE, _COMPOSED_VERB
 
 
 REST_EXAMPLE = "mypkg.rig:make_rig"
@@ -381,90 +390,128 @@ def test_sources_is_read_in_isolation_from_the_kits_own_tables(monkeypatch, tmp_
 # Eleven causes, eleven strings (card test 4)
 # --------------------------------------------------------------------------- #
 
-def _every_refusal(monkeypatch, tmp_path) -> dict[str, str]:
+def _every_refusal(
+    monkeypatch, tmp_path, *, verb="rest", command=None, example=REST_EXAMPLE
+) -> dict[str, str]:
     """Provoke all eleven refusals for real and collect what each one printed.
 
     Built by driving ``resolve_spec`` rather than by reading the strings out of
     the module, so a cause that stops being reachable takes this test down with
-    it."""
+    it.
+
+    ``verb`` and ``command`` are separable here for the same reason they are
+    separable in the resolver: the composed path resolves in one namespace and
+    is typed as another command, and every one of these eleven has to come out
+    right on both."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     messages: dict[str, str] = {}
 
-    def _catch(label, verb, flag):
+    def _catch(label, flag):
         with pytest.raises(SourceNotResolved) as exc:
-            resolve_spec(verb, flag, REST_EXAMPLE)
+            resolve_spec(verb, flag, example, command=command)
         messages[label] = str(exc.value)
 
     kit = [("live_pair", "rest_source:live_pair", "a-kit")]
 
     # 1 — the file is there and the TOML is broken.
-    _declare(monkeypatch, rest=kit)
-    _config(monkeypatch, tmp_path, "[sources\nrest = \n", name="broken.toml")
-    _catch("bad-toml", "rest", None)
+    _declare(monkeypatch, **{verb: kit})
+    _config(monkeypatch, tmp_path, f"[sources\n{verb} = \n", name="broken.toml")
+    _catch("bad-toml", None)
 
     # 2 — the file is there and cannot be read at all. A directory at the config
     # path is the same class of problem as a permissions bit, and it does not
     # depend on who is running pytest.
-    (tmp_path / "a-directory").mkdir()
+    (tmp_path / "a-directory").mkdir(exist_ok=True)
     monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "a-directory"))
-    _catch("unreadable", "rest", None)
+    _catch("unreadable", None)
 
     # 3 — the file parsed, and [sources] is not a flat map of strings.
-    _config(monkeypatch, tmp_path, "[sources]\nrest = 3\n", name="wrong-shape.toml")
-    _catch("wrong-shape", "rest", None)
+    _config(monkeypatch, tmp_path, f"[sources]\n{verb} = 3\n", name="wrong-shape.toml")
+    _catch("wrong-shape", None)
 
     # 4 — one short name, two installed kits declaring it.
     _no_config(monkeypatch, tmp_path)
     _declare(
         monkeypatch,
-        rest=[
+        **{verb: [
             ("live_pair", "widowx_rest:live_pair", "widowx-kit"),
             ("live_pair", "yam_rest:live_pair", "yam-kit"),
-        ],
+        ]},
     )
-    _catch("two-kits-one-name", "rest", "live_pair")
+    _catch("two-kits-one-name", "live_pair")
 
     # 5 — a short name the operator typed, against a kit that declares others.
-    _declare(monkeypatch, rest=kit)
-    _catch("typed-name-unknown", "rest", "live_par")
+    _declare(monkeypatch, **{verb: kit})
+    _catch("typed-name-unknown", "live_par")
 
     # 6 — a short name the *file* declared, against a kit that declares others.
-    _config(monkeypatch, tmp_path, '[sources]\nrest = "live_par"\n', name="typo.toml")
-    _catch("config-name-unknown", "rest", None)
+    _config(
+        monkeypatch, tmp_path, f'[sources]\n{verb} = "live_par"\n', name="typo.toml"
+    )
+    _catch("config-name-unknown", None)
 
     # 7 — a typed short name with no declarations anywhere.
     _declare(monkeypatch)
     _no_config(monkeypatch, tmp_path)
-    _catch("typed-name-nothing-installed", "rest", "live_pair")
+    _catch("typed-name-nothing-installed", "live_pair")
 
     # 8 — a file-declared short name with no declarations anywhere.
-    _config(monkeypatch, tmp_path, '[sources]\nrest = "live_pair"\n', name="orphan.toml")
-    _catch("config-name-nothing-installed", "rest", None)
+    _config(
+        monkeypatch, tmp_path, f'[sources]\n{verb} = "live_pair"\n', name="orphan.toml"
+    )
+    _catch("config-name-nothing-installed", None)
 
     # 9 — several candidates and no declared default.
     _no_config(monkeypatch, tmp_path)
     _declare(
         monkeypatch,
-        rest=[
+        **{verb: [
             ("bench_left", "otherkit.rig:bench_left", "another-kit"),
             ("bench_right", "otherkit.rig:bench_right", "another-kit"),
-        ],
+        ]},
     )
-    _catch("several-candidates", "rest", None)
+    _catch("several-candidates", None)
 
     # 10 — nothing given, no file, nothing installed.
     _declare(monkeypatch)
-    _catch("no-file-at-all", "rest", None)
+    _catch("no-file-at-all", None)
 
     # 11 — a file that declares other verbs but not this one.
     _config(
         monkeypatch,
         tmp_path,
-        '[sources]\nteleop = "teleop_source:live_pair"\n',
+        '[sources]\nsomeotherverb = "teleop_source:live_pair"\n',
         name="other-verbs.toml",
     )
-    _catch("file-declares-other-verbs", "rest", None)
+    _catch("file-declares-other-verbs", None)
 
     return messages
+
+
+def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
+    """The eleven as `newt rest`, plus the same eleven as the composed path.
+
+    Twenty-two strings from one resolver, and no two of them may match. The
+    composed half is not decoration: it is the half where the namespace and the
+    command are different words, so it is the half a template that reuses one
+    for the other collapses on."""
+    corpus = {
+        f"rest/{label}": message
+        for label, message in _every_refusal(monkeypatch, tmp_path).items()
+    }
+    corpus.update(
+        {
+            f"composed/{label}": message
+            for label, message in _every_refusal(
+                monkeypatch,
+                tmp_path,
+                verb=_COMPOSED_VERB,
+                command=_COMPOSED_COMMAND,
+                example=_COMPOSED_EXAMPLE,
+            ).items()
+        }
+    )
+    return corpus
 
 
 def test_eleven_causes_produce_eleven_distinct_strings(monkeypatch, tmp_path):
@@ -475,8 +522,8 @@ def test_eleven_causes_produce_eleven_distinct_strings(monkeypatch, tmp_path):
     into "your file declares nothing" behind one template — a change that reads
     as tidying and lands as two problems wearing one face.
     """
-    messages = _every_refusal(monkeypatch, tmp_path)
-    assert len(messages) == 11, "a cause stopped being reachable"
+    messages = _both_corpora(monkeypatch, tmp_path)
+    assert len(messages) == 22, "a cause stopped being reachable"
 
     seen: dict[str, str] = {}
     for label, message in messages.items():
@@ -491,14 +538,113 @@ def test_the_eleven_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
     they have. Two causes that differ only in their fourth line have already
     sent that reader to the wrong place, even though the full strings are
     technically distinct.
+
+    The first line also has to open with the command the reader typed. A first
+    line naming something they cannot run sends them to a shell to get "unknown
+    verb" back, which is a second wrong diagnosis stacked on the first.
     """
-    messages = _every_refusal(monkeypatch, tmp_path)
+    messages = _both_corpora(monkeypatch, tmp_path)
 
     first_lines: dict[str, str] = {}
     for label, message in messages.items():
         head = message.splitlines()[0]
-        assert head.startswith("newt rest:"), f"{label} does not name the verb first"
+        expected = "newt rest:" if label.startswith("rest/") else "newt record --teleop:"
+        assert head.startswith(expected), f"{label} does not name the command first"
         assert head not in first_lines, (
             f"{label} and {first_lines[head]} open with the same diagnosis"
         )
         first_lines[head] = label
+
+
+# --------------------------------------------------------------------------- #
+# The namespace is not the command (newtrino-030)
+# --------------------------------------------------------------------------- #
+
+def test_the_composed_path_never_tells_an_operator_to_run_a_command_that_exists_not(
+    monkeypatch, tmp_path
+):
+    """`newt record --teleop` resolves under `demonstration`, and says so — once.
+
+    There is no `newt demonstration`. A refusal branded with the namespace hands
+    the operator a fix instruction for a verb the dispatcher does not have, so
+    they run it, get "unknown verb", and are now debugging the wrong thing.
+    Asserted across all eleven causes rather than the one that was reported,
+    because the branding came from a single argument doing two jobs and every
+    string that argument reached had the same bug.
+    """
+    messages = _every_refusal(
+        monkeypatch,
+        tmp_path,
+        verb=_COMPOSED_VERB,
+        command=_COMPOSED_COMMAND,
+        example=_COMPOSED_EXAMPLE,
+    )
+    assert len(messages) == 11
+
+    for label, message in messages.items():
+        assert "newt demonstration" not in message, (
+            f"{label} advertises a command that does not exist:\n{message}"
+        )
+        assert "newt record --teleop" in message, (
+            f"{label} never names the command the operator typed:\n{message}"
+        )
+
+
+def test_the_composed_refusals_still_name_the_table_the_operator_edits(
+    monkeypatch, tmp_path
+):
+    """The other half, and the one a lazy fix breaks: `demonstration` is a real key.
+
+    `[sources].demonstration` is the line an operator opens an editor and types,
+    and `newt.sources.demonstration` is the group a kit publishes under. Deleting
+    the noun to make the command-branding test pass would trade one wrong
+    instruction for a message that cannot say where to declare anything. So the
+    same corpus is asserted from the other side: the namespace survives, in the
+    places that are about the namespace.
+
+    One message does both, and that is the point rather than a smell — it names
+    where the declaration is missing and what to retype, and those are two
+    different things in two different places.
+    """
+    messages = _every_refusal(
+        monkeypatch,
+        tmp_path,
+        verb=_COMPOSED_VERB,
+        command=_COMPOSED_COMMAND,
+        example=_COMPOSED_EXAMPLE,
+    )
+
+    # Where to declare it: the sample table carries the key, not the command.
+    for label in ("no-file-at-all", "file-declares-other-verbs", "wrong-shape"):
+        assert f'{_COMPOSED_VERB} = "' in messages[label], (
+            f"{label} stopped naming the [sources] key to write:\n{messages[label]}"
+        )
+
+    # Whose roster this is: the namespace the lookup happened in.
+    for label in ("typed-name-unknown", "several-candidates", "two-kits-one-name"):
+        assert f"for {_COMPOSED_VERB}" in messages[label], (
+            f"{label} stopped naming the namespace it searched:\n{messages[label]}"
+        )
+
+    both = messages["no-file-at-all"]
+    assert f'{_COMPOSED_VERB} = "' in both and "newt record --teleop --source" in both
+
+
+def test_a_verb_that_is_its_own_command_is_branded_exactly_as_before(
+    monkeypatch, tmp_path
+):
+    """The regression fence on the three verbs that were never broken.
+
+    `rest`, `record` and `teleop` are typed under the name they resolve under,
+    so omitting the new argument has to be byte-identical to passing the verb as
+    the command. If it ever isn't, the split leaked into the paths that had no
+    ambiguity to fix.
+    """
+    for verb in ("rest", "record", "teleop"):
+        implicit = _every_refusal(monkeypatch, tmp_path / verb, verb=verb)
+        explicit = _every_refusal(
+            monkeypatch, tmp_path / verb, verb=verb, command=verb
+        )
+        assert implicit == explicit, f"{verb} changed when the command was defaulted"
+        for label, message in implicit.items():
+            assert message.startswith(f"newt {verb}:"), f"{verb}/{label}: {message}"

@@ -85,6 +85,7 @@ class EpisodeWriter:
     _frame_counts: dict[str, int] = field(init=False, default_factory=dict)
     _state_count: int = field(init=False, default=0)
     _dropped_state: int = field(init=False, default=0)
+    _dropped_frames: dict[str, int] = field(init=False, default_factory=dict)
     _camera_marker_ns: dict[str, list[int]] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -181,6 +182,12 @@ class EpisodeWriter:
         per-episode report surfaces the total."""
         self._dropped_state += 1
 
+    def note_dropped_frame(self, cam_id: str) -> None:
+        """A camera read returned no frame for ``cam_id``. Count it; never swallow
+        it, and never write a substitute frame to keep the count even — a gap in
+        the video is the truth, and the markers say where it is."""
+        self._dropped_frames[cam_id] = self._dropped_frames.get(cam_id, 0) + 1
+
     def write_frame(self, cam_id: str, frame, ts_ns: int) -> None:
         """Append one color frame: pipe pixels to ffmpeg and drop a synchronized
         marker on the MCAP timeline. sequence == frame index."""
@@ -201,6 +208,18 @@ class EpisodeWriter:
     @property
     def dropped_state(self) -> int:
         return self._dropped_state
+
+    @property
+    def dropped_frames(self) -> dict[str, int]:
+        """Dropped camera reads this episode, per camera id. Cameras that dropped
+        nothing are absent rather than zero — an empty dict is a clean episode."""
+        return dict(self._dropped_frames)
+
+    @property
+    def frame_counts(self) -> dict[str, int]:
+        """Frames written this episode, per camera id — the number the frame-count
+        invariant will check against the encoded file at commit."""
+        return dict(self._frame_counts)
 
     @property
     def state_count(self) -> int:

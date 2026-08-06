@@ -88,7 +88,9 @@ All source is under `src/newt/`:
 | `fixtures/` | Deprecated alias for `snapshots` (warns on use). Do not add to it. |
 | `skills/newt-onboarding/` | The onboarding skill shipped inside the package (`newt skill install`). |
 
-Tests are in `tests/`; runnable examples in `examples/`.
+Tests are in `tests/`; runnable examples in `examples/` — including
+`record_with_cameras.py`, a complete recording source with cameras that
+`newt record --source` loads as-is.
 
 ### Running the tests
 
