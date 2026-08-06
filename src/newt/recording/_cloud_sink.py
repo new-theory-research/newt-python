@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,8 +59,69 @@ _RETRY_BASE_DELAY_S = 1.0  # backoff sleeps: 1s, 2s (base * 2**(attempt-1))
 _MIN_UPLOAD_BYTES_PER_SEC = 1_000_000  # ~8 Mbps — a weak-but-working venue-wifi floor
 
 
+# GCS answers a rejected signed PUT with an XML body naming the reason
+# (``<Error><Code>ExpiredToken</Code>...``). The HTTP status alone can't separate the two
+# causes a developer actually hits — a URL that timed out and a name that's already taken —
+# so read the code the server already sent rather than hedging with "may" (Rule 12).
+_GCS_ERROR_CODE_RE = re.compile(rb"<Code>([A-Za-z]+)</Code>")
+
+# What GCS calls each cause. `AccessDenied` is the write-once collision: the signed URL is
+# minted by `nt-episodes-writer`, which holds objectCreator only, so a PUT over an existing
+# object is a permission failure server-side (portal#98, confirmed live).
+_GCS_EXPIRED_CODES = frozenset({"ExpiredToken", "RequestExpired", "RequestTimeTooSkewed"})
+_GCS_COLLISION_CODES = frozenset({"AccessDenied", "Forbidden"})
+
+
 def _rfc3339_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gcs_error_code(exc: HTTPError) -> str | None:
+    """The ``<Code>`` out of a GCS XML error body, or ``None`` when the body is unreadable or
+    carries none. ``None`` is a real answer — the caller falls back to the HTTP status and says
+    so, rather than inventing a cause the server didn't name (Rule 10)."""
+    try:
+        body = exc.read()
+    except Exception:
+        return None
+    match = _GCS_ERROR_CODE_RE.search(body or b"")
+    return match.group(1).decode() if match else None
+
+
+def _rejected_upload_message(
+    code: int, reason: object, gcs_code: str | None, remote_path: str, failure_note: str
+) -> str:
+    """One cause, one string, for a signed PUT the server refused (Rule 12).
+
+    Pure so the four branches are testable without a network. The two that matter are
+    distinguished by what GCS itself said, not by a guess: an expired URL is the developer's
+    connection, a name collision is the write-once store, and neither of them is the
+    signature failure that would be OURS. What we can't identify says so plainly."""
+    head = f"NTCloudSink: upload rejected for {remote_path!r} ({code} {reason}) — "
+
+    if gcs_code in _GCS_EXPIRED_CODES or (gcs_code is None and code == 400):
+        return (
+            f"{head}the server rejected the signed upload URL as expired. Signed URLs are "
+            f"valid ~15 min, and a large file on a slow link can outlast one. Re-run under a "
+            f"NEW dataset name on a stronger connection. {failure_note}"
+        )
+    if gcs_code == "SignatureDoesNotMatch":
+        return (
+            f"{head}the signed upload URL's signature didn't verify. That is ours, not your "
+            f"data, your key, or your connection — the URL New Theory minted was malformed. "
+            f"Please report it with this path. {failure_note}"
+        )
+    if gcs_code in _GCS_COLLISION_CODES or (gcs_code is None and code == 403):
+        return (
+            f"{head}an object already exists at that name. Uploads are write-once — a "
+            f"dataset name can't be overwritten, added to, or deleted — so this is what "
+            f"re-using a dataset name does. Re-run under a NEW dataset name. {failure_note}"
+        )
+    return (
+        f"{head}the signed upload URL was refused for a reason we don't recognise "
+        f"(storage said {gcs_code or 'nothing readable'}). This is not a network fault and "
+        f"retrying won't clear it. Please report it with this path. {failure_note}"
+    )
 
 
 def _parse_expiry(value: object) -> datetime | None:
@@ -488,14 +550,17 @@ class NTCloudSink:
             except HTTPError as exc:
                 if exc.code < 500:
                     # A 4xx means the signed URL was rejected, not a flaky network — retrying
-                    # won't help. Distinct from the stall message (Rule 12): the two never share
-                    # a string. 400 = the URL expired (signed URLs are short-lived); 403 = an
-                    # object already exists at that name (uploads are write-once, create-only).
+                    # won't help. Which rejection it was comes from the code GCS sent, not
+                    # from a hedge: expiry, a write-once collision, a bad signature (ours), and
+                    # anything we can't name each get their own string (Rule 12).
                     raise RuntimeError(
-                        f"NTCloudSink: upload rejected for {remote_path!r} "
-                        f"({exc.code} {exc.reason}) — the signed upload URL was refused. It may "
-                        f"have expired, or an object already exists at that name (uploads are "
-                        f"write-once). Re-run the upload under a NEW dataset name. {failure_note}"
+                        _rejected_upload_message(
+                            exc.code,
+                            exc.reason,
+                            _gcs_error_code(exc),
+                            remote_path,
+                            failure_note,
+                        )
                     ) from exc
                 last_error = exc  # 5xx — transient, retry
             except URLError as exc:
