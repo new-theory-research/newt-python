@@ -291,7 +291,10 @@ def cmd_models(args: list[str]) -> int:
     except newt.RegistryUnavailable as exc:
         print(f"newt: registry unreachable — {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — CLI command boundary: the named SDK
+        # errors are handled above; anything else (a bug, an SDK exception this
+        # command doesn't know about yet) still needs a clean one-line report and
+        # exit code, not a Python traceback in a developer's terminal.
         print(f"newt: unexpected error — {exc}", file=sys.stderr)
         return 1
 

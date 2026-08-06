@@ -497,23 +497,27 @@ def _validate_obs_against_contract(
     # State: present-but-wrong-shape only. Absent state → server fills; don't demand it.
     state = obs.get("state")
     got_state = getattr(state, "shape", None)
-    if state is not None and got_state is not None and contract.state_shape is not None:
-        if tuple(got_state) != contract.state_shape:
-            raise ContractMismatchError(
-                code=4422,
-                type="contract_mismatch.state_shape",
-                message=(
-                    f"Observation 'state' has shape {tuple(got_state)}, but model "
-                    f"{_model_label(model)} expects state_shape {contract.state_shape}. "
-                    "Reshape your state vector to match, or inspect robot.contract.state_shape."
-                ),
-                context={
-                    "model": model,
-                    "expected_shape": list(contract.state_shape),
-                    "got_shape": list(got_state),
-                },
-                docs=_CONTRACT_DOCS,
-            )
+    if (
+        state is not None
+        and got_state is not None
+        and contract.state_shape is not None
+        and tuple(got_state) != contract.state_shape
+    ):
+        raise ContractMismatchError(
+            code=4422,
+            type="contract_mismatch.state_shape",
+            message=(
+                f"Observation 'state' has shape {tuple(got_state)}, but model "
+                f"{_model_label(model)} expects state_shape {contract.state_shape}. "
+                "Reshape your state vector to match, or inspect robot.contract.state_shape."
+            ),
+            context={
+                "model": model,
+                "expected_shape": list(contract.state_shape),
+                "got_shape": list(got_state),
+            },
+            docs=_CONTRACT_DOCS,
+        )
 
     images = obs.get("images")
     if isinstance(images, dict) and images:
@@ -677,15 +681,17 @@ def _http_error_detail(exc) -> str | None:
     """
     import json
 
+    # A read/parse failure here must degrade to no-detail, never to a second
+    # exception masking the original HTTPError this function exists to explain.
     try:
         body = exc.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort per the docstring, see comment above
         return None
     if not body:
         return None
     try:
         parsed = json.loads(body)
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort per the docstring, see comment above
         return None
     detail = parsed.get("detail") if isinstance(parsed, dict) else None
     return detail if isinstance(detail, str) and detail else None
@@ -799,8 +805,7 @@ def _resolve_model_endpoint(registry: list, model: str | None, bootstrap_url: st
         uid = entry.get("uid")
         if uid:
             known.append(uid)
-        for tag in (entry.get("tags") or []):
-            known.append(tag)
+        known.extend(entry.get("tags") or [])
     raise ModelNotFoundError(model, known)
 
 
@@ -1155,7 +1160,9 @@ class Robot:
                         )
                     break
             return f"{display} · contract pending"
-        except Exception:
+        except Exception:  # noqa: BLE001 — __repr__ must never raise; a broken repr
+            # would crash unrelated code (debuggers, logging, print()) that only
+            # wanted a label. Fall back to the bare class name, never propagate.
             return "<Robot>"
 
     __str__ = __repr__
@@ -1336,9 +1343,12 @@ class Robot:
                 )
                 return resp, cold_retried
             finally:
+                # infer() is a single request/response call: the caller wants resp
+                # (or whatever exception the try body raised), not a close-time
+                # error on a socket that already did its job. Swallow, don't mask.
                 try:
                     ws.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 — see comment above
                     pass
 
         _call_t0 = _time.perf_counter()
@@ -1433,7 +1443,11 @@ class Robot:
                     open_timeout=180,
                     ping_timeout=None,
                 )
-            except Exception:
+            except TimeoutError:
+                # Docstring's contract: "if the 180s retry ALSO times out, the
+                # original TimeoutError is re-raised unmasked." A different failure
+                # on retry (e.g. InvalidStatus, a real auth rejection) is a distinct
+                # problem and must surface as itself, not get relabeled a timeout.
                 raise original_exc
         except InvalidStatus as exc:
             self._cold_start_retry_consumed = True
@@ -1530,9 +1544,12 @@ class Robot:
                     stop_reason = _str_field(parsed, "stop_reason") or "error"
                     break
         finally:
+            # _run_blocking_once already has its RunResult (or a propagating
+            # exception) by this point; a close-time error on a socket that's
+            # done its job must not override either. Swallow, don't mask.
             try:
                 ws.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — see comment above
                 pass
         return RunResult(stop_reason=stop_reason)
 
@@ -1615,9 +1632,13 @@ class Robot:
                 elif ftype == "terminal":
                     return
         finally:
+            # _stream_once is a generator: this finally fires on normal exhaustion,
+            # an early `return`, AND the caller closing the generator mid-stream. In
+            # every case a close-time error on a socket already being torn down must
+            # not override whatever the caller is seeing. Swallow, don't mask.
             try:
                 ws.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — see comment above
                 pass
 
 

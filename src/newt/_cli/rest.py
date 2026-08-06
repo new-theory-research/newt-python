@@ -127,9 +127,10 @@ def cmd_rest(args: list[str]) -> int:
             file=sys.stderr,
         )
         return 130
-    except Exception as exc:
-        # The factory's own refusal — a missing address, a missing driver.
-        # Surface it, don't trace it.
+    except Exception as exc:  # noqa: BLE001 — the factory's own refusal — a
+        # missing address, a missing driver. `load_source` runs a developer-supplied
+        # factory (arbitrary code, arbitrary hardware bring-up); it can raise
+        # anything, and this command's job is to surface it, not trace it.
         print(f"[newt rest] {exc}", file=sys.stderr)
         return EXIT_USAGE
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 
 # --- the four ways the camera half of a recording fails ---------------------
 #
@@ -212,7 +212,9 @@ class SimulatedSource:
 
     # A non-zero rest pose so a 'snap to zero' bug downstream is visible. Length
     # is clamped/padded to the descriptor's joint count at sample time.
-    _REST_POSE = [0.0, math.pi / 3.0, math.pi / 6.0, math.pi / 5.0, 0.0, 0.0, 0.0]
+    _REST_POSE: ClassVar[list[float]] = [
+        0.0, math.pi / 3.0, math.pi / 6.0, math.pi / 5.0, 0.0, 0.0, 0.0
+    ]
 
     def __init__(self, descriptor: StateDescriptor, drop_every: int = 0) -> None:
         self.descriptor = descriptor

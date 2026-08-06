@@ -60,7 +60,11 @@ def validate(episode_dir: Path) -> dict:
 
     try:
         state_topics, state_count, monotonic, camera_marker_counts = _scan_mcap(mcap_path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — this function's whole job is running
+        # a battery of checks and recording pass/fail per check (see the pattern
+        # above and below); "data_mcap_readable" IS the check for "does this parse
+        # at all," so whatever _scan_mcap raises becomes that check's False, not a
+        # crash of the validator itself.
         record("data_mcap_readable", False, f"data.mcap is not readable: {exc}")
         return _verdict(episode_dir, checks)
     record("data_mcap_readable", True, "readable")
@@ -130,7 +134,7 @@ def _ffprobe_frame_count(path: Path) -> int:
             "-count_frames", "-show_entries", "stream=nb_read_frames",
             "-of", "default=nokey=1:noprint_wrappers=1", str(path),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     text = out.stdout.strip()
     return int(text) if text.isdigit() else 0

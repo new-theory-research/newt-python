@@ -52,7 +52,9 @@ def _console_url() -> str:
 def _device_name() -> str:
     try:
         return socket.gethostname()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort device label for the pairing
+        # record only; any failure here must not block login, just fall back to
+        # platform.node() (and then a literal "unknown").
         return platform.node() or "unknown"
 
 
@@ -129,7 +131,9 @@ def cmd_login(args: list[str]) -> int:
     # Step 2: attempt browser open (silent failure for SSH/headless rigs)
     try:
         opened = webbrowser.open(browser_url)
-    except Exception:
+    except Exception:  # noqa: BLE001 — silent failure for SSH/headless rigs (see
+        # comment above): no browser binding on a remote box is expected, not an
+        # error, and the code below already prints the manual-URL fallback.
         opened = False
 
     if opened:
