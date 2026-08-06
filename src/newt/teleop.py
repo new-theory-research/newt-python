@@ -129,6 +129,50 @@ class TickRecorder(Protocol):
         ...
 
 
+#: The attribute a rig sets to say that one object both drives the rig and
+#: records it, so a demonstration can be recorded from a single tick. Public and
+#: importable on purpose: it is a word two codebases have to agree on, and a kit
+#: author copying a string out of somebody's CLI internals has no way to know
+#: when it changes.
+#:
+#: It is read in two places, and they answer different questions. On the
+#: **factory**, before it is called — *may this rig be built at all for this?* —
+#: which is the only check that can happen while nothing is connected. On the
+#: **object** the factory returned, after — *did the thing it built back the
+#: claim?* The first is the gate; the second catches a factory that declared
+#: something it did not deliver.
+DRIVES_AND_RECORDS = "drives_and_records"
+
+
+def drives_and_records(factory):
+    """Declare that this factory builds a rig that drives *and* records at once.
+
+    A source factory decorated with this is saying the object it returns will
+    both accept actions and report state for the same tick — the shape a
+    recorded demonstration needs. It is asked for and never inferred: an object
+    carrying ``send_action`` next to ``read_state`` is a shape, and a shape is
+    not a statement that driving and recording the same rig at once is a thing
+    this rig means to do.
+
+    The decorator exists so the claim is readable *before the factory runs*.
+    Construction is what connects and energizes hardware, so a verb that builds
+    first and validates second has already moved metal it never approved::
+
+        from newt.teleop import drives_and_records
+
+        @drives_and_records
+        def make_demo():
+            # returns one object that accepts actions and reports the state the
+            # tick it just drove produced
+            return MyRig(bring_up(recorded=True))
+
+    The object it returns sets the same attribute (``drives_and_records = True``)
+    for the after-construction check.
+    """
+    setattr(factory, DRIVES_AND_RECORDS, True)
+    return factory
+
+
 class ActionRejected(ValueError):
     """Raise from ``send_action`` when the sink refuses the action as malformed.
 
