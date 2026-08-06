@@ -21,11 +21,18 @@ What these encode (the WHY, not just the WHAT):
   where to declare and names nothing. Inventing a plausible roster to look
   helpful is Rule 10's failure wearing a friendly face, and the test for it
   asserts an *absence*.
-- **Nineteen causes, nineteen strings.** Rule 12 made executable: two different
-  problems must never print the same sentence, because an operator who cannot
-  tell them apart cannot fix either. Asserted pairwise, and asserted again on
-  first lines alone — a shared opening line collapses two diagnoses no matter
+- **Twenty-two causes, twenty-two strings.** Rule 12 made executable: two
+  different problems must never print the same sentence, because an operator who
+  cannot tell them apart cannot fix either. Asserted pairwise, and asserted again
+  on first lines alone — a shared opening line collapses two diagnoses no matter
   what the rest of the paragraph says.
+- **A refusal a reader cannot find the fix in has failed, however complete it
+  is.** She hit an error whose recovery command was in the message and did not
+  see it. So the structure is asserted, not just the content: one command per
+  refusal, alone on its line, blank lines around it, at the top rather than at
+  the end of a paragraph. And asserted from the other side too — the durable
+  fix, the table to edit and the path to edit it in all have to still be there,
+  or the layout was bought by deleting the teaching.
 - **The namespace a source is declared under is not the command anyone types.**
   For `rest`, `record` and `teleop` they are the same word, which is why one
   argument doing both jobs went unnoticed; `newt record --teleop` resolves under
@@ -37,6 +44,7 @@ What these encode (the WHY, not just the WHAT):
 """
 from __future__ import annotations
 
+import re
 import sys
 
 import pytest
@@ -482,29 +490,32 @@ def test_sources_is_read_in_isolation_from_the_kits_own_tables(monkeypatch, tmp_
 
 
 # --------------------------------------------------------------------------- #
-# Nineteen causes, nineteen strings (card test 4)
+# Twenty-two causes, twenty-two strings (card test 4)
 # --------------------------------------------------------------------------- #
 
 def _every_refusal(
     monkeypatch, tmp_path, *, verb="rest", command=None, example=REST_EXAMPLE
 ) -> dict[str, str]:
-    """Provoke all nineteen refusals for real and collect what each one printed.
+    """Provoke all twenty-two refusals for real and collect what each one printed.
 
     Built by driving ``resolve_spec`` rather than by reading the strings out of
     the module, so a cause that stops being reachable takes this test down with
     it.
 
-    Eleven until newtrino-035, nineteen after. Four of the eleven fired in three
-    situations that printed one sentence between them — nothing publishing to
-    ``newt`` at all, kits publishing for other verbs, and the kit sitting in the
-    directory the operator is standing in while a different ``newt`` answers —
-    so each of those four is provoked from all three. The count moved because
-    the corpus did.
+    Eleven until newtrino-035, twenty-two after, and the two moves are worth
+    keeping apart. Four of the eleven fired in three situations that printed one
+    sentence between them — nothing publishing to ``newt`` at all, kits
+    publishing for other verbs, and the kit sitting in the directory the
+    operator is standing in while a different ``newt`` answers — so each of
+    those four is provoked from all three. The twenty-second is different: a
+    config that parses and has no ``[sources]`` table was always its own string
+    and was never provoked here, which made the refusal the card was filed for
+    the one refusal nothing guarded.
 
     ``verb`` and ``command`` are separable here for the same reason they are
     separable in the resolver: the composed path resolves in one namespace and
-    is typed as another command, and every one of these nineteen has to come out
-    right on both."""
+    is typed as another command, and every one of these twenty-two has to come
+    out right on both."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     _stand_in_a_kit(monkeypatch, tmp_path)  # ...in no kit, until case 16 says so
     messages: dict[str, str] = {}
@@ -588,7 +599,21 @@ def _every_refusal(
     )
     _catch("file-declares-other-verbs", None)
 
-    # 12-15 — the same four as 7, 8, 10 and 11, in the *other* empty-registry
+    # 12 — a file that parses and has no [sources] table at all. **This is the
+    # exact refusal Mattie hit on the bench**, and until newtrino-035 it was the
+    # one string in the family with no assertion anywhere: the corpus provoked
+    # its sibling (case 11, where the table exists and lists another verb) and
+    # called it covered. A rig with a hardware-only config is the likeliest
+    # config a real developer has, so it is the likeliest refusal to meet.
+    _config(
+        monkeypatch,
+        tmp_path,
+        "[robot_config]\narms = 2\n",
+        name="hardware-only.toml",
+    )
+    _catch("file-has-no-sources-table", None)
+
+    # 13-17 — the same five as 7, 8, 10, 11 and 12, in the *other* empty-registry
     # world: kits are installed and publishing, and this verb is the gap. Same
     # symptom, different cause, different owner, and until newtrino-035 the
     # identical sentence. Each is a minimal pair with its twin above — same
@@ -599,22 +624,22 @@ def _every_refusal(
         for sibling in [other for other in ("rest", "record", "teleop") if other != verb][:2]
     }
 
-    # 12 — a typed short name; kits publish, none for this verb.
+    # 13 — a typed short name; kits publish, none for this verb.
     _declare(monkeypatch, **sibling_kit)
     _no_config(monkeypatch, tmp_path)
     _catch("typed-name-verb-not-published", "live_pair")
 
-    # 13 — a file-declared short name; kits publish, none for this verb.
+    # 14 — a file-declared short name; kits publish, none for this verb.
     _config(
         monkeypatch, tmp_path, f'[sources]\n{verb} = "live_pair"\n', name="orphan.toml"
     )
     _catch("config-name-verb-not-published", None)
 
-    # 14 — nothing given, no file; kits publish, none for this verb.
+    # 15 — nothing given, no file; kits publish, none for this verb.
     _no_config(monkeypatch, tmp_path)
     _catch("no-file-verb-not-published", None)
 
-    # 15 — a file that declares other verbs; kits publish, none for this verb.
+    # 16 — a file that declares other verbs; kits publish, none for this verb.
     _config(
         monkeypatch,
         tmp_path,
@@ -623,30 +648,36 @@ def _every_refusal(
     )
     _catch("file-declares-other-verbs-verb-not-published", None)
 
-    # 16-19 — the same four again, in the world where the kit is the directory
+    # 17 — a file with no [sources] table; kits publish, none for this verb.
+    _config(
+        monkeypatch, tmp_path, "[robot_config]\narms = 2\n", name="hardware-only.toml"
+    )
+    _catch("file-has-no-sources-table-verb-not-published", None)
+
+    # 18-22 — the same five again, in the world where the kit is the directory
     # the operator is standing in and the running newt is not the project's.
     # Nothing is missing there, so the two readings above are both true and both
     # useless: they send someone to install a kit they are standing inside.
-    # Minimal pairs with 7, 8, 10 and 11 — same empty registry, same config
+    # Minimal pairs with 7, 8, 10, 11 and 12 — same empty registry, same config
     # file, one variable moved.
     _declare(monkeypatch)
     _stand_in_a_kit(monkeypatch, tmp_path, verb)
 
-    # 16 — a typed short name, standing in the kit that publishes the verb.
+    # 18 — a typed short name, standing in the kit that publishes the verb.
     _no_config(monkeypatch, tmp_path)
     _catch("typed-name-kit-is-the-cwd", "live_pair")
 
-    # 17 — a file-declared short name, standing in that kit.
+    # 19 — a file-declared short name, standing in that kit.
     _config(
         monkeypatch, tmp_path, f'[sources]\n{verb} = "live_pair"\n', name="orphan.toml"
     )
     _catch("config-name-kit-is-the-cwd", None)
 
-    # 18 — nothing given, no file, standing in that kit.
+    # 20 — nothing given, no file, standing in that kit.
     _no_config(monkeypatch, tmp_path)
     _catch("no-file-kit-is-the-cwd", None)
 
-    # 19 — a file that declares other verbs, standing in that kit.
+    # 21 — a file that declares other verbs, standing in that kit.
     _config(
         monkeypatch,
         tmp_path,
@@ -654,6 +685,12 @@ def _every_refusal(
         name="other-verbs.toml",
     )
     _catch("file-declares-other-verbs-kit-is-the-cwd", None)
+
+    # 22 — a file with no [sources] table, standing in that kit.
+    _config(
+        monkeypatch, tmp_path, "[robot_config]\narms = 2\n", name="hardware-only.toml"
+    )
+    _catch("file-has-no-sources-table-kit-is-the-cwd", None)
 
     return messages
 
@@ -684,7 +721,7 @@ def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
     return corpus
 
 
-def test_nineteen_causes_produce_nineteen_distinct_strings(monkeypatch, tmp_path):
+def test_twenty_two_causes_produce_twenty_two_distinct_strings(monkeypatch, tmp_path):
     """Rule 12, executable. "Could any other cause produce this identical
     string?" answered by asking the code instead of the author.
 
@@ -699,7 +736,7 @@ def test_nineteen_causes_produce_nineteen_distinct_strings(monkeypatch, tmp_path
     of them takes this count with it.
     """
     messages = _both_corpora(monkeypatch, tmp_path)
-    assert len(messages) == 38, "a cause stopped being reachable"
+    assert len(messages) == 44, "a cause stopped being reachable"
 
     seen: dict[str, str] = {}
     for label, message in messages.items():
@@ -707,7 +744,7 @@ def test_nineteen_causes_produce_nineteen_distinct_strings(monkeypatch, tmp_path
         seen[message] = label
 
 
-def test_the_nineteen_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
+def test_the_twenty_two_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
     """The diagnosis is the first line — the rest is the fix.
 
     An operator at a bench reads one line before deciding what kind of problem
@@ -730,6 +767,218 @@ def test_the_nineteen_refusals_differ_on_their_first_line(monkeypatch, tmp_path)
             f"{label} and {first_lines[head]} open with the same diagnosis"
         )
         first_lines[head] = label
+
+
+# --------------------------------------------------------------------------- #
+# The fix is the headline, or it isn't a fix (newtrino-035, ruling 2)
+# --------------------------------------------------------------------------- #
+
+# A line that is nothing but a command. Every token is whitespace-free, which is
+# what separates it from a prose line that happens to end in one: "Or pass it
+# this once: newt rest --source X" has a colon-and-space in it and does not
+# match, and that is the whole point — a command inside a sentence is the shape
+# that failed at a bench.
+_BARE_COMMAND = re.compile(r"^(?:uv run )?newt(?: [\w.:/=\-]+)+$")
+
+
+def _the_one_command(message: str) -> int:
+    """The index of the message's isolated command line. Raises if there isn't
+    exactly one — two isolated commands is a choice, and a refusal that opens
+    with a choice has handed back the problem."""
+    hits = [
+        index
+        for index, line in enumerate(message.splitlines())
+        if line.startswith("    ") and _BARE_COMMAND.match(line.strip())
+    ]
+    assert len(hits) == 1, f"{len(hits)} isolated commands, not one:\n{message}"
+    return hits[0]
+
+
+def test_every_refusal_puts_one_command_where_a_reader_will_find_it(
+    monkeypatch, tmp_path
+):
+    """Ruling 2, mechanical, across the whole family (card test 5).
+
+    The receipt: an error whose correct recovery command was *in* the message,
+    read by the person who needed it, and not seen — because of how much text
+    was around it. Rule 12 was satisfied and the error still failed at its job.
+    So the law is about placement, and placement is the kind of thing a test can
+    hold: one command, alone on its line, blank line above and below, directly
+    under the diagnosis instead of at the end of a paragraph.
+
+    This is the assertion that stops a later well-meaning edit from folding the
+    fix back into prose because the paragraph read better that way. It is also
+    why the corpus is walked rather than a sample: the refusal she missed was
+    not one anybody would have picked as the risky one.
+
+    **Deviation from the card, stated rather than absorbed.** Its § Tests 5 asks
+    for "among the first two lines or the last non-empty line". The first line is
+    the branded diagnosis — pinned by the two tests above, and the reader's only
+    "what kind of problem is this" — so a top-positioned command can be at index
+    1 with no blank line above it, or at index 2 with blank lines on both sides.
+    "Set off by a blank line" and "in the first two lines" cannot both hold. The
+    blank line won: it is the half doing the visual work the ruling asked for.
+    """
+    for label, message in _both_corpora(monkeypatch, tmp_path).items():
+        lines = message.splitlines()
+        index = _the_one_command(message)
+        last = max(i for i, line in enumerate(lines) if line.strip())
+
+        assert index == 2 or index == last, (
+            f"{label}: the command is buried at line {index} of {len(lines)}:\n{message}"
+        )
+        assert not lines[index - 1].strip(), (
+            f"{label}: no blank line above the command:\n{message}"
+        )
+        if index != last:
+            assert not lines[index + 1].strip(), (
+                f"{label}: no blank line below the command:\n{message}"
+            )
+
+
+# What a refusal owes a reader once the layout is fixed, named as facts rather
+# than as phrasing: the paths, tables, names and flags it carried. Every entry
+# was computed from the corpus as it stood *before* the copy pass — a substring
+# read of the pre-change strings, not a transcription — so this table is what
+# the family knew how to say when it was still saying it in the wrong order.
+_DURABLE_FACTS = {
+    "bad-toml": {"a-source-flag-to-type", "names-the-config-file", "the-spec-shape"},
+    "unreadable": {"a-source-flag-to-type", "names-the-config-file", "the-spec-shape"},
+    "wrong-shape": {
+        "a-source-flag-to-type", "names-the-config-file", "the-line-to-write",
+        "the-sources-table", "the-spec-shape",
+    },
+    "two-kits-one-name": {"a-name-from-a-declaration", "a-source-flag-to-type"},
+    "typed-name-unknown": {"a-name-from-a-declaration", "a-source-flag-to-type"},
+    "config-name-unknown": {
+        "a-name-from-a-declaration", "a-source-flag-to-type",
+        "names-the-config-file", "the-sources-table",
+    },
+    "typed-name-nothing-installed": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "which-interpreter",
+    },
+    "config-name-nothing-installed": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
+        "the-sources-table", "which-interpreter",
+    },
+    "several-candidates": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
+        "the-line-to-write", "the-sources-table",
+    },
+    "no-file-at-all": {
+        "a-source-flag-to-type", "names-the-config-file", "the-line-to-write",
+        "the-sources-table", "which-interpreter",
+    },
+    "file-declares-other-verbs": {
+        "a-source-flag-to-type", "names-the-config-file", "the-line-to-write",
+        "the-sources-table", "which-interpreter",
+    },
+    "file-has-no-sources-table": {
+        "a-source-flag-to-type", "names-the-config-file", "the-line-to-write",
+        "the-sources-table", "which-interpreter",
+    },
+    "typed-name-verb-not-published": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "the-entry-point-group",
+    },
+    "config-name-verb-not-published": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
+        "the-entry-point-group", "the-sources-table",
+    },
+    "no-file-verb-not-published": {
+        "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
+        "the-line-to-write", "the-sources-table",
+    },
+    "file-declares-other-verbs-verb-not-published": {
+        "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
+        "the-line-to-write", "the-sources-table",
+    },
+    "file-has-no-sources-table-verb-not-published": {
+        "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
+        "the-line-to-write", "the-sources-table",
+    },
+    "typed-name-kit-is-the-cwd": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
+        "the-entry-point-group", "the-project-env-command", "which-interpreter",
+    },
+    "config-name-kit-is-the-cwd": {
+        "a-name-from-a-declaration", "a-source-flag-to-type", "names-the-config-file",
+        "the-entry-point-group", "the-project-env-command", "the-sources-table",
+        "which-interpreter",
+    },
+    "no-file-kit-is-the-cwd": {
+        "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
+        "the-line-to-write", "the-project-env-command", "the-sources-table",
+        "which-interpreter",
+    },
+    "file-declares-other-verbs-kit-is-the-cwd": {
+        "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
+        "the-line-to-write", "the-project-env-command", "the-sources-table",
+        "which-interpreter",
+    },
+    "file-has-no-sources-table-kit-is-the-cwd": {
+        "a-source-flag-to-type", "names-the-config-file", "the-entry-point-group",
+        "the-line-to-write", "the-project-env-command", "the-sources-table",
+        "which-interpreter",
+    },
+}
+
+_FIXTURE_NAMES = (
+    "live_pair", "live_par", "bench_left", "bench_right", "widowx_rest",
+    "yam_rest", "bench_pair",
+)
+
+
+def _durable_facts(message: str, tmp_path) -> set[str]:
+    """What a refusal still hands over, read as facts and not as sentences.
+
+    Each of these is a thing the operator can act on — a path to open, a table
+    to write, a flag to type, an interpreter to check, a group for a kit author
+    to publish. None of them is a phrasing, which is the point: a copy edit that
+    changes every sentence and keeps every fact passes, and a "tightening" that
+    drops the [sources] block to make the layout cleaner does not."""
+    facts = set()
+    if str(tmp_path) in message:
+        facts.add("names-the-config-file")
+    if "[sources]" in message:
+        facts.add("the-sources-table")
+    if ' = "' in message:
+        facts.add("the-line-to-write")
+    if "--source" in message:
+        facts.add("a-source-flag-to-type")
+    if sys.executable in message:
+        facts.add("which-interpreter")
+    if "newt.sources." in message:
+        facts.add("the-entry-point-group")
+    if "uv run newt" in message:
+        facts.add("the-project-env-command")
+    if "MODULE:FACTORY" in message:
+        facts.add("the-spec-shape")
+    if any(name in message for name in _FIXTURE_NAMES):
+        facts.add("a-name-from-a-declaration")
+    return facts
+
+
+def test_no_teaching_was_bought_back_for_the_layout(monkeypatch, tmp_path):
+    """The guard on the guard (card test 5b).
+
+    The test above can be passed by deletion. Strip a refusal down to a
+    diagnosis and a command and it lays out beautifully, isolates its fix
+    perfectly, and has stopped telling anyone how to stop needing the flag —
+    which is what newtrino-029 built these messages to do and what the card puts
+    explicitly out of scope to trade away.
+
+    So the same corpus is asserted from the other side, against the facts the
+    pre-change strings carried. Two sentences *were* deliberately removed on
+    this card, in an earlier cycle and for truthfulness rather than tone (they
+    claimed nothing was declared anywhere, on machines where a kit was
+    publishing three sibling verbs). Neither was a durable fix, and this table
+    was computed after they were already gone — so nothing here treats them as
+    casualties.
+    """
+    for label, message in _both_corpora(monkeypatch, tmp_path).items():
+        expected = _DURABLE_FACTS[label.split("/", 1)[1]]
+        missing = expected - _durable_facts(message, tmp_path)
+        assert not missing, f"{label} stopped telling the reader: {sorted(missing)}\n{message}"
 
 
 # --------------------------------------------------------------------------- #
@@ -974,7 +1223,7 @@ def test_no_refusal_reads_the_environment_pytest_happens_to_run_in(
     assert "publishes any source to newt" in str(exc.value)
 
     # Then the whole corpus, which catches a fourth probe that skips every seam.
-    assert len(_both_corpora(monkeypatch, tmp_path)) == 38
+    assert len(_both_corpora(monkeypatch, tmp_path)) == 44
 
 
 # --------------------------------------------------------------------------- #
@@ -1000,7 +1249,7 @@ def test_the_composed_path_never_tells_an_operator_to_run_a_command_that_exists_
         command=_COMPOSED_COMMAND,
         example=_COMPOSED_EXAMPLE,
     )
-    assert len(messages) == 19
+    assert len(messages) == 22
 
     for label, message in messages.items():
         assert "newt demonstration" not in message, (

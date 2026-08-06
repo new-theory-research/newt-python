@@ -706,7 +706,12 @@ def test_the_composed_refusal_names_the_command_typed_not_the_namespace(
 
     assert rc == 2
     assert "newt demonstration" not in err, f"advertised a command that does not exist:\n{err}"
-    assert "Fix the name:  newt record --teleop --source bench_pair" in err
+    # Was "Fix the name:  newt record --teleop --source bench_pair", pinned with
+    # its two spaces. The command moved out of that sentence and onto a line of
+    # its own under ruling 2, so the pin moves with it — and gets stricter for
+    # the move: asserting the isolated line is what says the operator can see
+    # the fix, which is the thing this test was always about.
+    assert "\n    newt record --teleop --source bench_pair\n" in err
     assert "is declared for demonstration" in err
 
 
