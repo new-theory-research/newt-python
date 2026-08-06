@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -1318,3 +1319,39 @@ def test_a_verb_that_is_its_own_command_is_branded_exactly_as_before(
         assert implicit == explicit, f"{verb} changed when the command was defaulted"
         for label, message in implicit.items():
             assert message.startswith(f"newt {verb}:"), f"{verb}/{label}: {message}"
+
+
+def test_the_kit_author_contract_names_what_the_resolver_actually_reads():
+    """The README's kit-author section is checked against the code, not trusted.
+
+    Until this branch, `newt.sources.<verb>` and `[sources]` appeared nowhere in
+    this repo outside this module and this suite: a kit author had our inline
+    comments to publish against and nothing else, which is a plausible reason a
+    kit ends up declaring nothing `newt` can see. The README now carries the
+    contract — and a contract nobody re-reads is exactly the thing that rots
+    when a constant is renamed, so the names it hands out are asserted from the
+    constants themselves rather than transcribed.
+
+    The four namespaces are spelled out because there is no list of them in the
+    code to import: three verbs answer to their own name and the composed path
+    resolves under `_COMPOSED_VERB`. A fifth verb that takes a source and never
+    reaches this assertion is the drift this test cannot catch; the ones it can
+    catch are a renamed group, a renamed composed namespace, a renamed table,
+    and a moved config path.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+
+    for verb in ("teleop", "rest", "record", _COMPOSED_VERB):
+        group = f"{_source_spec.REGISTRY_GROUP}.{verb}"
+        assert group in readme, (
+            f"the README's kit-author contract never names {group}, so a kit "
+            f"author reading it cannot publish a {verb} source"
+        )
+
+    assert f"[{_source_spec.SOURCES_TABLE}]" in readme
+    assert _source_spec.DEFAULT_SITE_CONFIG_PATH in readme
+    assert _source_spec.SITE_CONFIG_ENV in readme
+
+    # The one fact that is neither in the group name nor the table: entry points
+    # are install metadata, so a declaration that was only written is invisible.
+    assert "fresh install" in readme
