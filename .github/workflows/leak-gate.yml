@@ -23,3 +23,29 @@ jobs:
       # where the final push's diff is clean but the tree is not.
       - name: Scan tracked files
         run: python scripts/leak_gate.py
+
+  # The job above reads what is inside files. This one reads the repo's own metadata,
+  # which GitHub publishes to anyone who asks and which nothing was checking.
+  leak-gate-metadata:
+    name: "No internal names on this repo's branches or pull requests"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Run first, for the same reason as the scan above: a check that cannot fail would
+      # pass the real one silently.
+      - name: Self-test — the metadata check can still catch what it claims
+        run: python scripts/leak_gate_metadata.py --self-test
+
+      # Live lists, not the diff: a branch name is published the moment it is pushed, and
+      # a leaky one can appear without any commit touching a file in this repo.
+      - name: Scan remote branch names and open pull-request titles
+        run: python scripts/leak_gate_metadata.py

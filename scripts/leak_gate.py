@@ -72,16 +72,20 @@ _ORG_REF = re.compile(r"new-theory-research/([A-Za-z0-9_.-]+)")
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
-def load_terms() -> set[str]:
-    if not TERMS_FILE.exists():
-        sys.exit(f"leak gate: missing {TERMS_FILE} — the gate cannot run without its denylist")
+def load_terms(terms_file: Path = TERMS_FILE) -> set[str]:
+    """Digests from a denylist file. The path is a parameter so the metadata gate
+    (scripts/leak_gate_metadata.py) can load its own list through the same guards; the
+    messages name the file, so an empty content list and an empty metadata list still
+    read as two different problems."""
+    if not terms_file.exists():
+        sys.exit(f"leak gate: missing {terms_file} — the gate cannot run without its denylist")
     digests = {
         line.strip()
-        for line in TERMS_FILE.read_text().splitlines()
+        for line in terms_file.read_text().splitlines()
         if line.strip() and not line.startswith("#")
     }
     if not digests:
-        sys.exit(f"leak gate: {TERMS_FILE} has no digests — refusing to run a gate that cannot fail")
+        sys.exit(f"leak gate: {terms_file} has no digests — refusing to run a gate that cannot fail")
     return digests
 
 
