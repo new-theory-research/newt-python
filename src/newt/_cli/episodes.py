@@ -590,7 +590,11 @@ def _cmd_push(rest: list[str]) -> int:
         )
         try:
             sink.deliver(episode_dir)
-        except Exception as exc:  # the sink raises RuntimeError; never swallow anything else
+        except Exception as exc:  # noqa: BLE001 — CLI command boundary: `newt episodes
+            # push` must report a partial-upload state (which episodes landed, that the
+            # dataset name is now spent) instead of a bare traceback, whatever the sink
+            # raises (network, auth, or a bug). The sink raises RuntimeError today; never
+            # swallow anything else the underlying transport could throw.
             print("failed", file=out, flush=True)
             print(f"\nnewt episodes push: {exc}", file=sys.stderr)
             # What the sink can't know and the push can: how far it got, and what that
@@ -613,7 +617,10 @@ def _cmd_push(rest: list[str]) -> int:
 
     try:
         sink.finalize()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — CLI command boundary, same as the
+        # per-episode deliver() above: the episodes already landed, so this must
+        # explain the specific stuck state (manifest missing, name unrepairable)
+        # rather than crash past that explanation with a traceback.
         print(f"\nnewt episodes push: {exc}", file=sys.stderr)
         print(
             f"  All {landed} episode(s) landed, but manifest.json — the marker that says "
@@ -660,14 +667,17 @@ def _cmd_validate(rest: list[str]) -> int:
 
     try:
         from newt.recording import validate
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — CLI command boundary: importing the
+        # recording package can raise the Lantern (missing `newt[recording]` extra)
+        # or any other module-load error; either way `newt episodes validate` should
+        # print one clean line, not the import machinery's traceback.
         print(f"[newt episodes] {exc}", file=sys.stderr)
         return 1
 
     try:
         result = validate(episode_dir)
-    except Exception as exc:
-        # Lantern (missing extra) or a read error — surface it, don't trace.
+    except Exception as exc:  # noqa: BLE001 — Lantern (missing extra) or a read
+        # error on the episode directory — surface it as a clean line, don't trace.
         print(f"[newt episodes] {exc}", file=sys.stderr)
         return 1
 

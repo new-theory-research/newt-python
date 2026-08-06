@@ -354,7 +354,11 @@ class Session:
         while not self._stop_loop.is_set():
             try:
                 frames = self._source.read_frames()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — this is a background thread;
+                # an uncaught exception here would kill the thread silently (Python
+                # doesn't propagate thread exceptions to the caller) and frames would
+                # just stop arriving with no signal why. Recording the cause and
+                # stopping cleanly is how the camera's failure becomes visible at all.
                 self._fail_cameras("stopped_answering", exc)
                 return
             # Timestamped after the read returns: that is when the frame arrived,
@@ -370,7 +374,9 @@ class Session:
                             self._writer.note_dropped_frame(cam_id)
                             continue
                         self._writer.write_frame(cam_id, frame, ts_ns)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — same background-thread reason
+                # as the read above: an encoder write failure must be recorded and
+                # stop the loop, not die silently on a thread nothing is watching.
                 self._fail_cameras("encoder_refused", exc)
                 return
             next_at += period
@@ -570,12 +576,19 @@ class Session:
         if callable(disable_all):
             try:
                 disable_all()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — close() is "safe from a kill
+                # path" per the docstring: torque-off must be attempted regardless of
+                # what disable_all() does, and a failure here must not skip the
+                # close() release below — a rig left both energized AND unreleased
+                # is worse than one that raised quietly on the way down.
                 pass
         close = getattr(self._source, "close", None)
         if callable(close):
             try:
                 close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — same kill-path guarantee: this
+                # is the last release step, and close() must always mark itself
+                # closed (_closed = True below) even if the source's own close()
+                # misbehaves.
                 pass
         self._closed = True

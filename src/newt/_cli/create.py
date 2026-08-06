@@ -433,7 +433,10 @@ def _fetch_private_tarball(
         try:
             body = json.loads(exc.read())
             code, detail = body.get("code"), body.get("error")
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort: the console's error body is
+            # a nicety on top of the HTTP status FetchFailed already carries below;
+            # a malformed/non-JSON body must degrade to no code/detail, not crash
+            # the CLI while it's already reporting a different failure.
             code = detail = None
         raise FetchFailed(
             f"{exc.code} {exc.reason}",
@@ -478,38 +481,38 @@ def _unpack_tarball(archive: bytes, dest: pathlib.Path) -> int:
     that mattered is worse than a refusal.
     """
     try:
-        tar = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            root = _strip_root(tar)
+            members = []
+            for m in tar.getmembers():
+                parts = pathlib.PurePosixPath(m.name).parts
+                if not parts or parts[0] != root or len(parts) == 1:
+                    continue
+                rel = pathlib.PurePosixPath(*parts[1:])
+                if rel.is_absolute() or ".." in rel.parts:
+                    raise BadArchive(f"archive member escapes the target directory: {m.name}")
+                if not (m.isfile() or m.isdir() or m.issym()):
+                    raise BadArchive(
+                        f"archive member is not a file, directory, or symlink: {m.name}"
+                    )
+                if m.issym():
+                    link = pathlib.PurePosixPath(m.linkname)
+                    if link.is_absolute() or ".." in link.parts:
+                        raise BadArchive(f"archive symlink points outside the kit: {m.name}")
+                m.name = str(rel)
+                members.append(m)
+
+            dest.mkdir(parents=True, exist_ok=True)
+            # tarfile's "data" filter (the safe default from 3.12) is belt to the braces
+            # above; it does not exist on 3.11, which this package still supports, so it
+            # is applied when present rather than assumed.
+            extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            try:
+                tar.extractall(dest, members=members, **extra)
+            except tarfile.TarError as exc:
+                raise BadArchive(f"archive could not be unpacked — {exc}") from exc
     except tarfile.TarError as exc:
         raise BadArchive(f"not a readable gzip tar archive — {exc}") from exc
-
-    with tar:
-        root = _strip_root(tar)
-        members = []
-        for m in tar.getmembers():
-            parts = pathlib.PurePosixPath(m.name).parts
-            if not parts or parts[0] != root or len(parts) == 1:
-                continue
-            rel = pathlib.PurePosixPath(*parts[1:])
-            if rel.is_absolute() or ".." in rel.parts:
-                raise BadArchive(f"archive member escapes the target directory: {m.name}")
-            if not (m.isfile() or m.isdir() or m.issym()):
-                raise BadArchive(f"archive member is not a file, directory, or symlink: {m.name}")
-            if m.issym():
-                link = pathlib.PurePosixPath(m.linkname)
-                if link.is_absolute() or ".." in link.parts:
-                    raise BadArchive(f"archive symlink points outside the kit: {m.name}")
-            m.name = str(rel)
-            members.append(m)
-
-        dest.mkdir(parents=True, exist_ok=True)
-        # tarfile's "data" filter (the safe default from 3.12) is belt to the braces
-        # above; it does not exist on 3.11, which this package still supports, so it
-        # is applied when present rather than assumed.
-        extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
-        try:
-            tar.extractall(dest, members=members, **extra)
-        except tarfile.TarError as exc:
-            raise BadArchive(f"archive could not be unpacked — {exc}") from exc
 
     return sum(1 for m in members if m.isfile())
 
@@ -536,6 +539,7 @@ def _git_init(dest: pathlib.Path) -> str:
         [git, "init", "--quiet", str(dest)],
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
@@ -701,7 +705,7 @@ def _run_setup(dest: pathlib.Path, script: pathlib.Path, forwarded: list[str]) -
     print()
     sys.stdout.flush()
     try:
-        proc = subprocess.run([str(script), *forwarded], cwd=str(dest))
+        proc = subprocess.run([str(script), *forwarded], cwd=str(dest), check=False)
     except OSError as exc:
         raise SetupUnrunnable(str(exc)) from exc
     return proc.returncode

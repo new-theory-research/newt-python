@@ -314,7 +314,9 @@ def _declared_state(part: MovingPart) -> str | None:
         return None
     try:
         state = reporter()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — best-effort per the docstring: this
+        # only reads back a label for the operator, never gates the halt itself, so
+        # a raise here degrades to "unreported", not a crash mid-shutdown.
         return f"unreported ({type(exc).__name__}: {exc})"
     return None if state is None else str(state)
 
@@ -332,7 +334,9 @@ def _halt_all(parts: Sequence[MovingPart]) -> list[HaltReport]:
         name = part.name
         try:
             part.halt()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per the docstring above, one
+            # part's halt refusal must never skip the next part's halt attempt —
+            # that's the exact failure this function exists to prevent.
             reports.append(
                 HaltReport(name, False, None, f"{type(exc).__name__}: {exc}")
             )
@@ -394,7 +398,9 @@ def _put_away(
         try:
             print(f"[newt teleop] {part.name}: putting itself away…", flush=True)
             rest()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — per the docstring above, a
+            # failed rest move must still fall through to _halt_all() below — the
+            # de-energize is never abandoned because the rest move raised.
             print(
                 f"[newt teleop] {part.name} did not complete its rest move "
                 f"({type(exc).__name__}: {exc}); de-energizing it from wherever it is. "
@@ -607,7 +613,9 @@ def run_session(
             # arms stowing themselves as part of the task.
             try:
                 recorder.finish(keep=outcome != "emergency_stop")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — see comment below: the
+                # de-energize path right after this must always run, whatever
+                # finish() raises.
                 # Loud, and then on with the ending. A recording that could not be
                 # closed out is bad; a rig left energized because closing it out
                 # raised is worse.

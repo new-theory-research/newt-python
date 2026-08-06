@@ -348,7 +348,7 @@ def _list_jobs(console: str, api_key: str, *, timeout: float = 30.0) -> list[dic
         body = json.loads(resp.read())
     jobs = body.get("jobs") if isinstance(body, dict) else None
     if not isinstance(jobs, list):
-        raise ValueError(f"list response carried no jobs array: {body!r}")
+        raise TypeError(f"list response carried no jobs array: {body!r}")
     return jobs
 
 
@@ -608,7 +608,7 @@ def _cmd_list(console: str, api_key: str, *, as_json: bool, out) -> int:
         print(f"newt finetune: cannot reach {console}: {exc.reason}", file=sys.stderr)
         print("  Set NT_CONSOLE_URL if you're running a local console.", file=sys.stderr)
         return 1
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         print(f"newt finetune: {exc}", file=sys.stderr)
         return 1
 
@@ -733,7 +733,7 @@ def _resolve_dataset_arg(dataset_arg: str, console: str, api_key: str, out) -> s
     # not after the whole upload and a server-side intake rejection.
     try:
         validate_lerobot_export(export_dir)
-    except RuntimeError as exc:
+    except (RuntimeError, TypeError) as exc:
         print(f"newt finetune: {exc}", file=sys.stderr)
         return None
 

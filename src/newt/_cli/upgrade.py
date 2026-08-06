@@ -28,7 +28,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -134,7 +134,10 @@ def run_update_check(args: list[str]) -> None:
         if not installed:
             return  # can't read our own version → nothing honest to compare against
 
-        today = date.today().isoformat()
+        # Local calendar day, not UTC: this cache gates a once-a-day nudge against
+        # the developer's own sense of "today", the same day date.today() named —
+        # astimezone() just makes that local reference explicit (DTZ011).
+        today = datetime.now().astimezone().date().isoformat()
         cache = _load_cache()
         if cache.get("last_check") == today:
             return  # already checked today — no fetch, no notice (the daily window)
@@ -220,7 +223,7 @@ def cmd_upgrade(args: list[str]) -> int:
 
     print(f"$ {command}")
     try:
-        proc = subprocess.run(command.split())
+        proc = subprocess.run(command.split(), check=False)
     except FileNotFoundError:
         print(
             "newt upgrade: `uv` was not found on your PATH — install uv, or run the "

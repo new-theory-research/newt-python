@@ -96,7 +96,10 @@ def cmd_status(args: list[str]) -> int:
             registry_reachable = False
             error_kind = "registry_down"
             error_detail = str(exc)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — `newt status` reports a bucketed
+            # error_kind for the named SDK failures above; anything else still needs
+            # a bucket ("error") and a detail string instead of crashing a diagnostic
+            # command whose whole purpose is reporting what's wrong.
             latency_ms = round((time.monotonic() - t0) * 1000)
             registry_reachable = False
             error_kind = "error"

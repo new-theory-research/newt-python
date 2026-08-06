@@ -82,7 +82,9 @@ def _gcs_error_code(exc: HTTPError) -> str | None:
     so, rather than inventing a cause the server didn't name (Rule 10)."""
     try:
         body = exc.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort per the docstring: a read
+        # failure on the error body degrades to None (the caller falls back to the
+        # HTTP status), never to a second exception masking the original rejection.
         return None
     match = _GCS_ERROR_CODE_RE.search(body or b"")
     return match.group(1).decode() if match else None
@@ -170,7 +172,9 @@ def validate_lerobot_export(export_dir: Path) -> None:
     - it parses as JSON,
     - it records readable ``action`` and ``observation.state`` feature shapes.
 
-    Raises ``RuntimeError`` naming the fixable problem; returns ``None`` on success.
+    Raises ``TypeError`` when ``meta/info.json`` lacks a ``features`` map and
+    ``RuntimeError`` for every other fixable problem (missing file, bad JSON,
+    missing feature shapes); returns ``None`` on success.
     """
     info_path = export_dir / "meta" / "info.json"
     if not info_path.is_file():
@@ -188,7 +192,7 @@ def validate_lerobot_export(export_dir: Path) -> None:
 
     features = info.get("features") if isinstance(info, dict) else None
     if not isinstance(features, dict):
-        raise RuntimeError(
+        raise TypeError(
             f"meta/info.json in {export_dir} has no `features` map — this doesn't "
             "look like a LeRobot export. Re-export the dataset."
         )
