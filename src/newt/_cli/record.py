@@ -84,6 +84,15 @@ def _usage() -> None:
     print("  --license TEXT  Declared license written to episode.json provenance.")
     print("  --drop-every N  (simulate) Inject a dropped read every N ticks.")
     print("  --json          Agent mode: line-delimited JSON events + stdin commands.")
+    print("  --view          Serve this session as a page on this machine and print")
+    print("                  the URL. The robot, your cameras and your joint traces,")
+    print("                  live from the moment the session starts — recording adds")
+    print("                  a file, it does not change the picture. The robot is")
+    print("                  drawn only if your kit declares a description; without")
+    print("                  one you get the cameras, the traces, and a line saying")
+    print("                  why there is no body. Needs: pip install \"newt[view]\"")
+    print("  --view-port N   Port for that page (default: 9099). The stream it reads")
+    print("                  takes the next port up.")
     print("  --teleop        TEMPORARY DOOR — record a demonstration: one embodiment")
     print("                  drives another and the same tick writes the episode.")
     print("                  The factory must declare it does both, and that is read")
@@ -116,12 +125,15 @@ def _parse(args: list[str]) -> dict:
         "drop_every": 0,
         "json": False,
         "teleop": False,
+        "view": False,
+        "view_port": None,
     }
     flags = {
         "--simulate": "simulate",
         "--bimanual": "bimanual",
         "--json": "json",
         "--teleop": "teleop",
+        "--view": "view",
     }
     # option -> (key, converter)
     valued = {
@@ -133,6 +145,7 @@ def _parse(args: list[str]) -> dict:
         "--author": ("author", str),
         "--license": ("license", str),
         "--drop-every": ("drop_every", int),
+        "--view-port": ("view_port", int),
     }
     i = 0
     while i < len(args):
@@ -803,6 +816,7 @@ def _run_teleop(opts: dict) -> int:
         )
 
     session = None
+    view = None
     try:
         try:
             spec, source_receipt = resolve_spec(
@@ -926,6 +940,20 @@ def _run_teleop(opts: dict) -> int:
         if not _print_preflight(session, as_json=False, source_receipt=source_receipt):
             return 2
 
+        if opts["view"]:
+            try:
+                view = _open_view(session, opts)
+            except Exception as exc:  # noqa: BLE001 — same reason as the plain path:
+                # the refusal already names its cause, owner and next step. But this
+                # path has energized arms behind it, so the refusal has to say so.
+                print(
+                    f"[newt record] the live view did not start.\n{exc}\n"
+                    "        The arms are up: this failed after the factory built the "
+                    "rig. `newt rest` puts them away.",
+                    file=sys.stderr,
+                )
+                return 1
+
         print(_COMPOSED_ENGAGEMENT, flush=True)
 
         recorder = _EpisodeRecorder(session)
@@ -945,6 +973,8 @@ def _run_teleop(opts: dict) -> int:
         return rc
     finally:
         kill_key.restore()
+        if view is not None:
+            view.close()
         if session is not None:
             session.close()
 
@@ -952,6 +982,44 @@ def _run_teleop(opts: dict) -> int:
 # --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
+
+def _open_view(session, opts: dict):
+    """Start the live view, attach it to the session, print where to open it.
+
+    A frontend courtesy in exactly the shape the rest of this file is one: the
+    library decides what a view is and what it publishes, and this prints the
+    address. What it prints is two lines at most — the URL for the browser on this
+    machine, and, when this machine can name itself on a network, the one a laptop
+    beside it can use. No second address is printed when it would only mean "this
+    desk", because a link that is true for one reader and false for another is
+    worse than one line.
+    """
+    from newt.live import DEFAULT_PORT, LiveView
+
+    port = opts["view_port"] or DEFAULT_PORT
+    view = LiveView(
+        descriptor=session.descriptor,
+        task=opts["task"],
+        source_kind=session.describe()["source_kind"],
+        camera_ids=session.camera_ids,
+        declaration=session.view_declaration,
+        port=port,
+        grpc_port=port + 1,
+    )
+    view.start()
+    session.attach_observer(view)
+    local, shareable = view.urls()
+    print()
+    print(f"[view] {local}")
+    if shareable:
+        print(f"[view] {shareable}  (from another machine on this network)")
+    if session.view_declaration is None:
+        print(
+            "[view] no robot drawn — this rig's source declares no description. "
+            "Cameras and joint traces are live.",
+        )
+    return view
+
 
 def cmd_record(args: list[str]) -> int:
     if any(a in ("-h", "--help") for a in args):
@@ -1063,6 +1131,21 @@ def cmd_record(args: list[str]) -> int:
     if session is None:
         return 2
 
-    if opts["json"]:
-        return _run_json(session, opts, source_receipt)
-    return _run_interactive(session, opts, source_receipt)
+    view = None
+    if opts["view"]:
+        try:
+            view = _open_view(session, opts)
+        except Exception as exc:  # noqa: BLE001 — every LiveViewUnavailable already
+            # names its cause, its owner and the next step; a traceback on top of
+            # one of those is noise. A port refusal reads the same way.
+            print(f"[newt record] the live view did not start.\n{exc}", file=sys.stderr)
+            session.close()
+            return 1
+
+    try:
+        if opts["json"]:
+            return _run_json(session, opts, source_receipt)
+        return _run_interactive(session, opts, source_receipt)
+    finally:
+        if view is not None:
+            view.close()
