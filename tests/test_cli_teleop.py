@@ -96,12 +96,152 @@ def test_help_wins_over_every_other_argument(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_parse_defaults_the_rate_and_requires_nothing_else():
-    assert _parse([]) == {"source": None, "rate": 30.0}
+    # --take defaults off: taking arms a lease still names is always something
+    # the operator asks for, never something a default does on their behalf.
+    assert _parse([]) == {"source": None, "rate": 30.0, "take": False}
 
 
 def test_parse_reads_source_and_rate():
     opts = _parse(["--source", "mypkg.rig:make_teleop", "--rate", "50"])
-    assert opts == {"source": "mypkg.rig:make_teleop", "rate": 50.0}
+    assert opts == {"source": "mypkg.rig:make_teleop", "rate": 50.0, "take": False}
+
+
+def test_parse_reads_take():
+    assert _parse(["--take"])["take"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The arms lease — a second claimant is turned away before anything connects
+#
+# Card test 2: the refusal has to be a lantern, not a busy error. The bar Mattie
+# set is that it reads as somebody handing you a lamp rather than telling you
+# off — so these assert the three things a reader needs (who has them, since
+# when, and the one move) and assert the factory never ran while we said it.
+# --------------------------------------------------------------------------- #
+
+def _hold_the_arms(surface, command, **over):
+    """Put a live lease on disk, as if another session were driving."""
+    import json
+    from datetime import datetime, timedelta
+
+    from newt._cli import _lease
+
+    now = datetime.now().astimezone()
+    fields = dict(
+        holder=f"{surface}-4821-a3f9c1",
+        surface=surface,
+        since=(now - timedelta(minutes=13)).isoformat(timespec="seconds"),
+        heartbeat=(now - timedelta(seconds=1)).isoformat(timespec="seconds"),
+        command=command,
+        machine="some-other-rig",
+        pid=None,
+    )
+    fields.update(over)
+    _lease.LEASE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _lease.LEASE_PATH.write_text(json.dumps(fields, indent=2) + "\n")
+    return fields
+
+
+def test_a_page_holding_the_arms_turns_teleop_away_before_the_factory(monkeypatch):
+    """The console session holds the arms, and teleop says so and stops.
+
+    The tripwire is the load-bearing half: a refusal printed *after* the factory
+    connected would have already energized a rig somebody else is driving.
+    """
+    from newt._cli import _lease
+
+    held = _hold_the_arms(_lease.SURFACE_PAGE, "newt collect")
+    monkeypatch.setattr("newt._cli.teleop.load_source", _Tripwire())
+    monkeypatch.setattr(
+        "newt._cli.teleop.resolve_spec", lambda *a, **k: ("mypkg.rig:make_teleop", None)
+    )
+
+    rc, _, err = _capture([], monkeypatch)
+
+    assert rc == 2
+    assert "collect page" in err          # which door holds them
+    assert ":" in err and "still checking in" in err
+    # The one move, alone on its own line — and it is not --take, because this
+    # process cannot make a live session let go.
+    moves = [ln.strip() for ln in err.splitlines() if ln.startswith("        ")]
+    assert len(moves) == 1, f"expected one move line, got {moves}"
+    assert "--take" not in err
+    # And the lease is untouched: refusing is not a half-take.
+    assert _lease.read().holder == held["holder"]
+
+
+def test_a_cli_session_holding_the_arms_gets_a_different_string(monkeypatch):
+    """Rule 12: two causes never share one string, and these are two causes.
+
+    'The page has them' and 'another terminal has them' send a developer to two
+    different places. One sentence for both would send them to neither.
+    """
+    from newt._cli import _lease
+
+    monkeypatch.setattr("newt._cli.teleop.load_source", _Tripwire())
+    monkeypatch.setattr(
+        "newt._cli.teleop.resolve_spec", lambda *a, **k: ("mypkg.rig:make_teleop", None)
+    )
+
+    _hold_the_arms(_lease.SURFACE_PAGE, "newt collect")
+    _, _, from_page = _capture([], monkeypatch)
+
+    _lease.LEASE_PATH.unlink()
+    _hold_the_arms(_lease.SURFACE_CLI, "newt record")
+    _, _, from_cli = _capture([], monkeypatch)
+
+    assert from_page != from_cli
+    assert "newt record" in from_cli
+    assert "Ctrl-C" in from_cli
+
+
+def test_an_expired_lease_offers_take_and_does_not_take_itself(monkeypatch):
+    """No path takes the arms without showing the expired state first."""
+    from newt._cli import _lease
+
+    monkeypatch.setattr("newt._cli.teleop.load_source", _Tripwire())
+    monkeypatch.setattr(
+        "newt._cli.teleop.resolve_spec", lambda *a, **k: ("mypkg.rig:make_teleop", None)
+    )
+    stale = _hold_the_arms(_lease.SURFACE_CLI, "newt record", heartbeat="2026-08-05T20:31:00+00:00")
+
+    rc, _, err = _capture([], monkeypatch)
+
+    assert rc == 2
+    assert "newt teleop --take" in err
+    assert "nothing has checked in since" in err
+    assert _lease.read().holder == stale["holder"], "the arms changed hands unasked"
+
+
+def test_a_free_bench_leaves_the_lease_behind_when_the_session_ends(monkeypatch):
+    """Clean exit gives the arms back — the next session sees free, not expired."""
+    from newt._cli import _lease
+
+    monkeypatch.setattr(
+        "newt._cli.teleop.resolve_spec", lambda *a, **k: ("mypkg.rig:make_teleop", None)
+    )
+    seen = {}
+
+    def _fake_load(spec):
+        seen["lease"] = _lease.read()
+        return object()
+
+    monkeypatch.setattr("newt._cli.teleop.load_source", _fake_load)
+    monkeypatch.setattr("newt.teleop.run_session", lambda *a, **k: 0)
+    monkeypatch.setattr("newt._cli.teleop.KillKey.arm", lambda self: True)
+    monkeypatch.setattr("newt._cli.teleop.KillKey.restore", lambda self: None)
+
+    rc, _, _ = _capture([], monkeypatch)
+
+    assert rc == 0
+    # Written before the factory connected, gone after the session ended.
+    assert seen["lease"] is not None and seen["lease"].command == "newt teleop"
+    assert _lease.read() is None
+
+
+def test_help_documents_take(monkeypatch):
+    _, out, _ = _capture(["--help"], monkeypatch)
+    assert "--take" in out
 
 
 def test_unknown_option_names_the_option(monkeypatch):
