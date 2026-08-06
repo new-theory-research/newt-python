@@ -400,7 +400,10 @@ def test_simulate_path_unchanged_by_the_new_source_flag(tmp_path):
     from newt._cli.record import _build_session
     from newt.recording import SINGLE_ARM_DESCRIPTOR, SimulatedSource, validate
 
-    session = _build_session(_base_opts(tmp_path, simulate=True))
+    session, receipt = _build_session(_base_opts(tmp_path, simulate=True))
+    # --simulate is the operator saying it out loud; nothing was substituted for
+    # them, so there is nothing for the preflight to hand back a receipt for.
+    assert receipt is None
     try:
         report = session.preflight()
         assert report["source_kind"] == SimulatedSource(SINGLE_ARM_DESCRIPTOR).source_kind

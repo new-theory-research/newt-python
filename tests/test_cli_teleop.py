@@ -23,6 +23,7 @@ import sys
 
 import pytest
 
+from newt._cli import _source_spec
 from newt._cli.teleop import (
     KillKey,
     _parse,
@@ -322,16 +323,22 @@ def test_ctrl_c_during_bring_up_exits_130_not_0(monkeypatch):
 
 def test_the_frontend_hands_the_loop_the_rate_and_the_bare_kill_event(monkeypatch):
     """The skin owns the keyboard; the session owns the loop. What crosses
-    between them is the parsed rate and a plain Event — nothing about terminals
-    goes behind the seam, and nothing about ticking stays in front of it."""
+    between them is the parsed rate, a plain Event, and — since newtrino-035 —
+    the receipt for a source nobody typed: nothing about terminals goes behind
+    the seam, and nothing about ticking stays in front of it.
+
+    The receipt crosses as a finished phrase, not as a name and a distribution
+    for the loop to assemble. Where a source came from is a CLI fact; a library
+    that formats it has started to know about kits."""
     import threading
 
     seen = {}
 
-    def _run_session(source, *, rate_hz, kill):
+    def _run_session(source, *, rate_hz, kill, source_receipt=None):
         seen["source"] = source
         seen["rate_hz"] = rate_hz
         seen["kill"] = kill
+        seen["source_receipt"] = source_receipt
         return 0
 
     monkeypatch.setattr("newt.teleop.run_session", _run_session)
@@ -346,6 +353,8 @@ def test_the_frontend_hands_the_loop_the_rate_and_the_bare_kill_event(monkeypatc
     assert seen["source"] == "the-source"
     assert seen["rate_hz"] == 45.0
     assert isinstance(seen["kill"], threading.Event)
+    # They typed the spec, so there is nothing to hand them a receipt for.
+    assert seen["source_receipt"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -401,3 +410,50 @@ def test_the_flag_beats_the_file(monkeypatch, tmp_path):
     rc, _, recorder = _drive(["--source", "typed_pkg:typed_factory"], monkeypatch)
     assert rc == 0
     assert recorder.spec == "typed_pkg:typed_factory"
+
+
+def test_a_kit_declared_source_runs_with_no_message_about_sources(
+    monkeypatch, tmp_path
+):
+    """A rig with one possible answer gets no error, no warning, and no notice.
+
+    This is the whole of ruling 1 (newtrino-035) in one run: a fresh kit, no
+    config file, a bare `newt teleop`. Before, that printed a line explaining
+    which source it had picked *and why it had proceeded without being told to*
+    — an apology for not erroring, arriving before anything ran. The acceptance
+    question was Mattie's: would someone walking up read this as an error, a
+    warning, or a receipt? A separate line ahead of the run only ever reads as
+    one of the first two.
+
+    So stderr is empty and stdout carries nothing yet — and the fact is not
+    dropped, it is handed to the loop to print inside the line it was already
+    going to print. Rule 10's declared-substitution clause is satisfied by that
+    hand-off, which is why the receipt is asserted here and not merely its
+    absence."""
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "absent" / "nt.toml"))
+    monkeypatch.setattr(
+        _source_spec,
+        "_declared_sources",
+        lambda verb: [("live_pair", "widowx_rig:live_pair", "trossen-widowx")]
+        if verb == "teleop"
+        else [],
+    )
+
+    seen = {}
+
+    def _run_session(source, *, rate_hz, kill, source_receipt=None):
+        seen["source_receipt"] = source_receipt
+        return 0
+
+    recorder = _Recorder()
+    monkeypatch.setattr("newt._cli.teleop.load_source", recorder)
+    monkeypatch.setattr("newt.teleop.run_session", _run_session)
+    monkeypatch.setattr(KillKey, "arm", lambda self: True)
+    monkeypatch.setattr(KillKey, "restore", lambda self: None)
+
+    rc, out, err = _capture([], monkeypatch)
+    assert rc == 0
+    assert recorder.spec == "widowx_rig:live_pair"
+    assert err == ""
+    assert out == ""
+    assert seen["source_receipt"] == "live_pair (from the trossen-widowx kit)"
