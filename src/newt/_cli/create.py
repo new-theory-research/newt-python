@@ -567,7 +567,7 @@ def _first_free_suffixed_name(dest: pathlib.Path) -> pathlib.Path | None:
         return None
     for n in range(2, _MAX_SUFFIX_ATTEMPTS + 1):
         candidate = dest.with_name(f"{dest.name}-{n}")
-        if not candidate.exists():
+        if not candidate.exists() and not candidate.is_symlink():
             return candidate
     return None
 

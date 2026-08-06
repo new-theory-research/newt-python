@@ -605,6 +605,27 @@ def test_the_suggestion_skips_a_suffix_that_is_also_taken(monkeypatch, tmp_path)
     assert "alpha-2" not in err.replace("alpha-3", "")
 
 
+def test_the_suggestion_skips_a_broken_symlink(monkeypatch, tmp_path):
+    """A broken symlink at alpha-2 must not read as free.
+
+    exists() follows symlinks and reports False for a broken one, which would
+    vouch alpha-2 as free and then crash on the follow-through. is_symlink()
+    catches it.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "alpha"
+    dest.mkdir()
+    (dest / "x").write_text("x")
+    (tmp_path / "alpha-2").symlink_to(tmp_path / "nonexistent-target")
+
+    rc, _out, err = _capture(["alpha"], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "newt create alpha alpha-3" in err
+
+
 def test_the_suggestion_suffixes_the_given_directory_not_the_template_name(monkeypatch, tmp_path):
     """An explicit directory argument, not the template name, is what gets suffixed."""
     _no_key(monkeypatch)
