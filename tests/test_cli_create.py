@@ -567,6 +567,102 @@ def test_an_existing_non_empty_directory_is_refused_by_name_not_overwritten(monk
     assert not (dest / "README.md").exists()
 
 
+def test_the_refusal_suggests_the_first_free_suffixed_name(monkeypatch, tmp_path):
+    """The fix line is a command a developer can paste, not just a diagnosis.
+
+    No directory argument was given, so the template name doubles as the dir —
+    the suggestion must suffix that, and it must name a directory that is
+    actually free on disk right now, not a guess.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "alpha"
+    dest.mkdir()
+    (dest / "x").write_text("x")
+
+    rc, _out, err = _capture(["alpha"], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "newt create alpha alpha-2" in err
+    assert not (tmp_path / "alpha-2").exists()
+
+
+def test_the_suggestion_skips_a_suffix_that_is_also_taken(monkeypatch, tmp_path):
+    """First free wins — alpha-2 occupied too means the fix line offers alpha-3."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "alpha"
+    dest.mkdir()
+    (dest / "x").write_text("x")
+    (tmp_path / "alpha-2").mkdir()
+
+    rc, _out, err = _capture(["alpha"], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "newt create alpha alpha-3" in err
+    assert "alpha-2" not in err.replace("alpha-3", "")
+
+
+def test_the_suggestion_skips_a_broken_symlink(monkeypatch, tmp_path):
+    """A broken symlink at alpha-2 must not read as free.
+
+    exists() follows symlinks and reports False for a broken one, which would
+    vouch alpha-2 as free and then crash on the follow-through. is_symlink()
+    catches it.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "alpha"
+    dest.mkdir()
+    (dest / "x").write_text("x")
+    (tmp_path / "alpha-2").symlink_to(tmp_path / "nonexistent-target")
+
+    rc, _out, err = _capture(["alpha"], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "newt create alpha alpha-3" in err
+
+
+def test_the_suggestion_suffixes_the_given_directory_not_the_template_name(monkeypatch, tmp_path):
+    """An explicit directory argument, not the template name, is what gets suffixed."""
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    dest = tmp_path / "mydir"
+    dest.mkdir()
+    (dest / "x").write_text("x")
+
+    rc, _out, err = _capture(["alpha", "mydir"], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "newt create alpha mydir-2" in err
+    assert not (tmp_path / "mydir-2").exists()
+
+
+def test_dot_as_the_target_is_refused_not_a_traceback(monkeypatch, tmp_path):
+    """``newt create <tmpl> .`` against a non-empty cwd has no basename to suffix.
+
+    ``pathlib.Path(".").name`` is ``""``, and ``Path.with_name`` raises on an
+    empty name — the suggestion logic must not let that escape as a traceback.
+    The refusal still fires, still exits EXIT_TARGET_EXISTS, and the fallback
+    "name a directory that does not exist yet" line takes over from the
+    suffixed-name suggestion.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    (tmp_path / "already-here.txt").write_text("not empty")
+
+    rc, _out, err = _capture(["alpha", "."], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "Fix:" in err
+    assert "Traceback" not in err
+
+
 def test_an_existing_empty_directory_is_fine(monkeypatch, tmp_path):
     _no_key(monkeypatch)
     _console_returns(monkeypatch, _CONSOLE_PAYLOAD)

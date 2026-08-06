@@ -553,7 +553,30 @@ def _resolve_target(name: str, given: str | None) -> pathlib.Path:
     return pathlib.Path(given if given else name).expanduser()
 
 
-def _say_target_exists(dest: pathlib.Path) -> None:
+_MAX_SUFFIX_ATTEMPTS = 999
+
+
+def _first_free_suffixed_name(dest: pathlib.Path) -> pathlib.Path | None:
+    """The first ``<dest>-N`` that is free on disk right now, scanning from N=2.
+
+    Bounded so a directory somehow occupied at every suffix up to 999 does not
+    spin forever; past that we have nothing concrete to suggest and say so.
+
+    ``dest.with_name`` raises ``ValueError`` when ``dest`` has no basename to
+    replace — ``.`` and ``/`` both resolve to an empty ``.name``. There is no
+    suffixed name to suggest for a path shaped like that, so it is treated the
+    same as suffixes 2-999 all being taken: no free name, caller falls back.
+    """
+    if not dest.name:
+        return None
+    for n in range(2, _MAX_SUFFIX_ATTEMPTS + 1):
+        candidate = dest.with_name(f"{dest.name}-{n}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    return None
+
+
+def _say_target_exists(name: str, dest: pathlib.Path) -> None:
     print(
         f"newt create: {dest} already exists and is not empty.",
         file=sys.stderr,
@@ -564,10 +587,18 @@ def _say_target_exists(dest: pathlib.Path) -> None:
         "file came from where.",
         file=sys.stderr,
     )
-    print(
-        f"        Fix: name a directory that does not exist yet, or move {dest} aside.",
-        file=sys.stderr,
-    )
+    free = _first_free_suffixed_name(dest)
+    if free is not None:
+        print(
+            f"        Fix: newt create {name} {free}   (that name is free), "
+            f"or move {dest} aside.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"        Fix: name a directory that does not exist yet, or move {dest} aside.",
+            file=sys.stderr,
+        )
 
 
 def _say_fetch_failed(name: str, console: str, template: Template, exc: FetchFailed) -> None:
@@ -829,7 +860,7 @@ def _acquire(
 ) -> int:
     """Fetch, unpack, and say plainly what landed and where."""
     if dest.exists() and any(dest.iterdir()):
-        _say_target_exists(dest)
+        _say_target_exists(name, dest)
         return EXIT_TARGET_EXISTS
 
     try:
