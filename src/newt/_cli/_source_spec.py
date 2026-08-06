@@ -453,7 +453,8 @@ def _resolve_short(
         f"\n"
         f"    {headline}\n"
         f"\n"
-        f"        You did not type this — it came from that file. {move}"
+        f"        You did not type this — it came from that file. A bare name is an "
+        f"alias an installed kit publishes. {move}"
         f"{alternative}"
     )
 
