@@ -162,6 +162,13 @@ def _build_session(opts: dict):
     declaration answers, and a rig that declares nothing is refused loudly
     rather than guessed at. All of it is library construction — no behavior.
 
+    Returns ``(session, source_receipt)``. The receipt is the phrase naming
+    where the source came from when an installed kit's lone declaration answered
+    on the operator's behalf, and it is a return value rather than a print
+    because the place it belongs is the preflight the frontend is about to
+    show — not a line ahead of it. It is ``None`` on every path the operator
+    chose out loud, ``--simulate`` included. ``(None, None)`` is the refusal.
+
     Precedence: either flag beats the file. ``--simulate`` in particular beats a
     configured ``[sources].record`` — an operator asking for simulation out loud
     is not overridden by a config file."""
@@ -175,12 +182,15 @@ def _build_session(opts: dict):
     if opts["source"] and opts["simulate"]:
         raise ValueError("--source and --simulate are mutually exclusive — pick one.")
 
+    source_receipt = None
     if opts["simulate"]:
         descriptor = BIMANUAL_DESCRIPTOR if opts["bimanual"] else SINGLE_ARM_DESCRIPTOR
         source = SimulatedSource(descriptor, drop_every=opts["drop_every"])
     else:
         try:
-            spec = resolve_spec("record", opts["source"], "mypkg.rig:make_source")
+            spec, source_receipt = resolve_spec(
+                "record", opts["source"], "mypkg.rig:make_source"
+            )
         except SourceNotResolved as exc:
             print(str(exc), file=sys.stderr)
             # The one thing record can offer that teleop and rest cannot: there
@@ -189,17 +199,20 @@ def _build_session(opts: dict):
                 "        Or exercise the rhythm with no rig at all: newt record --simulate",
                 file=sys.stderr,
             )
-            return None
+            return None, None
         source = _load_source(spec)
 
-    return Session(
-        source,
-        task=opts["task"],
-        output_dir=opts["dest"],
-        state_hz=opts["hz"],
-        author=opts["author"],
-        license=opts["license"],
-        target=opts["target"],
+    return (
+        Session(
+            source,
+            task=opts["task"],
+            output_dir=opts["dest"],
+            state_hz=opts["hz"],
+            author=opts["author"],
+            license=opts["license"],
+            target=opts["target"],
+        ),
+        source_receipt,
     )
 
 
@@ -207,18 +220,27 @@ def _build_session(opts: dict):
 # Preflight (frontend courtesy: print the contract, refuse on non-writable dest)
 # --------------------------------------------------------------------------- #
 
-def _print_preflight(session, as_json: bool) -> bool:
+def _print_preflight(session, as_json: bool, source_receipt: str | None = None) -> bool:
     """Print the contract the Session describes. Returns False (refuse) only when
     the destination is not writable — the one refusal this skin owns. The library
-    never blocks; this is the frontend deciding."""
+    never blocks; this is the frontend deciding.
+
+    ``source_receipt`` names where the source came from when nobody typed it.
+    The ``source`` row is where it goes: this block is the first thing `record`
+    prints and that row is already the answer to "what am I recording from" —
+    an extra line above the block to say the same thing is the notice ruling 1
+    removed. On the JSON stream it is a key beside the contract rather than
+    inside it, because the contract is the library's report and this fact is the
+    frontend's."""
     report = session.preflight()
     if as_json:
-        _emit({"event": "preflight", "contract": report})
+        _emit({"event": "preflight", "contract": report, "source": source_receipt})
     else:
         print("=" * 64)
         print("newt record — preflight contract")
         print("=" * 64)
-        print(f"  source        : {report['source_kind']}")
+        kind = report["source_kind"]
+        print(f"  source        : {kind}{f' — {source_receipt}' if source_receipt else ''}")
         print(f"  state dims    : {len(report['joint_names'])} joints {report['joint_names']}")
         print(f"  state channels: {', '.join(report['channels'])}")
         print(f"  state rate    : {report['state_hz']} Hz")
@@ -259,10 +281,10 @@ _ENTER = ("\r", "\n")
 _CTRL_H = "\x08"
 
 
-def _run_interactive(session, opts: dict) -> int:
+def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> int:
     from newt.recording import CameraCaptureFailed
 
-    if not _print_preflight(session, as_json=False):
+    if not _print_preflight(session, as_json=False, source_receipt=source_receipt):
         session.close()
         return 2
 
@@ -434,14 +456,14 @@ def _emit(obj: dict) -> None:
     sys.stdout.flush()
 
 
-def _run_json(session, opts: dict) -> int:
+def _run_json(session, opts: dict, source_receipt: str | None = None) -> int:
     """Drive the same Session from line-delimited JSON on stdin. Each line is a
     command: {"cmd": "start"} | {"cmd": "stop", "keep": true|false} |
     {"cmd": "status"} | {"cmd": "close"}. Every action emits a JSON event line.
     A door for agents — it drives the library, holds no behavior of its own."""
     from newt.recording import CameraCaptureFailed
 
-    if not _print_preflight(session, as_json=True):
+    if not _print_preflight(session, as_json=True, source_receipt=source_receipt):
         session.close()
         return 2
 
@@ -782,7 +804,7 @@ def _run_teleop(opts: dict) -> int:
     session = None
     try:
         try:
-            spec = resolve_spec(
+            spec, source_receipt = resolve_spec(
                 _COMPOSED_VERB,
                 opts["source"],
                 _COMPOSED_EXAMPLE,
@@ -873,7 +895,10 @@ def _run_teleop(opts: dict) -> int:
             author=opts["author"],
             license=opts["license"],
         )
-        if not _print_preflight(session, as_json=False):
+        # The receipt lands once on this path too, and it lands here rather than
+        # in the teleop line below: the preflight is what the operator reads
+        # before two arms come up, and `record --teleop` prints both.
+        if not _print_preflight(session, as_json=False, source_receipt=source_receipt):
             return 2
 
         print(_COMPOSED_ENGAGEMENT, flush=True)
@@ -1005,7 +1030,7 @@ def cmd_record(args: list[str]) -> int:
         return 2
 
     try:
-        session = _build_session(opts)
+        session, source_receipt = _build_session(opts)
     except Exception as exc:  # noqa: BLE001 — Lantern (missing extra) or a
         # construction failure — surface it, don't trace.
         print(f"[newt record] {exc}", file=sys.stderr)
@@ -1014,5 +1039,5 @@ def cmd_record(args: list[str]) -> int:
         return 2
 
     if opts["json"]:
-        return _run_json(session, opts)
-    return _run_interactive(session, opts)
+        return _run_json(session, opts, source_receipt)
+    return _run_interactive(session, opts, source_receipt)

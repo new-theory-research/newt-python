@@ -99,7 +99,7 @@ def cmd_rest(args: list[str]) -> int:
     # already went wrong. On a rig that declares its own factory, that is two
     # words; the flag stays as the override.
     try:
-        spec = resolve_spec("rest", opts["source"], "mypkg.rig:make_rig")
+        spec, source_receipt = resolve_spec("rest", opts["source"], "mypkg.rig:make_rig")
     except SourceNotResolved as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -144,4 +144,4 @@ def cmd_rest(args: list[str]) -> int:
         print(f"\n[newt rest] {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    return run_rest(source, plan)
+    return run_rest(source, plan, source_receipt=source_receipt)
