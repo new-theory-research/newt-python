@@ -72,6 +72,10 @@ def _dispatch(args: list[str]) -> int:
         from newt._cli.rest import cmd_rest
         return cmd_rest(args[1:])
 
+    if cmd == "getip":
+        from newt._cli.getip import cmd_getip
+        return cmd_getip(args[1:])
+
     if cmd == "finetune":
         from newt._cli.finetune import cmd_finetune
         return cmd_finetune(args[1:])
@@ -121,6 +125,7 @@ def _usage() -> None:
     print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
     print("  teleop   Drive one embodiment from another's motion (try: newt teleop --help)")
     print("  rest     Run an embodiment's declared rest sequence and report where it ended up")
+    print("  getip    Print this machine's LAN address(es) for the console's rig address field")
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
     print("  finetune Launch a training run on NT's GPUs and watch it (try: newt finetune --dataset <name>)")
     print("  promote  Keep a fine-tune's checkpoint band and serve it (try: newt promote <job-handle> --band <n>)")
@@ -129,7 +134,7 @@ def _usage() -> None:
     print()
     print("Options:")
     print("  --json   Emit machine-readable JSON (supported by logout, models, status,")
-    print("           run, record, episodes, finetune, promote)")
+    print("           run, record, episodes, finetune, promote, getip)")
     print("  --print  (login only) Print the key to stdout; do not write credentials.")
     print("           Compose with: KEY=$(newt login --print)")
     print()
