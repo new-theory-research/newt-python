@@ -272,6 +272,68 @@ class ContractMismatchError(NewTheoryError):
     """
 
 
+class FrameTooLargeError(NewTheoryError):
+    """A packed observation frame exceeds the inbound size limit (client-side, before send).
+
+    Distinct from ContractMismatchError: that class means "your shapes don't
+    match the model"; this one means "your frame is too many bytes, regardless
+    of whether the shapes match." Raised at the send site, after packing and
+    before ws.send() — nothing reaches the wire. Without this check, an
+    over-limit frame is torn down in transit with no close frame (1005/1006),
+    which a different code path can mis-map as a normal completion or a
+    cold-start retry hint — two unrelated causes sharing one symptom.
+
+    Passing this check rules out size as the cause of a later teardown; it does
+    not explain every teardown — a frame under the limit that still drops died
+    for a different reason (see the public errors page's oversized-observations
+    section).
+
+    Attributes:
+        code:     4413 (client-side; not a WS close code — fires before send.
+                  Mirrors HTTP 413 Payload Too Large, following the
+                  ModelNotFoundError/BaseNotDeployableError convention of
+                  reusing the 4xxx namespace for pre-wire, client-only checks).
+        type:     "frame_too_large.exceeds_limit"
+        message:  Measured frame size, the limit, the frame index in the run,
+                  and the per-camera image shapes that account for the bulk.
+        context:  {"frame_bytes", "limit_bytes", "frame_index", "image_shapes", "model"}.
+        docs:     Stable URL (may be None until the docs follow-up ships).
+        trace_id: Empty string — client-side, no server trace to reference.
+    """
+
+    def __init__(
+        self,
+        frame_bytes: int,
+        frame_index: int,
+        image_shapes: Mapping[str, tuple],
+        model: str | None = None,
+        docs: str | None = None,
+    ) -> None:
+        shapes_str = ", ".join(f"{k}={tuple(v)}" for k, v in image_shapes.items()) or "none"
+        message = (
+            f"Observation frame {frame_index} is {frame_bytes:,} bytes, over the "
+            f"{_MAX_FRAME_BYTES:,}-byte inbound limit. Refused before sending — "
+            "sending it anyway would be torn down mid-run with no close frame and "
+            f"no error. Image shapes on this frame: {shapes_str}. Reduce image "
+            "resolution or camera count (this is a byte-size limit, not a shape "
+            "mismatch — see ContractMismatchError for that case)."
+        )
+        super().__init__(
+            code=4413,
+            type="frame_too_large.exceeds_limit",
+            message=message,
+            context={
+                "frame_bytes": frame_bytes,
+                "limit_bytes": _MAX_FRAME_BYTES,
+                "frame_index": frame_index,
+                "image_shapes": {k: list(v) for k, v in image_shapes.items()},
+                "model": model,
+            },
+            docs=docs,
+            trace_id="",
+        )
+
+
 class ModelNotFoundError(NewTheoryError):
     """Requested model UID or tag not found in the registry (client-side, before WS connection).
 
@@ -577,6 +639,44 @@ def _validate_obs_against_contract(
                         },
                         docs=_CONTRACT_DOCS,
                     )
+
+
+# Modal's ingress caps inbound WS frames at this many bytes; a frame over it is
+# torn down in transit with no close frame, so refusing locally is the only
+# place in the system that can produce a legible error. OBSERVED on the wire
+# against both live SO-101 endpoints (last accepted 2,097,152; first refused
+# 2,097,153), not derived from a library default — see portal
+# wiki/briefs/cards/brief-316-observation-size-constraint-docs/numbers.md
+# § "The probe (2026-08-06)". If this number ever moves, it must be re-measured
+# the same way (a live probe), never guessed — a wrong-direction drift here
+# either refuses valid frames or lets invalid ones back through to die silently.
+_MAX_FRAME_BYTES = 2 * 1024 * 1024  # 2,097,152
+
+
+def _check_frame_size(frame: dict, packed: bytes, frame_index: int, model: str | None) -> None:
+    """Refuse a packed obs frame over the inbound limit BEFORE ws.send().
+
+    Rule 10: refuse, never resize/downsample/drop/truncate. `len(packed)` is
+    free — the bytes are already materialized by the caller — so this costs
+    nothing beyond the comparison itself, and runs on every frame (not just
+    the first), which is exactly the gap this check closes.
+    """
+    size = len(packed)
+    if size <= _MAX_FRAME_BYTES:
+        return
+    images = frame.get("images")
+    image_shapes: dict[str, tuple] = {}
+    if isinstance(images, dict):
+        for key, img in images.items():
+            shape = getattr(img, "shape", None)
+            if shape is not None:
+                image_shapes[key] = tuple(shape)
+    raise FrameTooLargeError(
+        frame_bytes=size,
+        frame_index=frame_index,
+        image_shapes=image_shapes,
+        model=model,
+    )
 
 
 class InferenceResponse:
@@ -1243,6 +1343,9 @@ class Robot:
             ModelNotFoundError:    Requested model not found server-side (WS close 4404).
             ContractMismatchError: Obs frame shapes don't match the resolved
                                    model's declared contract (WS close 4422).
+            FrameTooLargeError:    A packed obs frame exceeds the inbound size
+                                   limit (client-side, before send — no WS close
+                                   code, since nothing reaches the wire).
             ServerError:           Inference failure or internal server error
                                    (WS close 4500).
             VerifierError:         Console verifier infrastructure failure
@@ -1293,8 +1396,9 @@ class Robot:
 
         Raises:
             AuthError, ProtocolError, ModelNotFoundError, ContractMismatchError,
-            ServerError, VerifierError — same typed errors as run(), surfaced from
-            the shared close-code routing.
+            FrameTooLargeError, ServerError, VerifierError — same typed errors
+            as run(), surfaced from the shared close-code routing (FrameTooLargeError
+            is client-side, before send — no close code involved).
 
         Transient verifier unavailability (VerifierError with type
         "verifier.unavailable") is retried automatically with bounded backoff
@@ -1312,9 +1416,11 @@ class Robot:
             cold_retried = self._last_connect_cold_retried
             try:
                 frame = _build_obs_frame(obs, prompt or "", None, self._model)
+                packed = _pack(frame)
+                _check_frame_size(frame, packed, 1, self._model)
                 t0 = _time.perf_counter()
                 try:
-                    ws.send(_pack(frame))
+                    ws.send(packed)
                 except ConnectionClosed as exc:
                     # Server may have closed before recv; drain the close for a typed error.
                     _check_close_error(exc, self._model)
@@ -1542,6 +1648,7 @@ class Robot:
                 frame_no += 1
 
                 payload = _pack(frame)
+                _check_frame_size(frame, payload, frame_no, self._model)
                 _logger.debug(
                     "frame %d: sending %d bytes", frame_no, len(payload)
                 )
@@ -1643,6 +1750,7 @@ class Robot:
         ws = self._ws_connect()
         try:
             first = True
+            frame_no = 0
             while True:
                 if not first:
                     obs = self._read_state()
@@ -1652,9 +1760,13 @@ class Robot:
                     self._model if first else None,
                 )
                 first = False
+                frame_no += 1
+
+                packed = _pack(frame)
+                _check_frame_size(frame, packed, frame_no, self._model)
 
                 try:
-                    ws.send(_pack(frame))
+                    ws.send(packed)
                 except ConnectionClosed:
                     return  # server closed; no more chunks
 
