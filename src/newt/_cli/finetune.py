@@ -85,7 +85,10 @@ _TERMINAL = ("succeeded", "failed")
 # (the survival line below). `registry+reload` is deliberately ONE gate (it writes the
 # registry entry AND reloads it), not `registry`. A gate name we can't place in this
 # sequence is surfaced honestly, never guessed "after train" — a wrong guess would tell
-# someone their checkpoint is safe when it isn't (Rule 10).
+# someone their checkpoint is safe when it isn't (Rule 10). This tuple mirrors the server's
+# sequence and nothing else: a gate name the server cannot report has no position here, and
+# adding one would have the survival line answer a question it has no basis to answer. That
+# is why `eval` — which has a plain phrase below — is deliberately absent.
 _PIPELINE_GATES = ("intake", "train", "frame-check", "registry+reload", "serve")
 
 # Plain-language translation of each pipeline gate — what the developer was waiting on
@@ -95,8 +98,13 @@ _PIPELINE_GATES = ("intake", "train", "frame-check", "registry+reload", "serve")
 # `gate` vocabulary. The raw token stays visible on the technical line below. A gate NOT
 # in this map (an unknown/renamed one) falls back to a generic headline and shows its raw
 # token only on the technical line — never guessed into a plausible phrase (Rule 10).
-# `eval` is mapped defensively for a checkpoint-eval gate; the entry only ever fires if
-# the wire actually names it, so it invents nothing.
+# `eval` is a defensive mapping, and today it is UNREACHABLE — worth saying plainly so the
+# entry is not read as a shipped feature. Checkpoint evaluation runs separately from a
+# fine-tune, after the run finishes, so a run never stops at it and the server never names
+# it as the failing gate. The entry stays because it costs nothing and invents nothing: it
+# fires only if the server ever reports that gate name. What would make it fire is
+# evaluation becoming part of a run's own contract — something a run can fail at — and
+# until then `eval` does not belong in `_PIPELINE_GATES` above.
 _GATE_PLAIN = {
     "intake": "while checking your dataset",
     "train": "during training",
