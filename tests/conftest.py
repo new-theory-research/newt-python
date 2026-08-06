@@ -25,6 +25,12 @@ def _no_ambient_site_config(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("NT_SITE_CONFIG", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
     monkeypatch.setattr(_source_spec, "_declared_sources", lambda verb: [])
+    # Both entry-point reads, not just the one. ``_declaring_verbs`` answers
+    # "is anything publishing to newt here at all", which is a *different*
+    # question about the same real registry — patching only the first would
+    # leave every nothing-declared refusal reading the developer's own
+    # environment and printing a different sentence on a laptop than in CI.
+    monkeypatch.setattr(_source_spec, "_declaring_verbs", lambda: [])
 
 
 @pytest.fixture(autouse=True)
