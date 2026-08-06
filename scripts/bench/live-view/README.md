@@ -27,8 +27,39 @@ embedded viewer, and it is not Rerun's application.
 
 ## The run these came from
 
-`bench_proof.sh` on the rig, `--source recording_source:cameras_only`. Session events,
-verbatim from the run log:
+The shell wrapper that drove it was never committed and is gone, so this is not a
+pointer to a file — it is the command line, read back off the run's own receipts. Each
+flag below is pinned by something in this directory:
+
+| flag | what pins it |
+| --- | --- |
+| `--task "live view bench proof - nothing is being driven"` | the page header, legible in all three screenshots |
+| `--source recording_source:cameras_only` | the footer: `Source: LIVE CAMERAS (3) + SIMULATED JOINTS` |
+| `--dest /tmp/view-episodes` | the `stopped` event's `path` below |
+| `--json` | the event lines below are `--json`'s own records, verbatim |
+| `--view` (no `--view-port`) | the shot was taken against `localhost:9099`, which is the default |
+
+```
+newt record \
+    --task "live view bench proof - nothing is being driven" \
+    --source recording_source:cameras_only \
+    --dest /tmp/view-episodes \
+    --view --json
+```
+
+`--json` reads commands from stdin, so the wrapper fed it `{"cmd": "start"}`, waited
+while the screenshotter worked, then `{"cmd": "stop", "keep": true}` and
+`{"cmd": "close"}`. Anything the receipts do not pin — `--hz`, `--author`, `--license`,
+`--target` — is left out rather than guessed at; their absence here is not a claim that
+they were unset.
+
+Run today, that command's stdout differs from the log this run produced in one way, and
+it is worth knowing which: `--view` now announces itself as a `{"event": "view", …}`
+record. On the run above it printed three bare `[view] …` lines onto the same stdout,
+ahead of the first JSON record — which is exactly the NDJSON contract this branch went
+back and fixed.
+
+Session events, verbatim from the run log:
 
 ```
 {"event": "started", "episode_id": "5f74a3f6"}

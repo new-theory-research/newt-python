@@ -983,16 +983,30 @@ def _run_teleop(opts: dict) -> int:
 # Entry
 # --------------------------------------------------------------------------- #
 
-def _open_view(session, opts: dict):
-    """Start the live view, attach it to the session, print where to open it.
+#: Said once, in one place, on both frontends. A human reads it as a line under
+#: the URLs; an agent reads it as a field. Two spellings of this sentence would
+#: eventually become two different claims about the same rig.
+_NO_ROBOT_NOTE = (
+    "no robot drawn — this rig's source declares no description. "
+    "Cameras and joint traces are live."
+)
+
+
+def _open_view(session, opts: dict, *, as_json: bool = False):
+    """Start the live view, attach it to the session, say where to open it.
 
     A frontend courtesy in exactly the shape the rest of this file is one: the
-    library decides what a view is and what it publishes, and this prints the
-    address. What it prints is two lines at most — the URL for the browser on this
-    machine, and, when this machine can name itself on a network, the one a laptop
-    beside it can use. No second address is printed when it would only mean "this
-    desk", because a link that is true for one reader and false for another is
-    worse than one line.
+    library decides what a view is and what it publishes, and this reports the
+    address. To a person that is two lines at most — the URL for the browser on
+    this machine, and, when this machine can name itself on a network, the one a
+    laptop beside it can use. No second address is printed when it would only mean
+    "this desk", because a link that is true for one reader and false for another
+    is worse than one line.
+
+    To an agent it is one ``view`` event on the same stdout stream every other
+    event uses. ``--json`` promises line-delimited JSON and nothing else, so three
+    bare ``[view] …`` lines ahead of the first record would break the parse of the
+    caller that took that promise literally — which is every caller worth having.
     """
     from newt.live import DEFAULT_PORT, LiveView
 
@@ -1009,15 +1023,22 @@ def _open_view(session, opts: dict):
     view.start()
     session.attach_observer(view)
     local, shareable = view.urls()
-    print()
-    print(f"[view] {local}")
-    if shareable:
-        print(f"[view] {shareable}  (from another machine on this network)")
-    if session.view_declaration is None:
-        print(
-            "[view] no robot drawn — this rig's source declares no description. "
-            "Cameras and joint traces are live.",
-        )
+    robot_drawn = session.view_declaration is not None
+    if as_json:
+        _emit({
+            "event": "view",
+            "url": local,
+            "network_url": shareable,
+            "robot_drawn": robot_drawn,
+            "note": None if robot_drawn else _NO_ROBOT_NOTE,
+        })
+    else:
+        print()
+        print(f"[view] {local}")
+        if shareable:
+            print(f"[view] {shareable}  (from another machine on this network)")
+        if not robot_drawn:
+            print(f"[view] {_NO_ROBOT_NOTE}")
     return view
 
 
@@ -1134,7 +1155,7 @@ def cmd_record(args: list[str]) -> int:
     view = None
     if opts["view"]:
         try:
-            view = _open_view(session, opts)
+            view = _open_view(session, opts, as_json=opts["json"])
         except Exception as exc:  # noqa: BLE001 — every LiveViewUnavailable already
             # names its cause, its owner and the next step; a traceback on top of
             # one of those is noise. A port refusal reads the same way.

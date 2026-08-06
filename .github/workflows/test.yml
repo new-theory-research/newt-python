@@ -49,3 +49,12 @@ jobs:
         run: uv pip install --system -e ".[recording]"
       - name: Test (with the extra — the episode-on-disk tests run here)
         run: pytest
+      # Third leg, same argument one extra along. The live-view tests that need
+      # the Rerun SDK are marked `requires_view` and skip everywhere else, so
+      # without this leg they skip in CI too — green, and never executed. The
+      # marked half is small and hermetic (the viewer cache is seeded by a
+      # fixture; nothing here reaches npm), so it costs one install.
+      - name: Install the view extra
+        run: uv pip install --system -e ".[recording,view]"
+      - name: Test (with the view extra — the Rerun-dependent tests run here)
+        run: pytest
