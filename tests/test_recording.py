@@ -482,6 +482,7 @@ def test_cli_source_raising_factory_produces_loud_runnable_error(tmp_path):
     assert sorted(tmp_path.glob("episode_*")) == [], "a raising factory must never leave an episode dir"
 
 
+@needs_extra
 def test_cli_source_kill_switch_disables_the_loaded_source(tmp_path, monkeypatch):
     """Ctrl+H's kill path (Session.kill() -> disable_all()) fires for a
     --source-loaded RecordingSource exactly as it does for SimulatedSource —
