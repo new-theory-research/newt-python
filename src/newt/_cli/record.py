@@ -91,6 +91,9 @@ def _usage() -> None:
     print("                  and reading are different factories on the same rig.")
     print("                  One episode per run; Ctrl+C ends it and keeps it,")
     print("                  Ctrl+H kills (de-energize where it stands, no episode).")
+    print("                  Takes neither --target (one episode, no count to stop")
+    print("                  at) nor the simulate-only flags; passing one is refused")
+    print("                  rather than ignored.")
     print("                  This flag is a bench door pending the naming ruling in")
     print("                  newtrino-030 — expect it to be spelled differently, and")
     print("                  the config key to move with it.")
@@ -537,6 +540,30 @@ _COMPOSED_VERB = "demonstration"
 #: `make_source` — the factory this path needs builds a different rig.
 _COMPOSED_EXAMPLE = "mypkg.rig:make_demo"
 
+#: The two no-keyboard stand-downs are `newt teleop`'s, borrowed whole. What is
+#: NOT borrowable is the fix: `newt teleop` is not the command this operator
+#: typed, and running it would drive the rig and write nothing — the thing they
+#: were trying to avoid. So this path brings its own, and the one line teleop's
+#: version cannot say is what a bounded run does to the episode.
+_COMPOSED_SCRIPTED_FIX = (
+    "        Fix: run newt record --teleop in a real terminal. To drive it from a\n"
+    "        script anyway, bound the session before it starts:\n"
+    '          timeout --signal=INT 30 newt record --teleop --task "pick up the cup"\n'
+    "        SIGINT lands where Ctrl+C lands: the episode is KEPT as it stands, and\n"
+    "        then the rig is put away and de-energized. It is an exit, not a kill — it\n"
+    "        moves, and it writes down however much of a demonstration the timeout\n"
+    "        allowed.\n"
+    "        Not a fix: --json. That is what an agent uses INSTEAD of a keyboard, and\n"
+    "        this path refuses it for the same reason it is refusing you."
+)
+
+_COMPOSED_UNARMED_FIX = (
+    "        Fix: run newt record --teleop from an ordinary interactive shell — not\n"
+    "        under a wrapper that owns the terminal (tmux send-keys, an editor's run\n"
+    "        pane, a CI runner). Nothing has been connected, nothing has moved, and no\n"
+    "        episode was opened."
+)
+
 
 def _refuse_undeclared_factory(spec: str, factory) -> str | None:
     """The gate, read off the factory *before it is called*, or None to proceed.
@@ -719,11 +746,15 @@ def _run_teleop(opts: dict) -> int:
     from newt.teleop import run_session
 
     if not sys.stdin.isatty():
-        return _stand_down_no_tty()
+        return _stand_down_no_tty(
+            "newt record", "--teleop needs a TTY", _COMPOSED_SCRIPTED_FIX
+        )
 
     kill_key = KillKey()
     if not kill_key.arm():
-        return _stand_down_unarmed()
+        return _stand_down_unarmed(
+            "newt record", "this demonstration", _COMPOSED_UNARMED_FIX
+        )
 
     session = None
     try:
@@ -738,7 +769,21 @@ def _run_teleop(opts: dict) -> int:
         try:
             factory = import_factory(spec)
         except Exception as exc:
-            print(f"[newt record] {exc}", file=sys.stderr)
+            # Phase one failed: the name did not resolve to a callable. Nothing
+            # was called, so the honest thing to say is that the rig is still
+            # dark — which is also what tells the operator this is a spelling
+            # problem and not a hardware one.
+            print(
+                f"\n[newt record] REFUSING TO RECORD — the factory this source names "
+                f"could not be found.\n"
+                f"Yours: {exc}\n"
+                "Do now: nothing was called, so nothing is connected and nothing is "
+                "energized. There is nothing to put away.\n"
+                "Then: fix the spec — check the module is installed in this "
+                "environment and that the factory is spelled the way the module "
+                "exports it.",
+                file=sys.stderr,
+            )
             return 1
 
         refusal = _refuse_undeclared_factory(spec, factory)
@@ -757,7 +802,23 @@ def _run_teleop(opts: dict) -> int:
             )
             return 130
         except Exception as exc:
-            print(f"[newt record] {exc}", file=sys.stderr)
+            # Phase two failed: the factory was found, it had declared itself,
+            # and it raised partway through bringing the rig up. The state of
+            # the rig is the thing that separates this from the refusal above —
+            # this is the call that connects and energizes, so whatever it had
+            # reached before it raised is reached, and saying "nothing is
+            # connected" here would be a comfortable lie.
+            print(
+                f"\n[newt record] REFUSING TO RECORD — the rig's own factory raised "
+                f"while building it.\n"
+                f"Yours: {exc}\n"
+                "Do now: this is the call that connects and energizes, so anything it "
+                "had brought up before it raised is up. Put it away with `newt rest` "
+                "before walking up to it.\n"
+                "Then: the message above is the kit's, not this verb's — that factory "
+                "is where the fix is.",
+                file=sys.stderr,
+            )
             return 1
 
         refusal = _refuse_composed(source)
@@ -849,6 +910,47 @@ def cmd_record(args: list[str]) -> int:
                 "        Fix: run --teleop in a real terminal. Whether an agent should "
                 "ever drive a demonstration — and what its kill would be — is "
                 "unanswered, and this verb will not answer it by accident.",
+                file=sys.stderr,
+            )
+            return 1
+        # Three flags this path cannot honour. Accepting them and doing nothing
+        # is the failure Rule 10 names: the operator asked for something, the
+        # verb said nothing, and the run looks like it obeyed. Two causes, not
+        # three — a flag that only ever meant something to the simulated stream
+        # is a different mistake from a flag that means something real and means
+        # it per-session rather than per-run.
+        simulate_only = [
+            flag
+            for flag, key in (("--bimanual", "bimanual"), ("--drop-every", "drop_every"))
+            if opts[key]
+        ]
+        if simulate_only:
+            print(
+                f"[newt record] --teleop and {' and '.join(simulate_only)}: "
+                f"{'those flags shape' if len(simulate_only) > 1 else 'that flag shapes'} "
+                "the simulated joint stream, and a demonstration is a real rig being "
+                "moved by a real hand. There is no stream here to shape.",
+                file=sys.stderr,
+            )
+            print(
+                "        Fix: drop "
+                + " and ".join(simulate_only)
+                + ". What the rig is and how many arms it has comes from the factory "
+                "your kit declares, not from a flag.",
+                file=sys.stderr,
+            )
+            return 1
+        if opts["target"] is not None:
+            print(
+                f"[newt record] --teleop and --target {opts['target']}: the composed "
+                "path records exactly one episode per run — Ctrl+C ends the session and "
+                "keeps it — so there is no count for it to stop at.",
+                file=sys.stderr,
+            )
+            print(
+                "        Fix: drop --target and run the command once per demonstration. "
+                "The rig is put away between runs, which is the ending you want between "
+                "takes anyway.",
                 file=sys.stderr,
             )
             return 1

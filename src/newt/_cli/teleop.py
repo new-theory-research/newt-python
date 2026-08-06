@@ -173,37 +173,55 @@ class KillKey:
 
 # --------------------------------------------------------------------------- #
 # The two stand-downs — both exit 2, both before anything connects
+#
+# Both are borrowed whole by `newt record --teleop`, which is a different command
+# with a different fix and an episode at stake. Borrowing them unparameterized is
+# how one string comes to serve two causes: an operator who reached this by
+# typing `newt record --teleop` was being told to go run `newt teleop`, which
+# drives the rig and writes nothing — the wrong verb, named as the fix. So the
+# caller says who it is, and each caller's fix is its own (Rule 12).
 # --------------------------------------------------------------------------- #
 
-def _stand_down_no_tty() -> int:
+_TELEOP_SCRIPTED_FIX = (
+    "        Fix: run newt teleop in a real terminal. To drive it from a script\n"
+    "        anyway, bound the session before it starts:\n"
+    "          timeout --signal=INT 30 newt teleop --source mypkg.rig:make_teleop\n"
+    "        SIGINT lands where Ctrl+C lands: the embodiment is put away first, then\n"
+    "        de-energized. It is an exit, not a kill — it moves."
+)
+
+_TELEOP_UNARMED_FIX = (
+    "        Fix: run newt teleop from an ordinary interactive shell — not under a\n"
+    "        wrapper that owns the terminal (tmux send-keys, an editor's run pane, a\n"
+    "        CI runner). Nothing has been connected and nothing has moved."
+)
+
+
+def _stand_down_no_tty(
+    brand: str = "newt teleop",
+    cause: str = "stdin is not a TTY",
+    fix: str = _TELEOP_SCRIPTED_FIX,
+) -> int:
     print(
-        "[newt teleop] stdin is not a TTY — there is no keyboard, so there is no Ctrl+H, "
+        f"[{brand}] {cause} — there is no keyboard, so there is no Ctrl+H, "
         "and this loop moves hardware.",
         file=sys.stderr,
     )
-    print(
-        "        Fix: run newt teleop in a real terminal. To drive it from a script\n"
-        "        anyway, bound the session before it starts:\n"
-        "          timeout --signal=INT 30 newt teleop --source mypkg.rig:make_teleop\n"
-        "        SIGINT lands where Ctrl+C lands: the embodiment is put away first, then\n"
-        "        de-energized. It is an exit, not a kill — it moves.",
-        file=sys.stderr,
-    )
+    print(fix, file=sys.stderr)
     return 2
 
 
-def _stand_down_unarmed() -> int:
+def _stand_down_unarmed(
+    brand: str = "newt teleop",
+    subject: str = "this session",
+    fix: str = _TELEOP_UNARMED_FIX,
+) -> int:
     print(
-        "[newt teleop] stdin is a terminal but the Ctrl+H listener could not arm on it "
-        "(the reason is printed above), so this session would move hardware with no kill key.",
+        f"[{brand}] stdin is a terminal but the Ctrl+H listener could not arm on it "
+        f"(the reason is printed above), so {subject} would move hardware with no kill key.",
         file=sys.stderr,
     )
-    print(
-        "        Fix: run newt teleop from an ordinary interactive shell — not under a\n"
-        "        wrapper that owns the terminal (tmux send-keys, an editor's run pane, a\n"
-        "        CI runner). Nothing has been connected and nothing has moved.",
-        file=sys.stderr,
-    )
+    print(fix, file=sys.stderr)
     return 2
 
 
