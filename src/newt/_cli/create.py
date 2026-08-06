@@ -39,7 +39,6 @@ import tarfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from newt._credentials import read_api_key
 from newt._cli._template_registry import (
     FALLBACK_TEMPLATES,
     Template,
@@ -47,6 +46,7 @@ from newt._cli._template_registry import (
     names,
     parse_templates,
 )
+from newt._credentials import read_api_key
 
 _DEFAULT_CONSOLE = "https://newtheory-console.vercel.app"
 
@@ -71,27 +71,27 @@ EXIT_CONSOLE_REFUSED = 13
 
 def _usage() -> None:
     print("Usage: newt create <template> [directory] [--setup [-- kit arguments...]]")
-    print("")
+    print()
     print("  Fetch a starter kit at a pinned commit and unpack it into a directory")
     print("  that is yours: no git remote pointing back at us, no history of ours,")
     print("  and the driver versions the kit pinned already stamped.")
-    print("")
+    print()
     print("  Run 'newt create' with no arguments to list the templates your key can")
     print("  reach. Public kits need no key; private kits are served by the console")
     print("  against your nt_ key.")
-    print("")
+    print()
     print("  The directory defaults to the template name, and must not already exist")
     print("  with anything in it.")
-    print("")
+    print()
     print("  Every kit carries its own setup step at scripts/setup — that is what asks")
     print("  about your rig, and this command never does. By default it is printed as")
     print("  the next thing to run; --setup runs it here instead.")
-    print("")
+    print()
     print("Options:")
     print("  --no-git   Leave the directory inert — do not run 'git init' in it")
     print("  --setup    Run the kit's own setup step after unpacking")
     print("  --json     Emit machine-readable JSON (cannot be combined with --setup)")
-    print("")
+    print()
     print("  Any argument this command does not recognize is handed to the kit's setup")
     print("  step untouched, and asking for that implies --setup:")
     print("      newt create <template> <dir> --some-kit-flag value --non-interactive")
@@ -101,11 +101,11 @@ def _usage() -> None:
     print("      newt create <template> <dir> --setup -- --json --non-interactive")
     print("  Run the kit's setup step with --help to see what it accepts; it differs")
     print("  per kit, and this command has no list of them.")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials)")
     print("  NT_CONSOLE_URL  Console URL (default: https://newtheory-console.vercel.app)")
-    print("")
+    print()
     print("Exit codes:")
     print("  0    the kit was written to the directory named in the output")
     print("  1    a usage error")
@@ -201,13 +201,13 @@ def load_registry(console: str, api_key: str | None) -> tuple[list[Template], st
 
 
 def _print_templates(templates: list[Template] | tuple[Template, ...], source: str) -> None:
-    print("")
+    print()
     print("Templates:")
     for t in templates:
         suffix = "   (private — needs your nt_ key)" if t.is_private else ""
         print(f"  {t.name}{suffix}")
     if source == "fallback":
-        print("")
+        print()
         print("  (listed from this CLI's built-in table — the console was not reachable,")
         print("   so a kit added since this version was released would not appear here)")
 
@@ -433,7 +433,10 @@ def _fetch_private_tarball(
         try:
             body = json.loads(exc.read())
             code, detail = body.get("code"), body.get("error")
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort: the console's error body is
+            # a nicety on top of the HTTP status FetchFailed already carries below;
+            # a malformed/non-JSON body must degrade to no code/detail, not crash
+            # the CLI while it's already reporting a different failure.
             code = detail = None
         raise FetchFailed(
             f"{exc.code} {exc.reason}",
@@ -478,38 +481,38 @@ def _unpack_tarball(archive: bytes, dest: pathlib.Path) -> int:
     that mattered is worse than a refusal.
     """
     try:
-        tar = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            root = _strip_root(tar)
+            members = []
+            for m in tar.getmembers():
+                parts = pathlib.PurePosixPath(m.name).parts
+                if not parts or parts[0] != root or len(parts) == 1:
+                    continue
+                rel = pathlib.PurePosixPath(*parts[1:])
+                if rel.is_absolute() or ".." in rel.parts:
+                    raise BadArchive(f"archive member escapes the target directory: {m.name}")
+                if not (m.isfile() or m.isdir() or m.issym()):
+                    raise BadArchive(
+                        f"archive member is not a file, directory, or symlink: {m.name}"
+                    )
+                if m.issym():
+                    link = pathlib.PurePosixPath(m.linkname)
+                    if link.is_absolute() or ".." in link.parts:
+                        raise BadArchive(f"archive symlink points outside the kit: {m.name}")
+                m.name = str(rel)
+                members.append(m)
+
+            dest.mkdir(parents=True, exist_ok=True)
+            # tarfile's "data" filter (the safe default from 3.12) is belt to the braces
+            # above; it does not exist on 3.11, which this package still supports, so it
+            # is applied when present rather than assumed.
+            extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            try:
+                tar.extractall(dest, members=members, **extra)
+            except tarfile.TarError as exc:
+                raise BadArchive(f"archive could not be unpacked — {exc}") from exc
     except tarfile.TarError as exc:
         raise BadArchive(f"not a readable gzip tar archive — {exc}") from exc
-
-    with tar:
-        root = _strip_root(tar)
-        members = []
-        for m in tar.getmembers():
-            parts = pathlib.PurePosixPath(m.name).parts
-            if not parts or parts[0] != root or len(parts) == 1:
-                continue
-            rel = pathlib.PurePosixPath(*parts[1:])
-            if rel.is_absolute() or ".." in rel.parts:
-                raise BadArchive(f"archive member escapes the target directory: {m.name}")
-            if not (m.isfile() or m.isdir() or m.issym()):
-                raise BadArchive(f"archive member is not a file, directory, or symlink: {m.name}")
-            if m.issym():
-                link = pathlib.PurePosixPath(m.linkname)
-                if link.is_absolute() or ".." in link.parts:
-                    raise BadArchive(f"archive symlink points outside the kit: {m.name}")
-            m.name = str(rel)
-            members.append(m)
-
-        dest.mkdir(parents=True, exist_ok=True)
-        # tarfile's "data" filter (the safe default from 3.12) is belt to the braces
-        # above; it does not exist on 3.11, which this package still supports, so it
-        # is applied when present rather than assumed.
-        extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
-        try:
-            tar.extractall(dest, members=members, **extra)
-        except tarfile.TarError as exc:
-            raise BadArchive(f"archive could not be unpacked — {exc}") from exc
 
     return sum(1 for m in members if m.isfile())
 
@@ -536,6 +539,7 @@ def _git_init(dest: pathlib.Path) -> str:
         [git, "init", "--quiet", str(dest)],
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
@@ -694,14 +698,14 @@ def _run_setup(dest: pathlib.Path, script: pathlib.Path, forwarded: list[str]) -
     """
     if not os.access(script, os.X_OK):
         raise SetupUnrunnable("it is not executable")
-    print("")
+    print()
     print(f"Running the kit's setup step: {' '.join([_SETUP_DISPLAY, *forwarded])}")
     print("  Everything below is the kit's own output, including where it writes its")
     print("  configuration — that is the kit's choice, not this command's.")
-    print("")
+    print()
     sys.stdout.flush()
     try:
-        proc = subprocess.run([str(script), *forwarded], cwd=str(dest))
+        proc = subprocess.run([str(script), *forwarded], cwd=str(dest), check=False)
     except OSError as exc:
         raise SetupUnrunnable(str(exc)) from exc
     return proc.returncode
@@ -758,8 +762,8 @@ def _say_setup_refused(name: str, dest: pathlib.Path, code: int, forwarded: list
         file=sys.stderr,
     )
     print(
-        f"        The kit is on disk and intact — do not run newt create again. Fix "
-        f"what it named, then run it directly:",
+        "        The kit is on disk and intact — do not run newt create again. Fix "
+        "what it named, then run it directly:",
         file=sys.stderr,
     )
     print(
@@ -775,14 +779,14 @@ def _print_setup_next(dest: pathlib.Path, script: pathlib.Path | None) -> None:
     the directory that was asked for, is not something a "make me a directory"
     command should do without being told to.
     """
-    print("")
+    print()
     if script is None:
         print("  This kit ships no setup step. What it wants next is in its README:")
         print(f"      {dest}/README.md")
         return
     print("  Next — the kit's own setup step, which is the part that knows your rig:")
     print(f"      cd {dest} && {_SETUP_DISPLAY}")
-    print(f"  Run it with --help first to see what it asks for. Add --setup to")
+    print("  Run it with --help first to see what it asks for. Add --setup to")
     print("  'newt create' to have it run right after unpacking instead.")
 
 
@@ -887,20 +891,20 @@ def _acquire(
 
     ref_note = f" at {template.ref[:12]}" if template.ref else ""
     print(f"Created {dest} — the {name} starter kit{ref_note}, {files} files.")
-    print("")
+    print()
     print("  It's yours: no remote, no history of ours. The driver versions this kit")
     print("  pinned came with it, so they match the firmware it was tested against.")
     if git_state == "initialized":
-        print("")
+        print()
         print("  An empty git repository was initialized — no commits, no remote. Your")
         print("  first commit is yours to make:")
         print(f"      git -C {dest} add -A && git -C {dest} commit -m 'Initial commit'")
     elif git_state.startswith("unavailable"):
-        print("")
+        print()
         print(f"  NOT a git repository: {git_state[len('unavailable: '):]}.")
         print(f"      Run 'git init' in {dest} yourself once git is available.")
     else:
-        print("")
+        print()
         print(f"  NOT a git repository (--no-git). Run 'git init {dest}' if you want one.")
 
     return _handoff(name, dest, run_setup, forwarded)

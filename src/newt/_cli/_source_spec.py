@@ -342,7 +342,7 @@ def resolve_spec(
     if len(entries) == 1:
         # Rung 5. Say which package supplied it: nothing was typed and no file
         # was read, so this is the substitution most in need of declaring.
-        name, resolved, dist = entries[0]
+        _name, resolved, dist = entries[0]
         print(
             f"[newt {command}] source {resolved} — the only source {dist} declares for {verb}, "
             f"and your rig config names no default",

@@ -6,6 +6,22 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Install
+        run: uv pip install --system -e . ruff deptry
+      - name: Lint
+        run: ruff check src/
+      - name: Dependency check
+        run: deptry .
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -19,11 +35,7 @@ jobs:
       - name: Install uv
         run: pip install uv
       - name: Install
-        run: uv pip install --system -e . ruff pytest deptry
-      - name: Lint
-        run: ruff check src/
-      - name: Dependency check
-        run: deptry .
+        run: uv pip install --system -e . pytest
       # Two runs, because a single one always silently skips something. Bare,
       # the episode-on-disk tests are skipped behind the [recording] extra —
       # which is how the card's own composability gate sat green without ever

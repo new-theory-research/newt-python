@@ -81,7 +81,7 @@ class EpisodeWriter:
     _tmp: Path = field(init=False)
     _start_ns: int = field(init=False)
     _state_ns: list[int] = field(init=False, default_factory=list)
-    _frame_writers: dict[str, "subprocess.Popen"] = field(init=False, default_factory=dict)
+    _frame_writers: dict[str, subprocess.Popen] = field(init=False, default_factory=dict)
     _frame_counts: dict[str, int] = field(init=False, default_factory=dict)
     _state_count: int = field(init=False, default=0)
     _dropped_state: int = field(init=False, default=0)
@@ -102,7 +102,9 @@ class EpisodeWriter:
         )
         self._start_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
 
-        self._mcap_file = open(self._tmp / "data.mcap", "wb")
+        # Not a `with`: the handle outlives this constructor, closed explicitly in
+        # _finalize_streams (commit) or abandon (discard) — whichever the episode hits.
+        self._mcap_file = open(self._tmp / "data.mcap", "wb")  # noqa: SIM115
         self._mcap = mcap_writer.Writer(self._mcap_file)
         self._mcap.start()
         self._schema_id = self._mcap.register_schema(
@@ -140,7 +142,7 @@ class EpisodeWriter:
             cam_dir.mkdir(parents=True, exist_ok=True)
             self._frame_writers[cam.id] = self._spawn_encoder(cam, cam_dir / "color.mp4")
 
-    def _spawn_encoder(self, cam: CameraSpec, out_path: Path) -> "subprocess.Popen":
+    def _spawn_encoder(self, cam: CameraSpec, out_path: Path) -> subprocess.Popen:
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
@@ -295,12 +297,17 @@ class EpisodeWriter:
                 if proc.stdin and not proc.stdin.closed:
                     proc.stdin.close()
                 proc.wait(timeout=5)
-            except Exception:
+            except Exception:  # noqa: BLE001 — abandon() must tear down every
+                # encoder regardless of how any one of them misbehaves; a stuck or
+                # already-dead ffmpeg process that won't close/wait cleanly still
+                # gets force-killed rather than leaving abandon() hung or partial.
                 proc.kill()
         try:
             self._mcap.finish()
             self._mcap_file.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — same discard guarantee: the
+            # overriding goal per the docstring is "no partial directory is ever
+            # left," so an mcap finish/close failure must not skip the rmtree below.
             pass
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -342,7 +349,7 @@ def _ffprobe_frame_count(path: Path) -> int:
             "-count_frames", "-show_entries", "stream=nb_read_frames",
             "-of", "default=nokey=1:noprint_wrappers=1", str(path),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     text = out.stdout.strip()
     return int(text) if text.isdigit() else 0

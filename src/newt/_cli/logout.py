@@ -23,13 +23,13 @@ from .login import _console_url
 
 def _usage() -> None:
     print("Usage: newt logout [options]")
-    print("")
+    print()
     print("  Removes ~/.nt/credentials. The key itself stays valid until revoked on the console.")
     print("  Idempotent: exits 0 if already logged out.")
-    print("")
+    print()
     print("Options:")
     print("  --json  Emit machine-readable JSON")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY  If set, warned about after logout (cannot be unset by this command).")
 

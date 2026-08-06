@@ -23,7 +23,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -73,7 +73,7 @@ _GCS_COLLISION_CODES = frozenset({"AccessDenied", "Forbidden"})
 
 
 def _rfc3339_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _gcs_error_code(exc: HTTPError) -> str | None:
@@ -82,7 +82,9 @@ def _gcs_error_code(exc: HTTPError) -> str | None:
     so, rather than inventing a cause the server didn't name (Rule 10)."""
     try:
         body = exc.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort per the docstring: a read
+        # failure on the error body degrades to None (the caller falls back to the
+        # HTTP status), never to a second exception masking the original rejection.
         return None
     match = _GCS_ERROR_CODE_RE.search(body or b"")
     return match.group(1).decode() if match else None
@@ -131,7 +133,7 @@ def _parse_expiry(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -170,7 +172,9 @@ def validate_lerobot_export(export_dir: Path) -> None:
     - it parses as JSON,
     - it records readable ``action`` and ``observation.state`` feature shapes.
 
-    Raises ``RuntimeError`` naming the fixable problem; returns ``None`` on success.
+    Raises ``TypeError`` when ``meta/info.json`` lacks a ``features`` map and
+    ``RuntimeError`` for every other fixable problem (missing file, bad JSON,
+    missing feature shapes); returns ``None`` on success.
     """
     info_path = export_dir / "meta" / "info.json"
     if not info_path.is_file():
@@ -188,7 +192,7 @@ def validate_lerobot_export(export_dir: Path) -> None:
 
     features = info.get("features") if isinstance(info, dict) else None
     if not isinstance(features, dict):
-        raise RuntimeError(
+        raise TypeError(
             f"meta/info.json in {export_dir} has no `features` map — this doesn't "
             "look like a LeRobot export. Re-export the dataset."
         )
@@ -569,7 +573,7 @@ class NTCloudSink:
                 # Don't retry into a dead URL: a signed URL lives ~15 min, but a very large file on
                 # a very slow link can take longer than that across attempts. If it's already
                 # expired, retrying only earns a guaranteed 4xx — fail now, distinctly (Rule 12).
-                if expires_at is not None and datetime.now(timezone.utc) >= expires_at:
+                if expires_at is not None and datetime.now(UTC) >= expires_at:
                     raise RuntimeError(
                         f"NTCloudSink: upload of {remote_path!r} stalled and its signed upload URL "
                         f"expired before it could complete (signed URLs are valid ~15 min; a very "

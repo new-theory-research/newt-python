@@ -39,9 +39,9 @@ from urllib.request import Request, urlopen
 # the flag scanner, the console-URL reader, and the terminal-color helper are the one
 # canonical copy; promote does not fork them.
 from newt._cli.finetune import (
+    _GREEN,
     _c,
     _console_url,
-    _GREEN,
     _opt_value,
     _resolve_key,
 )
@@ -49,22 +49,22 @@ from newt._cli.finetune import (
 
 def _usage() -> None:
     print("Usage: newt promote <job-handle> --band <token> [--json]")
-    print("")
+    print()
     print("  Keep a fine-tune's checkpoint band and serve it — the CLI twin of the")
     print("  console's promote button. The band is registered as a model born")
     print("  `pending`; the normal admission chain takes it live. Watch it with")
     print("  `newt models`.")
-    print("")
+    print()
     print("Arguments:")
     print("  <job-handle>     The run whose checkpoint you want to serve. List your")
     print("                   runs with `newt finetune --list`.")
-    print("")
+    print()
     print("Options:")
     print("  --band <token>   Which checkpoint band to serve — the evaluated step,")
     print("                   passed verbatim (e.g. 010000). Required.")
     print("  --json           Emit the route's JSON response body on stdout")
     print("                   (the registered model, or the server's refusal detail).")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials).")
     print("  NT_CONSOLE_URL  Console URL (default: https://newtheory-console.vercel.app)")
@@ -287,7 +287,7 @@ def cmd_promote(args: list[str]) -> int:
     print(_c(_GREEN, "Promoted — your checkpoint is registered as a model."), file=out)
     print(f"  model:   {tag}", file=out)
     print(f"  status:  {status or 'pending'}", file=out)
-    print("", file=out)
+    print(file=out)
     print(
         "  Safety check running — usually live in a few minutes; watch with `newt models`.",
         file=out,

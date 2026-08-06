@@ -46,12 +46,12 @@ _DEFAULT_RATE_HZ = 30.0
 
 def _usage() -> None:
     print("Usage: newt teleop [options]")
-    print("")
+    print()
     print("  Drive one embodiment from another's motion. Every tick the source")
     print("  produces an action and the sink is sent it unchanged — no scaling,")
     print("  no filtering, no interpolation. Ctrl+H kills (de-energize, no move")
     print("  first); Ctrl+C ends the session (put away, then de-energize).")
-    print("")
+    print()
     print("Options:")
     print("  --source SPEC   Which TeleopSource to run — either a short name your")
     print("                  kit declares, or a full MODULE:FACTORY import path")
@@ -62,7 +62,7 @@ def _usage() -> None:
     print("                  else the one your kit declares. The flag always wins.")
     print("  --rate HZ       Ticks per second (default: 30). The source is built")
     print("                  at the rate it is driven at — one decision, not two.")
-    print("")
+    print()
     print("  Needs a real terminal: with no keyboard there is no Ctrl+H, and this")
     print("  verb moves hardware. Nothing connects until the kill key is armed.")
 
@@ -289,9 +289,11 @@ def cmd_teleop(args: list[str]) -> int:
                 file=sys.stderr,
             )
             return 130
-        except Exception as exc:
-            # The factory's own refusal — a missing address, a missing driver.
-            # Surface it, don't trace it.
+        except Exception as exc:  # noqa: BLE001 — the factory's own refusal — a
+            # missing address, a missing driver. `load_source` runs a
+            # developer-supplied factory (arbitrary code, arbitrary hardware
+            # bring-up); it can raise anything, and this command's job is to
+            # surface it, not trace it.
             print(f"[newt teleop] {exc}", file=sys.stderr)
             return 1
 

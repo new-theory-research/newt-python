@@ -28,7 +28,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -78,7 +78,7 @@ def _fetch_latest(console: str, *, timeout: float) -> dict | None:
     it can't source (Rule 10). A dead endpoint costs nothing."""
     try:
         req = Request(f"{console}/api/cli/version", method="GET")
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed console URL
+        with urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read())
     except Exception:  # noqa: BLE001 — silent on every error is the whole point
         return None
@@ -134,7 +134,10 @@ def run_update_check(args: list[str]) -> None:
         if not installed:
             return  # can't read our own version → nothing honest to compare against
 
-        today = date.today().isoformat()
+        # Local calendar day, not UTC: this cache gates a once-a-day nudge against
+        # the developer's own sense of "today", the same day date.today() named —
+        # astimezone() just makes that local reference explicit (DTZ011).
+        today = datetime.now().astimezone().date().isoformat()
         cache = _load_cache()
         if cache.get("last_check") == today:
             return  # already checked today — no fetch, no notice (the daily window)
@@ -178,19 +181,19 @@ def _resolve_upgrade_command() -> str:
 
 def _usage() -> None:
     print("Usage: newt upgrade [--print]")
-    print("")
+    print()
     print("  Upgrade the newt CLI to the latest version. When newt was installed as a")
     print("  uv tool (the documented install), this runs `uv tool upgrade newt` for you.")
     print("  When the install method can't be confirmed, it PRINTS the command instead")
     print("  of running it — it never runs a package manager against the wrong install.")
-    print("")
+    print()
     print("Options:")
     print("  --print  Print the upgrade command and exit — never runs it.")
-    print("")
+    print()
     print("Notice: after any command succeeds, newt may print one quiet stderr line")
     print("  when a newer version exists (at most once a day). Disable it entirely with")
     print("  NEWT_NO_UPDATE_CHECK=1.")
-    print("")
+    print()
     print("Environment:")
     print("  NEWT_NO_UPDATE_CHECK  Set to 1 to disable the once-a-day update notice.")
     print("  NT_CONSOLE_URL        Console URL (default: https://newtheory-console.vercel.app)")
@@ -220,7 +223,7 @@ def cmd_upgrade(args: list[str]) -> int:
 
     print(f"$ {command}")
     try:
-        proc = subprocess.run(command.split())  # noqa: S603 — fixed, documented command
+        proc = subprocess.run(command.split(), check=False)
     except FileNotFoundError:
         print(
             "newt upgrade: `uv` was not found on your PATH — install uv, or run the "

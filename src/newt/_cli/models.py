@@ -244,19 +244,19 @@ def _render_models(models: list[dict[str, Any]], show_ids: bool = False) -> str:
 
 def _usage() -> None:
     print("Usage: newt models [options]")
-    print("")
+    print()
     print("  List every model your API key can drive.")
-    print("")
+    print()
     print("  Human output leads with a Key line naming which credential produced")
     print("  the listing (masked — never the full key) and its source (environment")
     print("  or credentials file), then the catalog grouped by base with its")
     print("  fine-tunes indented underneath. Raw uids are left out by default —")
     print("  the tag is the identity you scan by; pass --ids to bring them back.")
-    print("")
+    print()
     print("Options:")
     print("  --json  Emit machine-readable JSON (unchanged by any of the above)")
     print("  --ids   Show each model's uid alongside its name")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials).")
     print("  NT_BOOTSTRAP_URL  Override registry discovery base URL.")
@@ -291,7 +291,10 @@ def cmd_models(args: list[str]) -> int:
     except newt.RegistryUnavailable as exc:
         print(f"newt: registry unreachable — {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — CLI command boundary: the named SDK
+        # errors are handled above; anything else (a bug, an SDK exception this
+        # command doesn't know about yet) still needs a clean one-line report and
+        # exit code, not a Python traceback in a developer's terminal.
         print(f"newt: unexpected error — {exc}", file=sys.stderr)
         return 1
 
