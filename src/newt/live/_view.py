@@ -51,6 +51,12 @@ SERVER_MEMORY_LIMIT = "512MB"
 #: rather than one the hardware stated — so the page says it out loud.
 DEFAULT_VIEW_FPS = 10.0
 
+#: Keep every Nth pixel of a camera frame for the preview. 2 quarters the bytes.
+#: Same reason as the rate above and the same honesty: the file keeps every pixel,
+#: the pane is coarser, and the page says so rather than letting somebody conclude
+#: their camera is soft.
+DEFAULT_VIEW_SCALE = 2
+
 
 class LiveViewUnavailable(RuntimeError):
     """The view cannot be built. Every instance names which of its inputs was missing."""
@@ -83,6 +89,7 @@ class LiveView:
         task: str,
         source_kind: str = "",
         view_fps: float = DEFAULT_VIEW_FPS,
+        view_scale: int = DEFAULT_VIEW_SCALE,
         camera_ids: list[str] | None = None,
         declaration: ViewDeclaration | None = None,
         port: int = DEFAULT_PORT,
@@ -93,6 +100,7 @@ class LiveView:
         self._task = task
         self._source_kind = source_kind
         self._view_fps = view_fps
+        self._view_scale = max(1, int(view_scale))
         self._frame_period = 1.0 / view_fps if view_fps > 0 else 0.0
         self._last_frame_published = 0.0
         self._frames_skipped = 0
@@ -414,10 +422,20 @@ class LiveView:
             frame = frames.get(cam_id)
             if frame is None:
                 continue  # a dropped frame shows nothing new; the last one stays up
-            # The bridge delivers bgr24, which is what the episode's encoder wants
-            # and the opposite of what an image viewer wants. One reversal, named.
-            rgb = np.ascontiguousarray(np.asarray(frame)[:, :, ::-1])
-            self._stream.log(f"cameras/{cam_id}", rr.Image(rgb))
+            # Two transforms, both named, neither inventing a pixel.
+            #
+            # The bridge delivers bgr24 — what the episode's encoder wants and the
+            # opposite of what an image viewer wants — so the channels reverse.
+            #
+            # Then every Nth pixel is kept. Not a resize: no interpolation, no
+            # blending, nothing on screen that no sensor produced. It is here
+            # because the frames go raw (see the EncodedImage note above) and a
+            # browser that cannot drink 27 MB/s falls further behind every second —
+            # measured on the bench as a viewer latency climbing past 40 s while
+            # the rig itself stayed idle. The episode file is untouched by this;
+            # only the preview is coarser, and the page says by how much.
+            rgb = np.asarray(frame)[:: self._view_scale, :: self._view_scale, ::-1]
+            self._stream.log(f"cameras/{cam_id}", rr.Image(np.ascontiguousarray(rgb)))
         with self._lock:
             self._frame_rows += 1
 
@@ -442,6 +460,7 @@ class LiveView:
             "state_rows": state_rows,
             "frame_rows": frame_rows,
             "view_fps": self._view_fps,
+            "view_scale": self._view_scale,
             "cameras": self._camera_ids,
             "robot": self._declaration.urdf_path if self._declaration else None,
             "frames_not_shown": skipped,
@@ -471,9 +490,12 @@ class LiveView:
         if self._source_kind:
             parts.append(f"Source: {self._source_kind}.")
         if self._camera_ids:
+            sampled = f"{self._view_fps:g} fps"
+            if self._view_scale > 1:
+                sampled += f", every {self._view_scale}nd pixel"
             parts.append(
-                f"Cameras shown at {self._view_fps:g} fps — the episode file records "
-                "every frame; this pane samples them."
+                f"Cameras shown at {sampled} — the episode file records every frame "
+                "at full size; this pane samples them."
             )
         if self._declaration is None:
             parts.append(
