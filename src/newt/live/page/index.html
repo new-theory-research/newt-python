@@ -1,0 +1,48 @@
+<!doctype html>
+<!--
+  The live session view.
+
+  Adapted from the embedded-viewer page in
+  https://github.com/mission-robotics-ai/so100-hackathon (a fork of
+  rerun-io/so100-hackathon), Copyright Rerun Technologies AB, dual-licensed
+  MIT OR Apache-2.0. Lifted verbatim in spirit and near-verbatim in fact: the
+  viewer-box sizing contract, the focus patch, the option literal, and the
+  same-origin extensionless viewer routing are all theirs.
+
+  What this page is NOT is the Rerun application. The blueprint and selection
+  panels are collapsed from the Python side and the welcome screen is off from
+  here, so what remains is the 3D robot, the camera panes, the plots and a
+  scrubber. If you are looking at an entity tree down the left, something has
+  regressed.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>newt — live session</title>
+    <link rel="stylesheet" href="/static/view.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="mark">newt</span>
+      <span class="task" id="task">…</span>
+      <span class="spacer"></span>
+      <span class="state" id="state">connecting</span>
+    </header>
+
+    <div class="viewer-box" id="viewer">
+      <div class="viewer-overlay" id="overlay">
+        <div class="overlay-title">starting the viewer</div>
+        <div class="overlay-note" id="overlay-note">
+          46 MB of WebAssembly, served from this rig. First paint takes a few seconds.
+        </div>
+      </div>
+    </div>
+
+    <footer class="bar foot">
+      <span id="note">…</span>
+    </footer>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

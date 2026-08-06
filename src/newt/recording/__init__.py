@@ -8,6 +8,13 @@ The public surface:
 - ``RecordingSource``  — the seam protocol an embodiment implements (``read_state``
                           + ``descriptor``, optional ``disable_all`` / ``close``).
 - ``StateDescriptor``  — the static shape of a state stream (arms, channels, joints).
+- ``ViewDeclaration``  — what a kit declares so a live view can draw its robot:
+                          a description file, an entity prefix, the joints it
+                          drives, and a sentence about how far it vouches for
+                          them. Optional; a source without one gets no robot
+                          drawn, and the view says so.
+- ``JointDrive``       — one entry in that declaration: a description joint, the
+                          channel that supplies its value, and the index.
 - ``JointState``       — one synchronized joint snapshot.
 - ``SimulatedSource``  — a hardware-free source for ``--simulate`` and tests.
 - ``Sink``             — the seam protocol a destination implements (``deliver``);
@@ -44,10 +51,12 @@ from newt.recording._seam import (
     SINGLE_ARM_DESCRIPTOR,
     CameraCaptureFailed,
     CameraOpenError,
+    JointDrive,
     JointState,
     RecordingSource,
     SimulatedSource,
     StateDescriptor,
+    ViewDeclaration,
 )
 from newt.recording._session import DEFAULT_STATE_HZ, Session, SessionStatus
 from newt.recording._sink import LocalSink, Sink
@@ -59,6 +68,7 @@ __all__ = [
     "CameraCaptureFailed",
     "CameraOpenError",
     "CameraSpec",
+    "JointDrive",
     "JointState",
     "LocalSink",
     "NTCloudSink",
@@ -69,6 +79,7 @@ __all__ = [
     "SimulatedSource",
     "Sink",
     "StateDescriptor",
+    "ViewDeclaration",
     "validate",
 ]
 
