@@ -102,6 +102,14 @@ def _usage() -> None:
     print("                  the server binds every interface, so this is the")
     print("                  difference between anyone on the network watching your")
     print("                  session and anyone on the network recording into it.")
+    print("  --push          Send each kept take to your NT cloud namespace as it")
+    print("                  commits, and show the page how that went. Without this")
+    print("                  every take reads `local-only` — committed on this rig")
+    print("                  and sent nowhere, which is the honest default. Delivery")
+    print("                  runs off the recording thread, so it never delays the")
+    print("                  next take, and a take that could not be delivered says")
+    print("                  so and names the cause rather than going quiet.")
+    print("                  Needs an API key: run `newt login`. Requires --control.")
     print("  --page-dir DIR  Serve an already-built page at / instead of the built-in")
     print("                  one, which moves to /view so your page can embed it.")
     print("                  Nothing is built here — point this at a build's output")
@@ -141,6 +149,7 @@ def _parse(args: list[str]) -> dict:
         "view": False,
         "view_port": None,
         "control": False,
+        "push": False,
         "page_dir": None,
     }
     flags = {
@@ -150,6 +159,7 @@ def _parse(args: list[str]) -> dict:
         "--teleop": "teleop",
         "--view": "view",
         "--control": "control",
+        "--push": "push",
     }
     # option -> (key, converter)
     valued = {
@@ -1030,11 +1040,29 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
     port = opts["view_port"] or DEFAULT_PORT
     control = None
     if opts["control"]:
-        # No sink factory: the Session's own LocalSink already put the episode where
-        # it belongs, and a second delivery to the same place would be one delivery
-        # too many. A caller with a store to push to builds this same object with a
-        # `sink_for` and gets the push states; `newt record` is not that caller.
-        control = SessionControl(session, dataset_root=opts["dest"])
+        # Without --push there is no sink factory, and that is the honest default:
+        # the Session's own LocalSink already put the episode where it belongs, and
+        # a second delivery to the same place would be one delivery too many. Every
+        # take then reads `local-only` and says where it is sitting.
+        #
+        # With --push the store becomes the destination. One sink per dataset, not
+        # one per session: NT's store is a namespace per dataset and refuses a name
+        # it has already seen, so a session recording into two datasets needs two.
+        # SessionControl calls this once per name and keeps the answer.
+        sink_for = None
+        if opts["push"]:
+            def sink_for(dataset: str, task: str):
+                # `task` is unused on purpose. The seam passes both because a
+                # destination is allowed to care about either; NTCloudSink reads the
+                # task off each episode.json instead, so nothing here has to agree
+                # with what the take was told.
+                from newt.recording import NTCloudSink
+
+                return NTCloudSink(dataset)
+
+        control = SessionControl(
+            session, dataset_root=opts["dest"], sink_for=sink_for
+        )
     view = LiveView(
         descriptor=session.descriptor,
         task=opts["task"],
@@ -1057,6 +1085,7 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
             "network_url": shareable,
             "robot_drawn": robot_drawn,
             "control": bool(control),
+            "push": bool(opts["push"]),
             "page_dir": opts["page_dir"],
             "note": None if robot_drawn else _NO_ROBOT_NOTE,
         })
@@ -1074,6 +1103,14 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
             print(
                 "[view] this page can start and stop takes — anyone who can open it "
                 "can record into this session"
+            )
+            # Where takes go is the other thing worth reading off this terminal
+            # hours later, and the two defaults look identical from the page until
+            # the first take lands. Both branches are said, so neither is inferred.
+            print(
+                "[view] kept takes are sent to your NT cloud namespace as they commit"
+                if opts["push"]
+                else "[view] kept takes stay on this rig — pass --push to send them"
             )
         if opts["page_dir"]:
             print(f"[view] serving {opts['page_dir']} at /; the live view is at /view")
@@ -1120,6 +1157,25 @@ def cmd_record(args: list[str]) -> int:
         print(
             "        Fix: add --view. Add --control too if that page is meant to "
             "start and stop takes rather than watch them.",
+            file=sys.stderr,
+        )
+        return 1
+    if opts["push"] and not opts["control"]:
+        # A third sentence rather than a shared one: --push without --control is a
+        # different mistake from --control without --view. Delivery states are read
+        # off the page's own take list, so a session with nothing driving it has
+        # nowhere to report them — accepting the flag and uploading silently would
+        # hide the half of this feature that matters.
+        print(
+            "[newt record] --push without --control: takes would be delivered with "
+            "nothing to report the delivery to. The push state of each take is read "
+            "from the session-control routes, and without --control those routes are "
+            "not served.",
+            file=sys.stderr,
+        )
+        print(
+            "        Fix: add --control (and --view, which it needs). To keep "
+            "episodes on this rig and send them later, drop --push.",
             file=sys.stderr,
         )
         return 1
