@@ -1,7 +1,9 @@
 /* Adapted from web/static/learn.css in
    https://github.com/mission-robotics-ai/so100-hackathon (a fork of
    rerun-io/so100-hackathon), Copyright Rerun Technologies AB,
-   dual-licensed MIT OR Apache-2.0.
+   dual-licensed MIT OR Apache-2.0. Both licence texts ship with this package —
+   see NOTICE and licenses/ at the repository root, and newt/NOTICE inside an
+   installed wheel.
 
    The `.viewer-box canvas` rule is the load-bearing one and is theirs: the
    canvas is sized HERE and never through the viewer's width/height options,

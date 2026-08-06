@@ -5,7 +5,9 @@ https://github.com/mission-robotics-ai/so100-hackathon (a fork of
 rerun-io/so100-hackathon), Copyright Rerun Technologies AB, dual-licensed
 ``MIT OR Apache-2.0``. The version pin, the three file names, the extensionless
 route and the reason it has to exist are all theirs; the cache location, the
-refusals and the offline behaviour below are ours.
+refusals and the offline behaviour below are ours. Both licence texts ship with
+this package — see ``NOTICE`` and ``licenses/`` at the repository root, and
+``newt/NOTICE`` inside an installed wheel.
 
 **Why a fetch and not a bundle.** ``@rerun-io/web-viewer`` is 46 MB of WebAssembly
 and its JavaScript glue is built against one exact SDK version — a mismatched pair

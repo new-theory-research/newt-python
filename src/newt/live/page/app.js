@@ -6,6 +6,8 @@
 // rerun-io/so100-hackathon), Copyright Rerun Technologies AB, dual-licensed
 // MIT OR Apache-2.0. The focus patch, the VIEWER_OPTIONS literal and its
 // width/height warning, and the same-origin `/viewer/index.js` import are theirs.
+// Both licence texts ship with this package — see NOTICE and licenses/ at the
+// repository root, and newt/NOTICE inside an installed wheel.
 
 // The viewer (eframe/egui underneath) grabs keyboard focus in ways that scroll the
 // page. Its "text agent" is a hidden 1px <input> parked at the top of the body to

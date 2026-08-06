@@ -10,11 +10,17 @@ run:
   draws nothing rather than a stand-in;
 - an observer is never allowed to become a gate on capture.
 
-The rerun-dependent half is skipped where the ``view`` extra is absent; the seam
-half is stdlib and always runs.
+Every skip here is per test, never per module. A module-level ``importorskip``
+aborts collection at import, which reports *zero* tests from this file rather than
+the ones that could have run — and the robot-name invariant at the bottom, which
+needs no extra at all, would silently stop being checked on every bare install.
+So: ``needs_extra`` marks what writes an episode, ``requires_view`` marks what
+needs the Rerun SDK, and CI installs each extra on its own leg so both halves
+execute somewhere.
 """
 from __future__ import annotations
 
+import importlib.util
 import threading
 import time
 
@@ -27,6 +33,24 @@ from newt.recording import (
     Session,
     SimulatedSource,
     ViewDeclaration,
+)
+
+#: Marks only what actually needs the SDK. ``find_spec`` rather than an import:
+#: asking whether rerun is installed must not cost the rest of the file the SDK's
+#: import time, and must not fail collection if importing it raises.
+requires_view = pytest.mark.skipif(
+    importlib.util.find_spec("rerun") is None,
+    reason='the view extra is not installed — pip install "newt[view]"',
+)
+
+#: Same shape as the rest of the suite: a test that ends an episode needs a writer,
+#: and a writer needs mcap/protobuf.
+_HAVE_EXTRA = (
+    importlib.util.find_spec("mcap") is not None
+    and importlib.util.find_spec("google.protobuf") is not None
+)
+needs_extra = pytest.mark.skipif(
+    not _HAVE_EXTRA, reason="needs the [recording] extra (mcap/protobuf)"
 )
 
 
@@ -92,6 +116,7 @@ def test_view_receives_state_with_no_episode_recording(tmp_path):
         session.close()
 
 
+@needs_extra
 def test_recording_adds_a_writer_and_does_not_interrupt_the_view(tmp_path):
     """One source, two sinks: starting an episode must not cost the view a beat.
 
@@ -123,6 +148,7 @@ def test_recording_adds_a_writer_and_does_not_interrupt_the_view(tmp_path):
         session.close()
 
 
+@needs_extra
 def test_the_episode_still_records_everything_it_used_to(tmp_path):
     """The second sink must not become a filter on the first.
 
@@ -146,6 +172,7 @@ def test_the_episode_still_records_everything_it_used_to(tmp_path):
 # --- an observer is never a gate --------------------------------------------
 
 
+@needs_extra
 def test_an_observer_that_raises_is_dropped_and_named(tmp_path):
     """A view that dies must not take the episode with it, and must not go quiet.
 
@@ -202,6 +229,7 @@ def test_a_slow_observer_does_not_hold_the_writer_lock(tmp_path):
         session.close()
 
 
+@needs_extra
 def test_pushed_state_reaches_observers_too(tmp_path):
     """The composed path shares the seam rather than growing a second one.
 
@@ -331,10 +359,30 @@ def test_live_view_module_names_no_robot():
 
 # --- the rerun half ----------------------------------------------------------
 
-rerun = pytest.importorskip("rerun", reason="the view extra is not installed")
+
+@pytest.fixture
+def cached_viewer_assets(tmp_path, monkeypatch):
+    """Put a complete-looking viewer cache where ``ensure_assets`` will find it.
+
+    ``LiveView.start`` fetches the viewer's 46 MB payload before it reads the kit's
+    declaration, so a test about the declaration would otherwise download a
+    browser build from npm to find out the URDF is missing. Seeding the cache is
+    what keeps that test about the refusal and off the network — the bytes are
+    stubs because nothing in this test opens them.
+    """
+    from newt.live import _assets
+
+    version = importlib.import_module("rerun").__version__
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    directory = _assets.cache_root() / version
+    directory.mkdir(parents=True)
+    for name in _assets.WEB_VIEWER_FILES:
+        (directory / name).write_bytes(b"stub")
+    return directory
 
 
-def test_view_refuses_a_description_that_is_not_there(tmp_path):
+@requires_view
+def test_view_refuses_a_description_that_is_not_there(tmp_path, cached_viewer_assets):
     """The refusal names the kit, because the kit is whose statement was wrong.
 
     An operator who typed a correct command and got told to check their own

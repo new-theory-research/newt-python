@@ -66,7 +66,13 @@ artifacts = ["src/newt/live/page/*"]
 # PEP 561: ship the py.typed marker so the SDK's type hints reach mypy/pyright/
 # IDEs/agents. Explicit force-include makes this deterministic across build
 # methods (a bare `packages` include can miss a data file depending on VCS state).
-force-include = { "src/newt/py.typed" = "newt/py.typed" }
+#
+# NOTICE and licenses/ ride along for a different reason and a harder one: the
+# page assets above are adapted from Rerun-copyright code under MIT OR Apache-2.0,
+# both of which require the licence text and the copyright notice to travel with
+# every copy. Shipping those files in the wheel without these makes every install
+# a redistribution missing its licence.
+force-include = { "src/newt/py.typed" = "newt/py.typed", "NOTICE" = "newt/NOTICE", "licenses/LICENSE-MIT.rerun" = "newt/licenses/LICENSE-MIT.rerun", "licenses/LICENSE-APACHE.rerun" = "newt/licenses/LICENSE-APACHE.rerun" }
 
 [tool.deptry]
 # Scan tests too (default excludes them) — httpx/pytest are used there, not in src/.
