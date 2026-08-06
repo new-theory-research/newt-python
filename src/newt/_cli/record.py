@@ -540,6 +540,13 @@ _COMPOSED_VERB = "demonstration"
 #: `make_source` — the factory this path needs builds a different rig.
 _COMPOSED_EXAMPLE = "mypkg.rig:make_demo"
 
+#: The command the operator actually typed, which on this path is not the verb
+#: the source resolves under. Every other verb answers to its own name, so the
+#: resolver defaults the two to the same word; here they diverge, and a refusal
+#: that told this operator to retype `newt demonstration --source ...` would be
+#: naming a command that does not exist.
+_COMPOSED_COMMAND = "record --teleop"
+
 #: The two no-keyboard stand-downs are `newt teleop`'s, borrowed whole. What is
 #: NOT borrowable is the fix: `newt teleop` is not the command this operator
 #: typed, and running it would drive the rig and write nothing — the thing they
@@ -759,7 +766,12 @@ def _run_teleop(opts: dict) -> int:
     session = None
     try:
         try:
-            spec = resolve_spec(_COMPOSED_VERB, opts["source"], _COMPOSED_EXAMPLE)
+            spec = resolve_spec(
+                _COMPOSED_VERB,
+                opts["source"],
+                _COMPOSED_EXAMPLE,
+                command=_COMPOSED_COMMAND,
+            )
         except SourceNotResolved as exc:
             # No `--simulate` postscript here: this is the one path that forbids
             # it, and offering it as the way out would be advice that refuses.

@@ -666,6 +666,44 @@ def test_a_rig_that_declared_only_record_is_not_volunteered_for_this(
     assert "It declares: record." in err
 
 
+def test_the_composed_refusal_names_the_command_typed_not_the_namespace(
+    tmp_path, monkeypatch
+):
+    """There is no `newt demonstration`, so no refusal may tell anyone to run it.
+
+    Reproduced at a bench on 2026-08-06: a one-character typo in a short name
+    came back with "Fix the name: newt demonstration --source …", a fix
+    instruction for a verb the dispatcher does not have. The namespace is right
+    and stays — `[sources].demonstration` is the line the operator opens an
+    editor and types — but a line they retype at a prompt has to name the
+    command they typed. Both halves are asserted, because deleting the noun
+    would pass the first one and lose the only thing that says where to declare.
+
+    Driven through `cmd_record` and not through the resolver: the resolver
+    defaults the command to the verb, which is correct for every other verb and
+    wrong for exactly this call site, so the call site is what has to be tested.
+    """
+    from newt._cli import _source_spec
+
+    monkeypatch.setattr(
+        _source_spec,
+        "_declared_sources",
+        lambda verb: (
+            [("bench_pair", "bench_kit.rig:make_demo", "a-kit")]
+            if verb == "demonstration"
+            else []
+        ),
+    )
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "absent" / "nt.toml"))
+
+    rc, err = _run_composed(["--source", "bench_par"], monkeypatch)
+
+    assert rc == 2
+    assert "newt demonstration" not in err, f"advertised a command that does not exist:\n{err}"
+    assert "Fix the name:  newt record --teleop --source bench_pair" in err
+    assert "is declared for demonstration" in err
+
+
 def test_the_composed_refusal_never_offers_simulate_as_the_way_out(
     tmp_path, monkeypatch
 ):
@@ -1077,7 +1115,17 @@ def test_the_second_bodys_episode_lands_through_the_whole_verb(
     The test above proves the seam; this one proves the product — one command, a
     rig nobody in the library has heard of, and an episode written with that
     rig's own channel names in it.
+
+    Where those names actually are matters, and this test used to look in the
+    wrong place: `episode.json` carries the *arms* the descriptor declared, and
+    the per-channel streams are MCAP topics in `data.mcap`. So both are checked
+    at the altitude each one knows. The arm id is the weaker signal — it would
+    survive a run that opened the file and wrote not one tick. The topics and
+    their message counts are the claim: two channels this body invented, three
+    ticks each, written by a code path that has never heard of either name.
     """
+    from mcap.reader import make_reader
+
     _rig_module(tmp_path, monkeypatch, "gantry_rig_e2e", _SECOND_BODY)
     dest = tmp_path / "episodes"
 
@@ -1088,8 +1136,21 @@ def test_the_second_bodys_episode_lands_through_the_whole_verb(
     assert rc == 0, err
     written = list(dest.glob("*/episode.json"))
     assert len(written) == 1
+
     meta = json.loads(written[0].read_text())
-    assert "bench_cell/handwheel" in json.dumps(meta)
+    assert [arm["id"] for arm in meta["robot_config"]["arms"]] == ["bench_cell"], (
+        f"episode.json lost the arm this body declared: {meta['robot_config']}"
+    )
+
+    counts: dict[str, int] = {}
+    with open(written[0].parent / "data.mcap", "rb") as handle:
+        for _schema, channel, _message in make_reader(handle).iter_messages():
+            counts[channel.topic] = counts.get(channel.topic, 0) + 1
+
+    assert counts == {
+        "robot_state/bench_cell/handwheel": 3,
+        "robot_state/bench_cell/gantry": 3,
+    }, f"the episode does not carry this body's channels and ticks: {counts}"
 
 
 def test_the_library_holds_no_name_this_body_chose():
