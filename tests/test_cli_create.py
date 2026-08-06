@@ -621,6 +621,27 @@ def test_the_suggestion_suffixes_the_given_directory_not_the_template_name(monke
     assert not (tmp_path / "mydir-2").exists()
 
 
+def test_dot_as_the_target_is_refused_not_a_traceback(monkeypatch, tmp_path):
+    """``newt create <tmpl> .`` against a non-empty cwd has no basename to suffix.
+
+    ``pathlib.Path(".").name`` is ``""``, and ``Path.with_name`` raises on an
+    empty name — the suggestion logic must not let that escape as a traceback.
+    The refusal still fires, still exits EXIT_TARGET_EXISTS, and the fallback
+    "name a directory that does not exist yet" line takes over from the
+    suffixed-name suggestion.
+    """
+    _no_key(monkeypatch)
+    _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
+    _serves(monkeypatch, _tarball())
+    (tmp_path / "already-here.txt").write_text("not empty")
+
+    rc, _out, err = _capture(["alpha", "."], monkeypatch)
+
+    assert rc == create_mod.EXIT_TARGET_EXISTS
+    assert "Fix:" in err
+    assert "Traceback" not in err
+
+
 def test_an_existing_empty_directory_is_fine(monkeypatch, tmp_path):
     _no_key(monkeypatch)
     _console_returns(monkeypatch, _CONSOLE_PAYLOAD)
