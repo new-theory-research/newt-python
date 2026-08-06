@@ -62,6 +62,52 @@ To record from your own rig, pass a `RecordingSource` (an object with a
 
 Recording is alpha — the surface and the format version may move.
 
+## Declaring sources from a kit
+
+A **source** is a factory `newt` imports and calls with no arguments to get the
+object that drives your rig — `MODULE:FACTORY`, as in `mypkg.rig:make_teleop`.
+`newt teleop`, `newt rest` and `newt record` each need one. A kit exists so
+nobody has to type it, and the way a kit says what it offers is one entry point
+per verb in its `pyproject.toml`:
+
+```toml
+[project.entry-points."newt.sources.teleop"]
+bench_pair = "mypkg.rig:make_teleop"
+
+[project.entry-points."newt.sources.rest"]
+bench_pair = "mypkg.rig:make_rest"
+```
+
+The tail of the group is a verb namespace, and there are four —
+`newt.sources.teleop`, `newt.sources.rest`, `newt.sources.record`, and
+`newt.sources.demonstration`. That last one is where `newt record --teleop`
+looks; driving a rig while recording it is different code from either, so a kit
+that declares one has not declared the other. The entry-point **name** is the
+short alias `--source bench_pair` accepts. Its **value** is the same
+`MODULE:FACTORY` string `--source` takes in full. A short name resolves against
+these declarations and nothing else — `newt` never scans your files for a naming
+convention, because a convention learned is an embodiment fact learned.
+
+Declare exactly one source for a verb and the bare verb runs, naming what it
+picked in the line it was already printing. Declare two and it refuses and lists
+both: choosing between two rigs is the operator's call, not ours.
+
+Operators override any of it from the rig's own config
+(`~/.config/nt/nt.toml`, or wherever `$NT_SITE_CONFIG` points), a flat map of
+verb to spec that takes effect with no reinstall:
+
+```toml
+[sources]
+teleop = "bench_pair"
+```
+
+**Entry points are install metadata, so a fresh install is what makes a new name
+visible.** Adding, renaming, or removing one changes nothing until the kit is
+installed again — `uv sync` in the kit's own project, or `uv pip install -e .`.
+It also has to be installed into the environment `newt` runs from. A globally
+installed `newt` cannot see a kit that lives in a project's `.venv`; from inside
+that project, the command is `uv run newt teleop`.
+
 ## Full guide
 
 **[Getting started →](https://newtheory-docs.vercel.app/docs/getting-started)** — install, auth, first inference call, no robot required.

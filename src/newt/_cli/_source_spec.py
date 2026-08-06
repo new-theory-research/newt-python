@@ -292,8 +292,10 @@ def _registry_state(verb: str, command: str) -> tuple[str, str, str | None]:
     project = _cwd_kit_declaring(verb)
     if project is not None:
         return (
-            f"The project in {project} publishes {REGISTRY_GROUP}.{verb}, and this newt is "
-            f"not running from it — it is running from {sys.executable}.",
+            (
+                f"The project in {project} publishes {REGISTRY_GROUP}.{verb}, and this newt is "
+                f"not running from it — it is running from {sys.executable}."
+            ),
             "That runs the project's own newt, the one those declarations are installed in.",
             f"uv run newt {command}",
         )
@@ -302,16 +304,22 @@ def _registry_state(verb: str, command: str) -> tuple[str, str, str | None]:
     if covered:
         return (
             f"Installed kits publish sources for {', '.join(covered)} — and none for {verb}.",
-            f"That gap is the kit's, not your setup's: it has to publish a "
-            f"{REGISTRY_GROUP}.{verb} entry point, and be reinstalled, before {verb} has a "
-            f"name here.",
+            (
+                f"That gap is the kit's, not your setup's: it has to publish a "
+                f"{REGISTRY_GROUP}.{verb} entry point, and be reinstalled, before {verb} has a "
+                f"name here."
+            ),
             None,
         )
     return (
-        f"No installed kit publishes any source to newt in this environment — newt is "
-        f"running from {sys.executable}.",
-        "Install your rig's kit into that environment, or run newt from the one it is "
-        "already installed in.",
+        (
+            f"No installed kit publishes any source to newt in this environment — newt is "
+            f"running from {sys.executable}."
+        ),
+        (
+            "Install your rig's kit into that environment, or run newt from the one it is "
+            "already installed in."
+        ),
         None,
     )
 
