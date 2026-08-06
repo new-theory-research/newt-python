@@ -8,16 +8,15 @@ import functools
 import os
 import time
 import warnings
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import msgpack
 import numpy as np
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect
-
 
 # ---------------------------------------------------------------------------
 # msgpack-numpy codec — wire-compatible with serve_openpi.py
@@ -434,7 +433,7 @@ class ModelContract:
     raw: Mapping[str, Any]
 
     @classmethod
-    def _from_dict(cls, contract: dict) -> "ModelContract":
+    def _from_dict(cls, contract: dict) -> ModelContract:
         return cls(
             state_shape=_as_shape(contract.get("state_shape")),
             cameras=_as_str_tuple(contract.get("cameras")),
@@ -1500,7 +1499,7 @@ class Robot:
                         frame_no,
                         (_time.time() - _send_t0) * 1000,
                     )
-                    pass  # server may have initiated close; drain recv for terminal
+                    # server may have initiated close; drain recv for terminal
 
                 try:
                     raw = ws.recv()

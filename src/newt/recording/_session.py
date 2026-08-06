@@ -78,9 +78,9 @@ class Session:
         self,
         source: RecordingSource,
         task: str,
-        output_dir: "str | Path",
+        output_dir: str | Path,
         *,
-        cameras: "list | None" = None,
+        cameras: list | None = None,
         state_hz: int = DEFAULT_STATE_HZ,
         author: str | None = None,
         license: str | None = None,
@@ -131,7 +131,7 @@ class Session:
         self._writer = None  # set during an episode
         self._loop_thread: threading.Thread | None = None
         self._camera_thread: threading.Thread | None = None
-        self._camera_failure: "tuple[str, Exception] | None" = None
+        self._camera_failure: tuple[str, Exception] | None = None
         self._stop_loop = threading.Event()
         self._lock = threading.Lock()
         self._kept = 0
@@ -446,7 +446,7 @@ class Session:
                 thread.join(timeout=5.0)
         self._camera_thread = None
 
-    def end_episode(self, keep: bool) -> "Path | None":
+    def end_episode(self, keep: bool) -> Path | None:
         """Stop the capture loop and either keep or discard the episode.
 
         ``keep=True`` commits atomically (episode.json last, temp dir renamed into
@@ -513,7 +513,7 @@ class Session:
                 dropped_frames=w.dropped_frames if w is not None else {},
             )
 
-    def dropped_report(self) -> "str | None":
+    def dropped_report(self) -> str | None:
         """A human line summarizing dropped reads for the in-flight episode, or
         None when nothing is recording or nothing dropped. A frontend prints it;
         the report itself is computed here so every frontend says the same thing.

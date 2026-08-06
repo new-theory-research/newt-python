@@ -44,12 +44,12 @@ def _effective_bootstrap_url() -> str:
 
 def _usage() -> None:
     print("Usage: newt status [options]")
-    print("")
+    print()
     print("  Show your current key source, identity, and registry connectivity.")
-    print("")
+    print()
     print("Options:")
     print("  --json  Emit machine-readable JSON")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials).")
     print("  NT_BOOTSTRAP_URL  Override registry discovery base URL.")
