@@ -1,0 +1,28 @@
+# newt-python metadata leak gate — hashed denylist for repository METADATA only.
+#
+# One sha256 hex digest per line, of a lowercased token (or of two adjacent tokens
+# joined). scripts/leak_gate_metadata.py tokenizes every remote branch name and every
+# open pull-request title and compares digests, against this file UNION the content list
+# in leak_terms.sha256 — a branch named after internal infrastructure is as public as one
+# named after an internal lane.
+#
+# Why a second file instead of more lines in leak_terms.sha256: these terms must NOT fire
+# on file contents. They name internal work lanes, and tracked comments on main cite those
+# lanes' card IDs as provenance for why a behaviour is the way it is — legitimate, useful,
+# and roughly three dozen lines across a dozen files. Folding these digests into the
+# content list would fail the content gate on main immediately. Metadata is a different
+# surface, so it takes a different denylist.
+#
+# Why hashed, and why committed here rather than fetched at runtime: same reasoning as the
+# content list — a public file listing our internal terms would be a map of what to grep
+# our history for, and this is obscurity, not secrecy. Fetching the plaintext from the
+# private repo instead would need a secret, and secrets are withheld from workflow runs on
+# pull requests from forks: the check would skip exactly where an outside contributor
+# might introduce something, and a gate that silently skips is worse than no gate.
+#
+# Plaintext source + regeneration command live in the private portal repo at
+# wiki/operating-docs/leak-gate-metadata-terms.txt. Edit there, regenerate, commit both.
+
+38876a9f2694acfc9d5051b6df7919f5bdc62f6169865b0ccff5f03ed7aa3b7a
+dae31a8b7172c25ec935439c143a9b85e31290f025bcf7a396b0f68d46b8ce45
+a82868822f822d2f0749b49e3b27ee07a84309d3b6d81561bea84e02b03fbc73
