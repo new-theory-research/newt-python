@@ -194,11 +194,62 @@ def _declaring_verbs() -> list[str]:
     )
 
 
-def _registry_state(verb: str) -> tuple[str, str]:
+def _cwd_kit_declaring(verb: str) -> Path | None:
+    """The project you are standing in that publishes this verb, if that is why.
+
+    The bench receipt (2026-08-06): standing inside a kit's own checkout,
+    running the globally installed ``newt``, and being told no installed kit
+    declares anything for the verb "in this environment". True, and useless —
+    the kit was right there, and its declarations live in the *project's*
+    environment, the one ``uv run`` enters and a global tool never does. The
+    refusal explained the mechanism and never named the command that works,
+    which was four characters away from the one already typed.
+
+    So this reads ``pyproject.toml`` in the working directory and answers one
+    question: does a project here publish ``newt.sources.<verb>``? A
+    declaration, read from a file the developer wrote — never a directory
+    guessed at from a file layout, which is the same fence the registry read
+    keeps.
+
+    Returns ``None`` when this interpreter is already the project's own: then
+    re-running through the project changes nothing, and handing back the command
+    they just typed is a loop rather than a fix.
+
+    One function so the suite has one seam to fence (``tests/conftest.py``),
+    for the reason the two entry-point reads above have theirs — a refusal that
+    reads the developer's working directory is a test that passes where it was
+    written and fails where it runs."""
+    import tomllib
+
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return None
+
+    if Path(sys.prefix).resolve().is_relative_to(cwd):
+        return None
+
+    try:
+        with open(cwd / "pyproject.toml", "rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError, ValueError):
+        # This read is a courtesy on the way to a refusal about something else.
+        # A missing or broken pyproject is not the problem being reported, and
+        # a second complaint stacked on the first helps nobody.
+        return None
+
+    project = raw.get("project")
+    groups = project.get("entry-points") if isinstance(project, dict) else None
+    if not isinstance(groups, dict):
+        return None
+    return cwd if groups.get(f"{REGISTRY_GROUP}.{verb}") else None
+
+
+def _registry_state(verb: str, command: str) -> tuple[str, str]:
     """What this environment's registry actually looks like, and whose move it is.
 
     Until newtrino-035 the refusals below said one sentence — *"no installed kit
-    declares one for <verb> either"* — in two worlds that have nothing in common
+    declares one for <verb> either"* — in worlds that have nothing in common
     but their symptom:
 
     * **Nothing is publishing to** ``newt`` **here.** Wrong interpreter, kit
@@ -212,12 +263,29 @@ def _registry_state(verb: str) -> tuple[str, str]:
       turns "nobody told me anything" into a specific, checkable gap — and those
       names come from declarations, never from a list inside ``newt``.
 
-    Different causes, different owners, different fixes: one string for both is
-    what Rule 12 forbids, sitting inside the family built to satisfy it.
+    And the one that reads as neither, which is why it is checked first: **the
+    kit is in the directory you are standing in**, publishing this verb, and
+    this ``newt`` is not the one that project runs. Nothing is missing and
+    nothing is stale; two environments are in play and only one of them was
+    asked. That is a directory fact, not a registry fact, and it outranks both
+    readings above — the environment sentence is true there and still sends the
+    operator to install something they already have.
+
+    Different causes, different owners, different fixes: one string for all
+    three is what Rule 12 forbids, sitting inside the family built to satisfy
+    it.
 
     Returns ``(noticed, move)`` — what was found, and the one thing to do about
-    it. Called only while building a refusal, so the metadata walk stays off the
-    path that resolves."""
+    it. Called only while building a refusal, so neither the metadata walk nor
+    the directory read is on the path that resolves."""
+    project = _cwd_kit_declaring(verb)
+    if project is not None:
+        return (
+            f"The project in {project} publishes {REGISTRY_GROUP}.{verb}, and this newt is "
+            f"not running from it — it is running from {sys.executable}.",
+            f"Run the project's own newt:  uv run newt {command}",
+        )
+
     covered = [other for other in _declaring_verbs() if other != verb]
     if covered:
         return (
@@ -310,7 +378,7 @@ def _resolve_short(
     # named X" alone would send them to fix a spelling that isn't wrong — and
     # ``_registry_state`` says which of the two registries this is, because
     # "nothing is installed" and "the kit skipped this verb" are not one problem.
-    noticed, move = _registry_state(verb)
+    noticed, move = _registry_state(verb, command)
     if origin is None:
         raise SourceNotResolved(
             f"newt {command}: no source named {name!r} is declared for {verb}. {noticed}\n"
@@ -453,7 +521,7 @@ def resolve_spec(
             f'[{SOURCES_TABLE}]  {verb} = "{entries[0][0]}"'
         )
 
-    noticed, move = _registry_state(verb)
+    noticed, move = _registry_state(verb, command)
 
     if not have_config:
         # Cause 1: nothing given, nothing to read, nothing declared for this

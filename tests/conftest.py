@@ -8,9 +8,10 @@ resolve *the developer's own rig* and pass or fail depending on whose laptop it
 ran on — the CI-green, bench-red split that is worse than either.
 
 So: every test starts with no ``NT_SITE_CONFIG``, a ``HOME`` that has no config
-in it, and no installed kit declaring anything. A test that wants a declaration
-writes one and points the env var at it, or hands ``_declared_sources`` a list,
-out loud. Nothing about a source is ever ambient.
+in it, no installed kit declaring anything, and no kit in the directory pytest
+was launched from. A test that wants a declaration writes one and points the env
+var at it, or hands ``_declared_sources`` a list, out loud. Nothing about a
+source is ever ambient.
 """
 from __future__ import annotations
 
@@ -31,6 +32,13 @@ def _no_ambient_site_config(monkeypatch, tmp_path_factory):
     # leave every nothing-declared refusal reading the developer's own
     # environment and printing a different sentence on a laptop than in CI.
     monkeypatch.setattr(_source_spec, "_declaring_verbs", lambda: [])
+    # The third read, and the only one that is not the entry-point registry:
+    # a refusal now checks whether the *working directory* holds a kit that
+    # publishes this verb, to hand `uv run newt <verb>` instead of a lecture
+    # about environments. pytest runs from wherever the developer invoked it —
+    # unfenced, a refusal would notice this repo's own pyproject on one machine
+    # and nothing on another.
+    monkeypatch.setattr(_source_spec, "_cwd_kit_declaring", lambda verb: None)
 
 
 @pytest.fixture(autouse=True)
