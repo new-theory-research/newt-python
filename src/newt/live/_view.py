@@ -428,12 +428,20 @@ class LiveView:
             # opposite of what an image viewer wants — so the channels reverse.
             #
             # Then every Nth pixel is kept. Not a resize: no interpolation, no
-            # blending, nothing on screen that no sensor produced. It is here
-            # because the frames go raw (see the EncodedImage note above) and a
-            # browser that cannot drink 27 MB/s falls further behind every second —
-            # measured on the bench as a viewer latency climbing past 40 s while
-            # the rig itself stayed idle. The episode file is untouched by this;
-            # only the preview is coarser, and the page says by how much.
+            # blending, nothing on screen that no sensor produced.
+            #
+            # It is here for buffer depth, and that is the whole of the reason.
+            # The frames go raw (see the EncodedImage note above), so three
+            # 640x480 cameras at the rate above are ~27 MB/s, which fills
+            # SERVER_MEMORY_LIMIT in about nineteen seconds — and the proxy then
+            # drops its oldest rows, which is what a browser attaching late finds
+            # missing. A quarter of the bytes is about seventy seconds of buffer.
+            #
+            # It is NOT here to fix the viewer's latency readout, which was the
+            # first guess and was wrong: that number tracks how long the page has
+            # been open, not any lag in the stream. Bench receipt, 2026-08-06 —
+            # one session, two screenshots: settling 10 s read 14.7 s, settling
+            # 45 s read 44.1 s, with both showing the same live scene.
             rgb = np.asarray(frame)[:: self._view_scale, :: self._view_scale, ::-1]
             self._stream.log(f"cameras/{cam_id}", rr.Image(np.ascontiguousarray(rgb)))
         with self._lock:
