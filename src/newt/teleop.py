@@ -537,6 +537,7 @@ def run_session(
     rate_hz: float = DEFAULT_RATE_HZ,
     kill: threading.Event,
     recorder: TickRecorder | None = None,
+    source_receipt: str | None = None,
 ) -> int:
     """Drive ``source`` at ``rate_hz`` until the kill fires or the operator ends it.
 
@@ -550,6 +551,12 @@ def run_session(
     The ending happens in a ``finally``, not after the try: an exception nobody
     expected — a bug in the loop, an OOM — must still leave every part
     de-energized before its traceback surfaces.
+
+    ``source_receipt``, when given, is the phrase naming where this source came
+    from when the operator did not type it — folded into the line below rather
+    than announced before it. The caller resolves it; this module only prints
+    what it was handed, because "which kit declared this" is a CLI fact and the
+    library has no business deriving it.
 
     ``recorder``, when given, makes the tick the clock of a recording as well as
     of the rig. It is closed out first in that ending, before anything is put
@@ -591,8 +598,11 @@ def run_session(
                 "it. It is a label for the operator, not a health check."
             ) from exc
 
+        # The receipt rides here or nowhere: one line, already being read, at
+        # the moment the rig goes live.
+        provenance = f", driving with {source_receipt}" if source_receipt else ""
         print(
-            f"[newt teleop] live at {rate_hz:g} Hz — {rig}. "
+            f"[newt teleop] live at {rate_hz:g} Hz — {rig}{provenance}. "
             "Ctrl+C to end (it puts the rig away first), Ctrl+H to kill (it does not).",
             flush=True,
         )

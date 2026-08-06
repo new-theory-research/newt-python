@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 # The site config is the rig's own file, and this is the *only* thing ``newt``
 # reads out of it: a flat map of verb name -> MODULE:FACTORY string. The
@@ -54,6 +55,24 @@ DEFAULT_SITE_CONFIG_PATH = "~/.config/nt/nt.toml"
 # kit's file-naming convention, and a convention learned is an embodiment fact
 # learned.
 REGISTRY_GROUP = "newt.sources"
+
+
+class Resolved(NamedTuple):
+    """What the ladder answered, and what the verb still owes the operator.
+
+    ``receipt`` is the short phrase a verb folds into the line it was already
+    printing — ``live_pair (from the trossen-widowx kit)``. It is set on exactly
+    one rung: the one where nothing was typed and no file was read, so an
+    installed kit's lone declaration answered on the operator's behalf. Every
+    other rung is either their own keystrokes or a file that already named
+    itself on stderr, and a verb handed ``None`` says nothing extra.
+
+    A separate notice ahead of the run is what this replaces: the fact was
+    always disclosed, but as an apology for proceeding rather than as a receipt
+    inside the sentence the operator is actually reading."""
+
+    spec: str
+    receipt: str | None = None
 
 
 class SourceNotResolved(Exception):
@@ -308,7 +327,7 @@ def _resolve_short(
 
 def resolve_spec(
     verb: str, flag: str | None, example: str, *, command: str | None = None
-) -> str:
+) -> Resolved:
     """The one answer to "which factory builds this rig?", for every verb.
 
     The ladder, stated once and tested as a unit:
@@ -333,10 +352,17 @@ def resolve_spec(
     7. Nothing anywhere — refuse, and teach where declarations live.
 
     Whenever the answer came from somewhere other than the operator's own
-    keystrokes, it says so on stderr before anything starts (Rule 10's
-    declared-substitution clause — a default that arrives silently is the
-    failure mode this would otherwise introduce). stderr, not stdout, because
-    ``newt record --json`` puts a machine-read stream on stdout.
+    keystrokes, it is disclosed (Rule 10's declared-substitution clause — a
+    default that arrives silently is the failure mode this would otherwise
+    introduce). *Where* it is disclosed depends on what answered. A file that
+    was read names itself on stderr, here, before anything starts — the fact is
+    about a path the operator can go open. Rung 5 has no file to name, and its
+    disclosure travels back as ``Resolved.receipt`` for the verb to fold into
+    its own startup line: a rig with one obvious answer gets no message about
+    sources at all, only the line it was always going to print, carrying the
+    name and the kit (newtrino-035, ruling 1). stderr, not stdout, for the ones
+    that stay here, because ``newt record --json`` puts a machine-read stream on
+    stdout.
 
     ``example`` is the verb's own ``MODULE:FACTORY`` example, used in refusals.
 
@@ -362,11 +388,12 @@ def resolve_spec(
     command = command or verb
 
     if flag and ":" in flag:
-        return flag
+        return Resolved(flag)
     if flag:
         # Rung 2. Nothing was substituted — they named it — so no provenance
-        # line; there is nothing to declare that they don't already know.
-        return _resolve_short(verb, command, flag, example, origin=None)
+        # line and no receipt; there is nothing to declare that they don't
+        # already know.
+        return Resolved(_resolve_short(verb, command, flag, example, origin=None))
 
     path, provenance = site_config_path()
     have_config = path.exists()
@@ -380,7 +407,7 @@ def resolve_spec(
             f"[newt {command}] source {spec} — declared as [{SOURCES_TABLE}].{verb} in {path}",
             file=sys.stderr,
         )
-        return spec
+        return Resolved(spec)
 
     if spec:
         # Rung 4. A bare name in the file is legal now, so the old "that isn't
@@ -397,20 +424,20 @@ def resolve_spec(
             f'"{spec}" in {path}',
             file=sys.stderr,
         )
-        return resolved
+        return Resolved(resolved)
 
     entries = _declared_sources(verb)
 
     if len(entries) == 1:
-        # Rung 5. Say which package supplied it: nothing was typed and no file
-        # was read, so this is the substitution most in need of declaring.
-        _name, resolved, dist = entries[0]
-        print(
-            f"[newt {command}] source {resolved} — the only source {dist} declares for {verb}, "
-            f"and your rig config names no default",
-            file=sys.stderr,
-        )
-        return resolved
+        # Rung 5. Nothing was typed and no file was read, so this is the
+        # substitution most in need of declaring — and it is declared in the
+        # verb's own startup line rather than in a notice ahead of it. A rig
+        # with one possible answer is not a situation; printing about it before
+        # anything runs made a receipt read like a warning, and the clause that
+        # explained why `newt` proceeded anyway answered a question nobody
+        # asked (newtrino-035, ruling 1).
+        name, resolved, dist = entries[0]
+        return Resolved(resolved, f"{name} (from the {dist} kit)")
 
     if entries:
         # Cause 6: the selector case. Both ways to choose, one for now and one

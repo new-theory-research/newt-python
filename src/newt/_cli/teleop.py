@@ -245,7 +245,9 @@ def cmd_teleop(args: list[str]) -> int:
     # the kill key, so a rig that declares nothing is turned away with nothing
     # armed and nothing connected.
     try:
-        spec = resolve_spec("teleop", opts["source"], "mypkg.rig:make_teleop")
+        spec, source_receipt = resolve_spec(
+            "teleop", opts["source"], "mypkg.rig:make_teleop"
+        )
     except SourceNotResolved as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -299,6 +301,11 @@ def cmd_teleop(args: list[str]) -> int:
 
         from newt.teleop import run_session
 
-        return run_session(source, rate_hz=opts["rate"], kill=kill_key.fired)
+        return run_session(
+            source,
+            rate_hz=opts["rate"],
+            kill=kill_key.fired,
+            source_receipt=source_receipt,
+        )
     finally:
         kill_key.restore()

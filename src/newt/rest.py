@@ -564,7 +564,12 @@ def _report(rig: str, outcomes: Sequence[PartOutcome], interrupted: bool) -> Non
         )
 
 
-def run_rest(source: object, plan: Sequence[tuple[Restable, Sequence[RestStep]]]) -> int:
+def run_rest(
+    source: object,
+    plan: Sequence[tuple[Restable, Sequence[RestStep]]],
+    *,
+    source_receipt: str | None = None,
+) -> int:
     """Run every part's already-read declaration, de-energize, report, return the code.
 
     Called only after :func:`require_rest_source` and :func:`read_declarations`
@@ -581,10 +586,17 @@ def run_rest(source: object, plan: Sequence[tuple[Restable, Sequence[RestStep]]]
     Ctrl+C abandons the remaining moves and nothing else. Whatever has already
     been driven is still de-energized and still reported, because a rest run
     interrupted half-way is the state most in need of an honest summary.
+
+    ``source_receipt``, when given, names where this source came from when the
+    operator did not type it. It rides the first line rather than a notice ahead
+    of it: `rest` is the verb typed one-handed after something already went
+    wrong, and a message about resolution before the arms come down is exactly
+    the paragraph nobody reads at that moment.
     """
     rig = _describe(source)
-    _say(f"putting away — {rig}. Ctrl+C abandons the remaining moves; every part is "
-         "still de-energized and reported.")
+    provenance = f", brought up by {source_receipt}" if source_receipt else ""
+    _say(f"putting away — {rig}{provenance}. Ctrl+C abandons the remaining moves; "
+         "every part is still de-energized and reported.")
 
     sequences: list[tuple[Restable, str, tuple[str, ...], str | None]] = []
     interrupted = False
