@@ -118,9 +118,11 @@ def _read_declared_sources(verb: str, command: str, path: Path, provenance: str)
         # not a gap — a different problem from cause 2, so a different string.
         raise SourceNotResolved(
             f"newt {command}: your rig config at {path} ({provenance}) is not valid TOML: {exc}\n"
-            f"        That file is yours, not newt's — fix the syntax at the line named above.\n"
-            f"        To get moving right now, bypass the file: "
-            f"newt {command} --source MODULE:FACTORY"
+            f"\n"
+            f"    newt {command} --source MODULE:FACTORY\n"
+            f"\n"
+            f"        That is the way past it right now. The file is yours, not newt's — fix "
+            f"the syntax at the line named above and the flag stops being needed."
         ) from exc
     except OSError as exc:
         # Present-but-unreadable: a permissions or device problem, which is
@@ -128,10 +130,11 @@ def _read_declared_sources(verb: str, command: str, path: Path, provenance: str)
         raise SourceNotResolved(
             f"newt {command}: your rig config at {path} ({provenance}) exists but could not be "
             f"read: {exc}\n"
-            f"        That is a filesystem problem on this machine, not a newt one — check the "
-            f"file's permissions.\n"
-            f"        To get moving right now, bypass the file: "
-            f"newt {command} --source MODULE:FACTORY"
+            f"\n"
+            f"    newt {command} --source MODULE:FACTORY\n"
+            f"\n"
+            f"        That is the way past it right now. This is a filesystem problem on this "
+            f"machine, not a newt one — check the file's permissions."
         ) from exc
 
     declared = raw.get(SOURCES_TABLE, {})
@@ -144,11 +147,13 @@ def _read_declared_sources(verb: str, command: str, path: Path, provenance: str)
         raise SourceNotResolved(
             f"newt {command}: your rig config at {path} ({provenance}) has a [{SOURCES_TABLE}] "
             f"table that is not a flat map of verb name to MODULE:FACTORY string.\n"
-            f"        newt expects exactly this shape, and reads nothing else from the file:\n"
+            f"\n"
+            f"    newt {command} --source MODULE:FACTORY\n"
+            f"\n"
+            f"        That is the way past it right now. To fix the table itself: newt expects "
+            f"exactly this shape, and reads nothing else from the file:\n"
             f"            [{SOURCES_TABLE}]\n"
-            f'            {verb} = "MODULE:FACTORY"\n'
-            f"        Fix the table in that file, or bypass it: "
-            f"newt {command} --source MODULE:FACTORY"
+            f'            {verb} = "MODULE:FACTORY"'
         )
     return declared
 
@@ -245,7 +250,7 @@ def _cwd_kit_declaring(verb: str) -> Path | None:
     return cwd if groups.get(f"{REGISTRY_GROUP}.{verb}") else None
 
 
-def _registry_state(verb: str, command: str) -> tuple[str, str]:
+def _registry_state(verb: str, command: str) -> tuple[str, str, str | None]:
     """What this environment's registry actually looks like, and whose move it is.
 
     Until newtrino-035 the refusals below said one sentence — *"no installed kit
@@ -275,15 +280,22 @@ def _registry_state(verb: str, command: str) -> tuple[str, str]:
     three is what Rule 12 forbids, sitting inside the family built to satisfy
     it.
 
-    Returns ``(noticed, move)`` — what was found, and the one thing to do about
-    it. Called only while building a refusal, so neither the metadata walk nor
-    the directory read is on the path that resolves."""
+    Returns ``(noticed, move, headline)`` — what was found, what it means and
+    whose it is, and the one command to put at the top of the refusal when this
+    world has a better one than "name the code yourself". Only the standing-in-
+    the-kit world does: there is a command that works, four characters from the
+    one already typed, and ruling 2 says the fix is the headline or it isn't a
+    fix. ``None`` means the refusal keeps its own ``--source`` line up there.
+
+    Called only while building a refusal, so neither the metadata walk nor the
+    directory read is on the path that resolves."""
     project = _cwd_kit_declaring(verb)
     if project is not None:
         return (
             f"The project in {project} publishes {REGISTRY_GROUP}.{verb}, and this newt is "
             f"not running from it — it is running from {sys.executable}.",
-            f"Run the project's own newt:  uv run newt {command}",
+            "That runs the project's own newt, the one those declarations are installed in.",
+            f"uv run newt {command}",
         )
 
     covered = [other for other in _declaring_verbs() if other != verb]
@@ -293,12 +305,45 @@ def _registry_state(verb: str, command: str) -> tuple[str, str]:
             f"That gap is the kit's, not your setup's: it has to publish a "
             f"{REGISTRY_GROUP}.{verb} entry point, and be reinstalled, before {verb} has a "
             f"name here.",
+            None,
         )
     return (
         f"No installed kit publishes any source to newt in this environment — newt is "
         f"running from {sys.executable}.",
         "Install your rig's kit into that environment, or run newt from the one it is "
         "already installed in.",
+        None,
+    )
+
+
+def _next_move(verb: str, command: str, example: str) -> tuple[str, str, str, str]:
+    """The one command a nothing-declared refusal puts at the top, and the rest.
+
+    Ruling 2 (newtrino-035): the fix is the headline or it isn't a fix. She hit
+    an error whose recovery command was *in* the message and did not see it, so
+    every refusal now isolates exactly one command — alone on its line, blank
+    lines around it, before the explanation rather than at the end of it.
+
+    Which command that is depends on the world ``_registry_state`` found. Only
+    one of the three has something better than "name the code yourself": the kit
+    is in the directory you are standing in, and ``uv run`` is the whole answer.
+    Everywhere else the placeholder ``--source`` line is genuinely the best
+    available move, because nothing was declared and there is no real name to
+    hand over.
+
+    Returns ``(noticed, move, headline, alternative)``. ``alternative`` is the
+    "or name the code directly" line, and it is **empty when the headline is
+    already that command** — printing one command twice in one refusal is the
+    same defect this card was filed for, in the fix's clothes."""
+    noticed, move, headline = _registry_state(verb, command)
+    direct = f"newt {command} --source {example}"
+    if headline is None:
+        return noticed, move, direct, ""
+    return (
+        noticed,
+        move,
+        headline,
+        f"\n        Or name the code directly, which needs no declaration:  {direct}",
     )
 
 
@@ -343,9 +388,12 @@ def _resolve_short(
         raise SourceNotResolved(
             f"newt {command}: the name {name!r} is declared for {verb} by more than one "
             f"installed kit, and newt will not guess which one drives your rig.\n"
+            f"\n"
+            f"    newt {command} --source {matches[0][1]}\n"
+            f"\n"
+            f"        That names the code directly, which settles it — swap the spec for the "
+            f"other one if it is the kit you meant.\n"
             f"        Declared by:  {declarers}\n"
-            f"        Name the code directly to settle it:  "
-            f"newt {command} --source {matches[0][1]}\n"
             f"        Or uninstall the kit you don't mean to be running."
         )
 
@@ -357,8 +405,10 @@ def _resolve_short(
             # usually one character, and they can see it from here.
             raise SourceNotResolved(
                 f"newt {command}: no source named {name!r} is declared for {verb}.\n"
+                f"\n"
+                f"    newt {command} --source {first}\n"
+                f"\n"
                 f"        This machine offers, for {verb}:  {offered}\n"
-                f"        Fix the name:  newt {command} --source {first}\n"
                 f"        Or name the code directly, which needs no declaration:  "
                 f"newt {command} --source {example}"
             )
@@ -367,10 +417,12 @@ def _resolve_short(
         raise SourceNotResolved(
             f"newt {command}: {origin} = {name!r}, and no source by that name is declared "
             f"for {verb}.\n"
-            f"        You did not type this — it came from that file. This machine offers, "
-            f"for {verb}:  {offered}\n"
-            f"        Fix the value there, or override it this once:  "
-            f"newt {command} --source {first}"
+            f"\n"
+            f"    newt {command} --source {first}\n"
+            f"\n"
+            f"        You did not type this — it came from that file, and the line above "
+            f"overrides it this once. Fixing the value there fixes it for good.\n"
+            f"        This machine offers, for {verb}:  {offered}"
         )
 
     # Nothing declared for this verb. Different cause, different fix: the name
@@ -378,19 +430,23 @@ def _resolve_short(
     # named X" alone would send them to fix a spelling that isn't wrong — and
     # ``_registry_state`` says which of the two registries this is, because
     # "nothing is installed" and "the kit skipped this verb" are not one problem.
-    noticed, move = _registry_state(verb, command)
+    noticed, move, headline, alternative = _next_move(verb, command, example)
     if origin is None:
         raise SourceNotResolved(
             f"newt {command}: no source named {name!r} is declared for {verb}. {noticed}\n"
-            f"        A bare name is an alias an installed kit publishes. {move}\n"
-            f"        Or name the code directly, which needs no declaration:  "
-            f"newt {command} --source {example}"
+            f"\n"
+            f"    {headline}\n"
+            f"\n"
+            f"        A bare name is an alias an installed kit publishes. {move}"
+            f"{alternative}"
         )
     raise SourceNotResolved(
         f"newt {command}: {origin} = {name!r}. {noticed}\n"
-        f"        You did not type this — it came from that file. {move}\n"
-        f"        Or name the code directly, which needs no declaration:  "
-        f"newt {command} --source {example}"
+        f"\n"
+        f"    {headline}\n"
+        f"\n"
+        f"        You did not type this — it came from that file. {move}"
+        f"{alternative}"
     )
 
 
@@ -515,13 +571,15 @@ def resolve_spec(
         raise SourceNotResolved(
             f"newt {command}: more than one source is declared for {verb}, and your rig config "
             f"names no default.\n"
-            f"        Declared for {verb}:  {_offered(entries)}\n"
-            f"        Pick one now:  newt {command} --source {entries[0][0]}\n"
+            f"\n"
+            f"    newt {command} --source {entries[0][0]}\n"
+            f"\n"
+            f"        That picks one for now. Declared for {verb}:  {_offered(entries)}\n"
             f"        Or declare a default, once, in {path}:  "
             f'[{SOURCES_TABLE}]  {verb} = "{entries[0][0]}"'
         )
 
-    noticed, move = _registry_state(verb, command)
+    noticed, move, headline, alternative = _next_move(verb, command, example)
 
     if not have_config:
         # Cause 1: nothing given, nothing to read, nothing declared for this
@@ -533,31 +591,40 @@ def resolve_spec(
         raise SourceNotResolved(
             f"newt {command}: no source to run. --source was not given, and there is no config "
             f"file at {path} ({provenance}). {noticed}\n"
+            f"\n"
+            f"    {headline}\n"
+            f"\n"
             f"        {move}\n"
             f"        Or declare the factory once:\n"
             f"            [{SOURCES_TABLE}]\n"
             f'            {verb} = "{example}"\n'
-            f"        in {path}, and `newt {command}` is all you ever type again.\n"
-            f"        Or pass it this once: newt {command} --source {example}"
+            f"        in {path}, and `newt {command}` is all you ever type again."
+            f"{alternative}"
         )
 
     # Cause 2: the file was found and read, and it declares nothing for *this*
     # verb. Naming which verbs it does declare is the difference between a
-    # guess and a fix.
+    # guess and a fix — and when it declares nothing at all, that is the whole
+    # sentence. It used to be two ("declares no source for 'rest'. It has no
+    # [sources] table at all."), which is the same absence twice and the tone
+    # this card was filed for: the file is empty of sources, so of course it has
+    # none for this verb.
     others = ", ".join(sorted(declared)) if declared else None
-    has = (
-        f"It declares: {others}."
+    found = (
+        f"declares no source for {verb!r}. It declares: {others}."
         if others
-        else f"It has no [{SOURCES_TABLE}] table at all."
+        else f"has no [{SOURCES_TABLE}] table."
     )
     raise SourceNotResolved(
-        f"newt {command}: your rig config at {path} ({provenance}) declares no source for "
-        f"{verb!r}. {has} {noticed}\n"
+        f"newt {command}: your rig config at {path} ({provenance}) {found} {noticed}\n"
+        f"\n"
+        f"    {headline}\n"
+        f"\n"
         f"        {move}\n"
-        f"        Add the line to that file:\n"
+        f"        Or add the line to that file:\n"
         f"            [{SOURCES_TABLE}]\n"
-        f'            {verb} = "{example}"\n'
-        f"        Or pass it this once: newt {command} --source {example}"
+        f'            {verb} = "{example}"'
+        f"{alternative}"
     )
 
 
