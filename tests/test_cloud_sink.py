@@ -683,6 +683,98 @@ def test_put_stops_retrying_once_the_signed_url_expired(monkeypatch):
     assert "after 3 attempts" not in msg  # distinct from the exhausted-stall message
 
 
+# --- Rule 12: a refused signed PUT has four causes, and four strings --------------------------
+
+def _refusal(code, reason, gcs_code):
+    """One refused-PUT message, with the path and failure note a real caller would pass."""
+    from newt.recording._cloud_sink import _rejected_upload_message
+
+    return _rejected_upload_message(
+        code, reason, gcs_code,
+        "episode_deadbeef/cameras/front/color.mp4",
+        "episode remains on local disk, untouched.",
+    )
+
+
+def test_the_four_refused_upload_causes_never_share_one_string():
+    """A refused signed PUT is the failure a developer meets at the worst moment — mid-upload,
+    with a dataset name already spent. The four causes send them four different places: wait
+    for a better link (expired), file a bug against US (bad signature), pick a new name
+    (write-once collision), or tell us what storage said (unrecognised). Sharing a string
+    between any two of those points someone at the wrong fix, so assert pairwise distinctness
+    AND that each message names its own cause, its own file, and what's still on disk.
+    """
+    expired = _refusal(400, "Bad Request", "ExpiredToken")
+    signature = _refusal(403, "Forbidden", "SignatureDoesNotMatch")
+    collision = _refusal(403, "Forbidden", "AccessDenied")
+    unknown = _refusal(412, "Precondition Failed", "PreconditionFailed")
+
+    messages = {
+        "expired url": expired,
+        "our bad signature": signature,
+        "write-once collision": collision,
+        "unrecognised": unknown,
+    }
+    labels = list(messages)
+    for i, a in enumerate(labels):
+        for b in labels[i + 1:]:
+            assert messages[a] != messages[b], f"{a!r} and {b!r} share one string (Rule 12)"
+
+    # Each names ITS OWN cause, not a hedge covering several.
+    assert "expired" in expired and "stronger connection" in expired
+    assert "signature didn't verify" in signature
+    assert "That is ours" in signature, "a malformed URL we minted is our fault, and must say so"
+    assert "already exists at that name" in collision and "write-once" in collision
+    assert "don't recognise" in unknown and "PreconditionFailed" in unknown
+    assert "retrying won't clear it" in unknown
+
+    # Every one of them names the file and leaves the developer knowing their data is intact.
+    for label, text in messages.items():
+        assert "episode_deadbeef/cameras/front/color.mp4" in text, f"{label} names no file"
+        assert "episode remains on local disk, untouched." in text, f"{label} drops the note"
+
+
+def test_every_gcs_code_the_module_lists_reaches_its_own_branch():
+    """The branch keys off frozensets of GCS codes, so adding a code to a set without a
+    branch to catch it (or to the wrong set) silently reroutes a developer to the wrong fix.
+    Drive the real constants rather than a copy: this fails when the sets and the branches
+    drift apart, which a hand-written list of codes could not.
+    """
+    from newt.recording._cloud_sink import _GCS_COLLISION_CODES, _GCS_EXPIRED_CODES
+
+    assert _GCS_EXPIRED_CODES and _GCS_COLLISION_CODES  # the sets aren't empty
+    assert not (_GCS_EXPIRED_CODES & _GCS_COLLISION_CODES), (
+        "one code can't mean both an expired URL and a taken name"
+    )
+    for gcs_code in _GCS_EXPIRED_CODES:
+        assert "expired" in _refusal(403, "Forbidden", gcs_code), gcs_code
+    for gcs_code in _GCS_COLLISION_CODES:
+        message = _refusal(403, "Forbidden", gcs_code)
+        assert "already exists at that name" in message, gcs_code
+        assert "expired" not in message, gcs_code
+
+
+def test_an_unreadable_gcs_body_falls_back_to_the_status_without_inventing_a_cause():
+    """GCS doesn't always send a readable ``<Code>``. When it doesn't, the message leans on
+    the HTTP status we DO have (400 → expired, 403 → collision) and, for a status that names
+    nothing either, says plainly that storage told us nothing readable — rather than picking
+    the likeliest cause and stating it as fact (Rule 10). The two status fallbacks still lead
+    to different fixes, so they still get different strings.
+    """
+    expired_by_status = _refusal(400, "Bad Request", None)
+    collision_by_status = _refusal(403, "Forbidden", None)
+    nothing_known = _refusal(409, "Conflict", None)
+
+    assert "expired" in expired_by_status
+    assert "already exists at that name" in collision_by_status
+    assert expired_by_status != collision_by_status
+    assert "nothing readable" in nothing_known
+    assert nothing_known != expired_by_status and nothing_known != collision_by_status
+    # The status the server actually sent is in the string — the reader can check our reading.
+    assert "400 Bad Request" in expired_by_status
+    assert "403 Forbidden" in collision_by_status
+
+
 def test_put_timeout_scales_with_file_size(monkeypatch):
     """The PUT wall-clock budget is the constructor timeout as a floor, scaled up with file
     size at a generous floor throughput — so a big video gets the time a fixed 30s denied it."""
