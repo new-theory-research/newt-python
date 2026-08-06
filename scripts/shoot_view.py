@@ -4,7 +4,11 @@ The measuring instrument, not part of the product. It exists because the only
 honest answer to "does the page render the cameras and the robot, and is it the
 lean layout rather than Rerun's application" is a picture somebody looked at.
 
-    python scripts/shoot_view.py --url http://localhost:9099/ --out /tmp/shots --shots 3
+    uv run --with playwright python scripts/shoot_view.py \\
+        --url http://localhost:9099/ --out /tmp/shots --shots 3
+
+Playwright is not a dependency of this SDK and must not become one — it downloads
+a browser. It is brought in for the run and left there.
 
 Out comes one PNG per shot plus every console message and page error the browser
 emitted, verbatim — a paraphrase of a browser error is not a receipt.
