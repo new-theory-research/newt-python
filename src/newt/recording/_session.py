@@ -324,6 +324,19 @@ class Session:
         self._streaming = True
         self._start_loops()
 
+    @property
+    def camera_failure(self) -> tuple[str, Exception] | None:
+        """(cause, exception) if the camera bridge stopped answering, else None.
+
+        The twin of ``observer_failures()`` for the first sink rather than the
+        second. ``end_episode(keep=True)`` already refuses on this, loudly; this
+        property is for a frontend that wants to say so *before* somebody spends
+        another three minutes recording into a session whose cameras died. It
+        reports only what the capture loop actually observed — there is no probe
+        here, and a camera nobody has read from yet is neither healthy nor broken.
+        """
+        return self._camera_failure
+
     def observer_failures(self) -> list[tuple[str, Exception]]:
         """(observer name, exception) for every observer dropped mid-session.
 
@@ -384,33 +397,76 @@ class Session:
 
     # --- episode lifecycle --------------------------------------------------
 
-    def start_episode(self) -> str:
+    def start_episode(
+        self,
+        *,
+        task: str | None = None,
+        dest: str | Path | None = None,
+        tags: list[str] | tuple[str, ...] | None = None,
+    ) -> str:
         """Open a fresh episode and start the capture loop. Returns the episode id.
 
         The loop polls the source at the state rate on a background thread, writing
         every read into the in-flight episode and counting every dropped channel.
+
+        **What a take may change, and what it may not.** The three keyword
+        arguments override, for this episode only, the three things that describe
+        what a take *is about* and *where it lands*: its language task, its output
+        directory, its tags. Everything else — the source, the cameras it opened,
+        the descriptor, the state rate — is the session's contract with the
+        hardware and is deliberately not overridable here. Changing those would
+        mean re-opening hardware mid-session, which drops the reads a live view is
+        drawing from; changing these three does not touch the rig at all.
+
+        Passing nothing keeps the session's own values, so every existing caller
+        behaves exactly as before. An empty ``dest`` directory is created on first
+        use by the writer, which is why a page can name a dataset that does not
+        exist yet without a separate create step.
         """
         if self._closed:
             raise RuntimeError("Session is closed; construct a new Session to record again.")
         if self._writer is not None:
             raise RuntimeError("An episode is already recording; end it before starting another.")
 
-        from newt.recording._writer import EpisodeWriter
+        from newt.recording._writer import DEFAULT_TAGS, EpisodeWriter
 
+        episode_dest = Path(dest) if dest is not None else self._dest
         self._writer = EpisodeWriter(
-            dest_root=self._dest,
-            task_name=self._task,
+            dest_root=episode_dest,
+            task_name=task if task is not None else self._task,
             state_frequency=self._state_hz,
             cameras=self._cameras,
             descriptor=self.descriptor,
             camera_stub_reason=self._camera_stub_reason,
             author=self._author,
             license=self._license,
+            tags=tuple(tags) if tags is not None else DEFAULT_TAGS,
         )
         self._camera_failure = None
         self._start_loops()
         self._notify("on_episode", "started", self._writer.episode_id)
         return self._writer.episode_id
+
+    def retag_episode(self, tags: list[str] | tuple[str, ...]) -> None:
+        """Replace the in-flight episode's tags before it commits.
+
+        A person knows what a take was after watching it, not before starting it,
+        so the tags a take ends with are the ones worth writing. They go into
+        ``episode.json`` with the rest of the episode config — one file, one truth
+        — rather than into a sidecar that a later reader has to know to look for.
+
+        Refuses when nothing is recording: a tag with no episode to belong to would
+        otherwise be accepted and silently dropped.
+        """
+        with self._lock:
+            writer = self._writer
+            if writer is None:
+                raise RuntimeError(
+                    "No episode is recording, so there is nothing to tag. Tags are "
+                    "written into the in-flight episode's own file; call this "
+                    "between start_episode() and end_episode()."
+                )
+            writer.tags = tuple(tags)
 
     def _capture_loop(self) -> None:
         """Poll the source at the state rate and write each read. The only place

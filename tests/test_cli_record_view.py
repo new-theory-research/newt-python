@@ -254,6 +254,13 @@ def test_the_json_frontend_emits_the_view_as_a_record_not_as_prose(fake_view, ca
     prose line carried: whether a body is being drawn. An agent that has to
     regex `[view] …` out of a stream to find the URL was handed a document, not
     an interface.
+
+    `control` and `page_dir` are here for the same reason `robot_drawn` is: they
+    change what the URL above *is*. An agent handed a link cannot tell by looking
+    whether that page can record into this session or only watch it, and a page
+    that can record is the difference between a viewer and a remote control. It is
+    asserted false here because this session was started without the flag — the
+    default is look-only and the event says so rather than staying silent.
     """
     _open_view(
         _Session(), _parse(["--task", "t", "--view", "--view-port", "9300"]), as_json=True
@@ -267,6 +274,8 @@ def test_the_json_frontend_emits_the_view_as_a_record_not_as_prose(fake_view, ca
         "url": "http://localhost:9300/",
         "network_url": "http://192.168.1.50:9300/",
         "robot_drawn": False,
+        "control": False,
+        "page_dir": None,
         "note": (
             "no robot drawn — this rig's source declares no description. "
             "Cameras and joint traces are live."

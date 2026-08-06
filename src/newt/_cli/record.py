@@ -93,6 +93,19 @@ def _usage() -> None:
     print("                  why there is no body. Needs: pip install \"newt[view]\"")
     print("  --view-port N   Port for that page (default: 9099). The stream it reads")
     print("                  takes the next port up.")
+    print("  --control       Let the page start and stop takes, not just watch them.")
+    print("                  Adds four routes to the server --view already runs:")
+    print("                  POST /api/episode/start, POST /api/episode/stop,")
+    print("                  GET /api/session, GET /api/episodes. Without this flag")
+    print("                  they answer 404 and say why, so a plain --view stays a")
+    print("                  page that can only look. Off by default deliberately:")
+    print("                  the server binds every interface, so this is the")
+    print("                  difference between anyone on the network watching your")
+    print("                  session and anyone on the network recording into it.")
+    print("  --page-dir DIR  Serve an already-built page at / instead of the built-in")
+    print("                  one, which moves to /view so your page can embed it.")
+    print("                  Nothing is built here — point this at a build's output")
+    print("                  directory, the one with index.html in it.")
     print("  --teleop        TEMPORARY DOOR — record a demonstration: one embodiment")
     print("                  drives another and the same tick writes the episode.")
     print("                  The factory must declare it does both, and that is read")
@@ -127,6 +140,8 @@ def _parse(args: list[str]) -> dict:
         "teleop": False,
         "view": False,
         "view_port": None,
+        "control": False,
+        "page_dir": None,
     }
     flags = {
         "--simulate": "simulate",
@@ -134,6 +149,7 @@ def _parse(args: list[str]) -> dict:
         "--json": "json",
         "--teleop": "teleop",
         "--view": "view",
+        "--control": "control",
     }
     # option -> (key, converter)
     valued = {
@@ -146,6 +162,7 @@ def _parse(args: list[str]) -> dict:
         "--license": ("license", str),
         "--drop-every": ("drop_every", int),
         "--view-port": ("view_port", int),
+        "--page-dir": ("page_dir", str),
     }
     i = 0
     while i < len(args):
@@ -1008,9 +1025,16 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
     bare ``[view] …`` lines ahead of the first record would break the parse of the
     caller that took that promise literally — which is every caller worth having.
     """
-    from newt.live import DEFAULT_PORT, LiveView
+    from newt.live import DEFAULT_PORT, LiveView, SessionControl
 
     port = opts["view_port"] or DEFAULT_PORT
+    control = None
+    if opts["control"]:
+        # No sink factory: the Session's own LocalSink already put the episode where
+        # it belongs, and a second delivery to the same place would be one delivery
+        # too many. A caller with a store to push to builds this same object with a
+        # `sink_for` and gets the push states; `newt record` is not that caller.
+        control = SessionControl(session, dataset_root=opts["dest"])
     view = LiveView(
         descriptor=session.descriptor,
         task=opts["task"],
@@ -1019,6 +1043,8 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
         declaration=session.view_declaration,
         port=port,
         grpc_port=port + 1,
+        control=control,
+        page_dir=opts["page_dir"],
     )
     view.start()
     session.attach_observer(view)
@@ -1030,6 +1056,8 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
             "url": local,
             "network_url": shareable,
             "robot_drawn": robot_drawn,
+            "control": bool(control),
+            "page_dir": opts["page_dir"],
             "note": None if robot_drawn else _NO_ROBOT_NOTE,
         })
     else:
@@ -1039,6 +1067,16 @@ def _open_view(session, opts: dict, *, as_json: bool = False):
             print(f"[view] {shareable}  (from another machine on this network)")
         if not robot_drawn:
             print(f"[view] {_NO_ROBOT_NOTE}")
+        if control:
+            # Said out loud, every time. The flag was typed once and the session runs
+            # for hours; whoever walks up to this terminal should be able to read off
+            # it that the page on the network can record, not just watch.
+            print(
+                "[view] this page can start and stop takes — anyone who can open it "
+                "can record into this session"
+            )
+        if opts["page_dir"]:
+            print(f"[view] serving {opts['page_dir']} at /; the live view is at /view")
     return view
 
 
@@ -1057,6 +1095,33 @@ def cmd_record(args: list[str]) -> int:
     if not opts["task"]:
         print("newt record: --task is required (the language prompt recorded per episode).", file=sys.stderr)
         print("        Fix: newt record --task \"pick up the cup\" --simulate", file=sys.stderr)
+        return 1
+
+    # Both of these only exist as behaviour of the server --view runs. Passing one
+    # without it would otherwise be accepted and do nothing, which is the silent
+    # no-op Rule 10 is about — and the two get different sentences because a person
+    # who asked for control and a person who built a page have different next steps.
+    if opts["control"] and not opts["view"]:
+        print(
+            "[newt record] --control without --view: there is no page to control "
+            "this session from. --control adds routes to the server --view runs, "
+            "and without --view that server is never started.",
+            file=sys.stderr,
+        )
+        print("        Fix: add --view.", file=sys.stderr)
+        return 1
+    if opts["page_dir"] and not opts["view"]:
+        print(
+            "[newt record] --page-dir without --view: nothing would serve that "
+            "directory. --page-dir replaces the page the --view server hands out, "
+            "and without --view there is no server and no page.",
+            file=sys.stderr,
+        )
+        print(
+            "        Fix: add --view. Add --control too if that page is meant to "
+            "start and stop takes rather than watch them.",
+            file=sys.stderr,
+        )
         return 1
 
     if opts["teleop"]:
