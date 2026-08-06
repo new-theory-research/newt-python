@@ -12,6 +12,12 @@ The capture loop runs on a background thread between ``start_episode()`` and
 read into the in-flight episode. A frontend that wants a live readout calls
 ``status()`` on its own cadence; it never touches the loop or the writer.
 
+One Session does not poll: ``state_pushed=True`` says the caller's own loop is
+the clock and hands each tick over through ``feed_state()``. That exists for the
+loop that is already driving the hardware it would otherwise be polled for —
+single-client arms cannot answer two clocks — and it changes who calls, never
+what is written.
+
 Generalized from rebot-bench's ``record_session.py``: the rhythm, the dropped-
 frame report, the kill-leaves-no-dir guarantee, and the simulate-via-fake-source
 pattern are all preserved — lifted out of the keyboard script into the library so
@@ -21,10 +27,15 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from newt.recording._seam import RecordingSource, StateDescriptor
+from newt.recording._seam import (
+    CameraCaptureFailed,
+    RecordingSource,
+    StateDescriptor,
+    camera_failure_message,
+)
 from newt.recording._sink import LocalSink, Sink
 
 # Community-native rate: Molmo extraction is 30fps/30Hz; this is the spec
@@ -44,6 +55,11 @@ class SessionStatus:
     target: int | None
     last_positions: dict[str, list[float]] | None
     closed: bool
+    # Per-camera counts for the in-flight episode. Empty on a state-only session,
+    # which is what a frontend renders against — the camera lines appear only for
+    # a rig that actually declared cameras.
+    frame_counts: dict[str, int] = field(default_factory=dict)
+    dropped_frames: dict[str, int] = field(default_factory=dict)
 
 
 class Session:
@@ -71,6 +87,7 @@ class Session:
         camera_stub_reason: str | None = None,
         target: int | None = None,
         sink: Sink | None = None,
+        state_pushed: bool = False,
     ) -> None:
         if not hasattr(source, "read_state") or not hasattr(source, "descriptor"):
             raise TypeError(
@@ -85,10 +102,25 @@ class Session:
         self._target = target
         self._camera_stub_reason = camera_stub_reason
         self._sink = sink if sink is not None else LocalSink(self._dest)
+        # Who owns the state clock. False (the default, and every existing
+        # caller) is this Session: start_episode spins the capture thread and it
+        # polls the source at the state rate. True means the caller's own loop is
+        # the clock and pushes each tick through feed_state — the case where the
+        # same tick that drives an arm is the one that has to record it, and two
+        # clocks on single-client hardware are not an option.
+        self._state_pushed = state_pushed
 
         # Camera specs (CameraSpec instances) are accepted but state-only capture
         # is the default; the writer imports lazily, so we hold raw specs here.
-        self._cameras = list(cameras) if cameras else []
+        # A source that opened cameras declares them itself — adopting them here
+        # (rather than in a frontend) is what keeps `newt record` a skin with no
+        # camera flag and no camera identity.
+        self._cameras = list(cameras) if cameras else list(getattr(source, "cameras", None) or [])
+        # Whether the source polls itself (a rig bridge) or the caller pushes with
+        # feed_frame. Only a source bridge gets a camera thread.
+        self._reads_frames = callable(getattr(source, "read_frames", None))
+        self._check_camera_bridge(source, declared_by_caller=bool(cameras))
+        self._check_cameras_are_declarable()
 
         # Provenance — declared, never verified (local-first capture).
         from newt.recording._writer import DEFAULT_AUTHOR, DEFAULT_LICENSE
@@ -98,13 +130,75 @@ class Session:
 
         self._writer = None  # set during an episode
         self._loop_thread: threading.Thread | None = None
+        self._camera_thread: threading.Thread | None = None
+        self._camera_failure: "tuple[str, Exception] | None" = None
         self._stop_loop = threading.Event()
         self._lock = threading.Lock()
         self._kept = 0
         self._last_positions: dict[str, list[float]] | None = None
         self._last_state_count = 0
         self._last_dropped_state = 0
+        self._last_frame_counts: dict[str, int] = {}
+        self._last_dropped_frames: dict[str, int] = {}
         self._closed = False
+
+    def _check_camera_bridge(self, source, *, declared_by_caller: bool) -> None:
+        """Cameras and the read that fills them are one contract — refuse half of it.
+
+        Both halves missing is the common case (state-only capture) and is fine.
+        Either half alone would record something no one asked for: declared cameras
+        with no reader means empty video files and an episode.json naming cameras
+        that never delivered; a reader with nothing declared means frames pulled
+        off hardware and thrown away while the episode claims to be state-only.
+
+        The contract is about the SOURCE's two halves, so it is checked only when
+        the source is the one declaring cameras. A caller that passes ``cameras=``
+        explicitly owns its own bridge and pushes through ``feed_frame`` — the
+        pattern that method's docstring has always described — and asking that
+        caller for a ``read_frames()`` would demand a second, racing bridge.
+        """
+        has_reader = self._reads_frames
+        if self._cameras and not has_reader and not declared_by_caller:
+            raise TypeError(
+                f"This source declares {len(self._cameras)} camera(s) "
+                f"({', '.join(str(c.id) for c in self._cameras)}) but has no "
+                "read_frames() to deliver their frames.\n"
+                "Yours: a source that opens cameras owns reading them — the library "
+                "never opens or polls a camera itself.\n"
+                "Fix: add `read_frames(self) -> dict[camera id, frame | None]` to the "
+                "source, or stop declaring `cameras` and record state only."
+            )
+        if has_reader and not self._cameras:
+            raise TypeError(
+                "This source has read_frames() but declares no cameras, so every "
+                "frame it reads would be discarded and the episode would claim to "
+                "be state-only.\n"
+                "Yours: `cameras` is what the episode declares and what the writer "
+                "opens encoders for; read_frames() alone declares nothing.\n"
+                "Fix: expose `cameras` as a list of newt.recording.CameraSpec — one "
+                "per camera the source actually opened — or drop read_frames()."
+            )
+
+    def _check_cameras_are_declarable(self) -> None:
+        """Refuse a camera set the episode cannot honestly describe.
+
+        ``episode.json``'s ``camera_config`` carries ONE width, height and fps for
+        the whole set (v0.0.3), so a rig whose cameras disagree would be described
+        by whichever one came first and described wrongly for the rest. That is the
+        identity-extrinsics failure in a different costume: a shaped-right number
+        standing in for one nobody measured. Refuse at construction — before an
+        operator spends three minutes recording something the file will misdescribe.
+
+        This does not decide the format question (per-camera dimensions); it
+        refuses to answer it by accident.
+        """
+        if len(self._cameras) < 2:
+            return
+        shapes = {(c.width, c.height, c.fps) for c in self._cameras}
+        if len(shapes) == 1:
+            return
+        declared = ", ".join(f"{c.id}={c.width}x{c.height}@{c.fps}fps" for c in self._cameras)
+        raise TypeError(camera_failure_message("resolution_not_declarable", declared))
 
     @property
     def last_episode_counts(self) -> tuple[int, int]:
@@ -112,6 +206,13 @@ class Session:
         frontend reports these after end_episode(), since the live status() drops
         to zero once nothing is recording."""
         return self._last_state_count, self._last_dropped_state
+
+    @property
+    def last_episode_frames(self) -> tuple[dict[str, int], dict[str, int]]:
+        """(frames written, frames dropped) per camera id for the most recently
+        ended episode. Both empty for a state-only session — a frontend renders
+        the camera lines only when there were cameras."""
+        return dict(self._last_frame_counts), dict(self._last_dropped_frames)
 
     # --- the descriptive preflight (reverse-contract courtesy) --------------
 
@@ -193,18 +294,30 @@ class Session:
             license=self._license,
         )
         self._stop_loop.clear()
-        self._loop_thread = threading.Thread(
-            target=self._capture_loop, name="newt-record-capture", daemon=True
-        )
-        self._loop_thread.start()
+        self._camera_failure = None
+        if not self._state_pushed:
+            self._loop_thread = threading.Thread(
+                target=self._capture_loop, name="newt-record-capture", daemon=True
+            )
+            self._loop_thread.start()
+        if self._cameras and self._reads_frames:
+            # Its own thread on purpose: a camera read blocks for as long as the
+            # hardware takes, and the state loop's rhythm is not this card's to
+            # move. Started only when the source declared cameras, so the
+            # state-only path runs exactly the threads it ran before — and never
+            # for a caller-owned bridge, which pushes through feed_frame itself.
+            self._camera_thread = threading.Thread(
+                target=self._camera_loop, name="newt-record-cameras", daemon=True
+            )
+            self._camera_thread.start()
         return self._writer.episode_id
 
     def _capture_loop(self) -> None:
         """Poll the source at the state rate and write each read. The only place
-        the capture rhythm lives. Cameras: opened captures (if any) are read by
-        the frontend's camera bridge via ``feed_frame`` — state capture is here,
-        camera frame pulls are pushed in to keep hardware-IO out of the library's
-        loop thread when no cameras are wired (the common case)."""
+        the state capture rhythm lives, and cameras do not enter it: a source that
+        declared cameras is read by ``_camera_loop`` on its own thread, and a
+        frontend that owns its own bridge pushes through ``feed_frame``. Either
+        way the state rate is the state rate."""
         while not self._stop_loop.is_set():
             ts_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
             channels = self._source.read_state()
@@ -222,6 +335,97 @@ class Session:
                     self._last_positions = shown
             time.sleep(self._period_s)
 
+    def _camera_loop(self) -> None:
+        """Pull one frame per declared camera from the source's bridge and write it.
+
+        Runs only when the source declared cameras. The library still opens no
+        camera — it asks the source for the next frame exactly as the state loop
+        asks it for the next joint reading. A camera that returns nothing this read
+        is a counted drop; nothing is duplicated, interpolated, or zero-filled to
+        keep a count even.
+
+        A read that raises is the camera having stopped answering mid-episode: the
+        loop stops and records the failure, and ``end_episode(keep=True)`` refuses
+        rather than committing an episode whose video quietly ends early.
+        """
+        period = 1.0 / max(1, max(int(getattr(c, "fps", 0) or 0) for c in self._cameras))
+        cam_ids = [c.id for c in self._cameras]
+        next_at = time.monotonic()
+        while not self._stop_loop.is_set():
+            try:
+                frames = self._source.read_frames()
+            except Exception as exc:
+                self._fail_cameras("stopped_answering", exc)
+                return
+            # Timestamped after the read returns: that is when the frame arrived,
+            # and a blocking read would otherwise stamp it early by its own duration.
+            ts_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            try:
+                with self._lock:
+                    if self._writer is None:
+                        return
+                    for cam_id in cam_ids:
+                        frame = frames.get(cam_id)
+                        if frame is None:
+                            self._writer.note_dropped_frame(cam_id)
+                            continue
+                        self._writer.write_frame(cam_id, frame, ts_ns)
+            except Exception as exc:
+                self._fail_cameras("encoder_refused", exc)
+                return
+            next_at += period
+            time.sleep(max(0.0, next_at - time.monotonic()))
+
+    def _fail_cameras(self, cause: str, exc: Exception) -> None:
+        """Record why the camera bridge stopped and stop capturing. The episode is
+        refused at ``end_episode``, not here — this runs on the camera thread, and
+        a thread that tears down the in-flight episode underneath the state loop is
+        a race, not a refusal."""
+        self._camera_failure = (cause, exc)
+        self._stop_loop.set()
+
+    def feed_state(self, channels: dict, ts_ns: int | None = None) -> None:
+        """Push one tick's state into the in-flight episode. The state twin of
+        ``feed_frame``, and the same reason: the loop that already holds the
+        hardware is the one that reads it.
+
+        ``channels`` is what ``read_state()`` returns — one entry per declared
+        channel, ``None`` where that channel produced nothing this tick. A
+        ``None`` is a counted drop, exactly as it is on the polled path: nothing
+        is repeated, interpolated or zero-filled to keep the count even.
+
+        ``ts_ns`` is the tick's own timestamp, passed in rather than taken here,
+        because the honest answer to *when was this state true* is when the tick
+        that produced it ran — not when it reached the writer.
+
+        Only a Session constructed with ``state_pushed=True`` accepts this. On a
+        polled Session the capture thread is already reading the source, and a
+        second writer on a second clock would interleave two rhythms into one
+        episode with nothing in the file saying so.
+        """
+        if not self._state_pushed:
+            raise RuntimeError(
+                "feed_state() on a Session that polls its source itself.\n"
+                "Yours: this Session was constructed without state_pushed=True, so its "
+                "capture thread is already reading the source at the state rate; these "
+                "pushed frames would be a second clock writing into the same episode.\n"
+                "Fix: construct the Session with state_pushed=True when your own loop "
+                "owns the tick, or stop calling feed_state and let the Session poll."
+            )
+        with self._lock:
+            if self._writer is None:
+                return
+            ts = ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
+            shown: dict[str, list[float]] = {}
+            for key, state in channels.items():
+                if state is None:
+                    self._writer.note_dropped_state()
+                    continue
+                self._writer.write_state(key, state, ts)
+                shown[key] = list(state.positions)
+            if shown:
+                self._last_positions = shown
+
     def feed_frame(self, cam_id: str, frame, ts_ns: int | None = None) -> None:
         """Push one camera frame into the in-flight episode. A frontend that owns
         a camera bridge calls this; the library never opens a camera itself (no
@@ -232,6 +436,15 @@ class Session:
             self._writer.write_frame(
                 cam_id, frame, ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
             )
+
+    def _join_loops(self) -> None:
+        """Wait for both capture threads to leave the writer alone. Called before
+        the writer is finalized or abandoned — a frame written after the encoder's
+        pipe is closed is a broken pipe, not a frame."""
+        for thread in (self._loop_thread, self._camera_thread):
+            if thread is not None:
+                thread.join(timeout=5.0)
+        self._camera_thread = None
 
     def end_episode(self, keep: bool) -> "Path | None":
         """Stop the capture loop and either keep or discard the episode.
@@ -245,8 +458,7 @@ class Session:
             raise RuntimeError("No episode is recording; call start_episode() first.")
 
         self._stop_loop.set()
-        if self._loop_thread is not None:
-            self._loop_thread.join(timeout=5.0)
+        self._join_loops()
 
         with self._lock:
             writer = self._writer
@@ -256,10 +468,23 @@ class Session:
             # nothing is recording).
             self._last_state_count = writer.state_count
             self._last_dropped_state = writer.dropped_state
+            self._last_frame_counts = writer.frame_counts
+            self._last_dropped_frames = writer.dropped_frames
 
         if not keep:
             writer.abandon()
             return None
+
+        if self._camera_failure is not None:
+            # The video ends before the episode does. Committing it would hand
+            # someone a file whose joints run three minutes and whose camera stops
+            # at forty seconds, with nothing in the episode saying so.
+            cause, exc = self._camera_failure
+            self._camera_failure = None
+            writer.abandon()
+            raise CameraCaptureFailed(
+                cause, camera_failure_message(cause, f"{type(exc).__name__}: {exc}")
+            )
 
         duration_s = writer.state_count * self._period_s
         path = writer.keep(duration_s)
@@ -284,24 +509,36 @@ class Session:
                 target=self._target,
                 last_positions=self._last_positions,
                 closed=self._closed,
+                frame_counts=w.frame_counts if w is not None else {},
+                dropped_frames=w.dropped_frames if w is not None else {},
             )
 
     def dropped_report(self) -> "str | None":
         """A human line summarizing dropped reads for the in-flight episode, or
         None when nothing is recording or nothing dropped. A frontend prints it;
-        the report itself is computed here so every frontend says the same thing."""
+        the report itself is computed here so every frontend says the same thing.
+
+        Camera drops are reported per camera and never rolled into the state
+        total: a rig that lost a tenth of one camera's frames and none of its
+        joints has a specific problem, and one blended percentage hides it."""
         with self._lock:
             w = self._writer
             if w is None:
                 return None
+            parts: list[str] = []
             total = w.state_count + w.dropped_state
-            if w.dropped_state == 0 or total == 0:
+            if w.dropped_state and total:
+                pct = 100.0 * w.dropped_state / total
+                parts.append(f"{w.dropped_state}/{total} state reads dropped ({pct:.1f}%)")
+            dropped_frames = w.dropped_frames
+            frame_counts = w.frame_counts
+            for cam_id, dropped in sorted(dropped_frames.items()):
+                reads = frame_counts.get(cam_id, 0) + dropped
+                pct = 100.0 * dropped / reads if reads else 0.0
+                parts.append(f"camera {cam_id}: {dropped}/{reads} frames dropped ({pct:.1f}%)")
+            if not parts:
                 return None
-            pct = 100.0 * w.dropped_state / total
-            return (
-                f"dropped-frame report — episode {w.episode_id}: "
-                f"{w.dropped_state}/{total} reads dropped ({pct:.1f}%)."
-            )
+            return f"dropped-frame report — episode {w.episode_id}: " + "; ".join(parts) + "."
 
     def kill(self) -> None:
         """Emergency teardown: abandon any in-flight episode (no partial dir),
@@ -309,8 +546,7 @@ class Session:
         kill key — exit code is the frontend's call (130 by convention)."""
         if self._writer is not None:
             self._stop_loop.set()
-            if self._loop_thread is not None:
-                self._loop_thread.join(timeout=5.0)
+            self._join_loops()
             with self._lock:
                 writer = self._writer
                 self._writer = None

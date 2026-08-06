@@ -19,6 +19,98 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 
+# --- the four ways the camera half of a recording fails ---------------------
+#
+# Four causes, four strings, one place. A reader who lands on one of these must
+# never be sent to fix a different problem, so the strings live together where
+# they can be read against each other (Rule 12).
+
+CAMERA_FAILURE_CAUSES = (
+    "will_not_open",
+    "stopped_answering",
+    "encoder_refused",
+    "resolution_not_declarable",
+)
+
+
+def camera_failure_message(cause: str, detail: str) -> str:
+    """The message for one camera failure cause. ``detail`` is the concrete
+    particulars — which camera, what the driver said, which shapes disagreed."""
+    if cause == "will_not_open":
+        return (
+            f"A camera the rig declared would not open: {detail}.\n"
+            "Yours: the camera never came up. A rig that quietly dropped it from "
+            "the list would have recorded a shorter episode and told no one, so "
+            "the whole run is refused instead.\n"
+            "Do now: nothing was recorded and no episode directory exists. Check "
+            "the camera is connected and not already held open by another process, "
+            "then run the same command again."
+        )
+    if cause == "stopped_answering":
+        return (
+            "A camera stopped answering part-way through the episode: the source's "
+            f"read_frames() raised ({detail}).\n"
+            "Yours: the camera or its driver quit mid-capture — the frames simply "
+            "stopped arriving, and nothing was substituted to cover the gap.\n"
+            "Do now: the episode was discarded, so nothing partial was written. "
+            "Check the camera's connection (a USB re-enumeration mid-run does this) "
+            "and record again."
+        )
+    if cause == "encoder_refused":
+        return (
+            f"The video encoder refused a frame part-way through the episode ({detail}).\n"
+            "Ours: the frame reached us and we could not encode it — most often a "
+            "frame whose size or pixel layout is not the one its camera declared.\n"
+            "Do now: the episode was discarded, so nothing partial was written. "
+            "Check that every frame read_frames() returns matches the width, height "
+            "and 3-channel bgr24 layout its CameraSpec declares."
+        )
+    if cause == "resolution_not_declarable":
+        return (
+            "The declared cameras do not agree on width, height and frame rate, so "
+            f"the episode cannot honestly declare one of each: {detail}.\n"
+            "Ours: NT episode v0.0.3 carries a single width/height/fps for the whole "
+            "camera set, so a mixed rig would be described by whichever camera came "
+            "first and described wrongly for every other one.\n"
+            "Do now: declare the cameras that share a shape (one camera is a valid "
+            "rig), or configure the rig so every declared camera streams at the same "
+            "width, height and frame rate. Per-camera dimensions are a change to the "
+            "episode format, not a setting."
+        )
+    # Never reached through the call sites above; kept so an added cause that
+    # forgets its string fails loudly instead of rendering an empty one.
+    raise AssertionError(f"no message written for camera failure cause {cause!r} ({detail})")
+
+
+class CameraOpenError(RuntimeError):
+    """A declared camera would not open — raised by a **source** during bring-up.
+
+    A source that opens cameras owns the failure when one of them does not come
+    up. Raising this (rather than returning a shorter ``cameras`` list) is what
+    keeps a hardware failure from becoming a silently state-only episode. The
+    library supplies the string so every rig says the same thing; it learns
+    nothing about the camera beyond the opaque id the source chose.
+    """
+
+    def __init__(self, camera_id: str, detail: str) -> None:
+        self.camera_id = camera_id
+        self.detail = detail
+        super().__init__(
+            camera_failure_message("will_not_open", f"camera {camera_id!r} — {detail}")
+        )
+
+
+class CameraCaptureFailed(RuntimeError):
+    """The camera bridge failed part-way through an episode, so the episode was
+    refused rather than committed with video that ends before its joints do.
+    Raised by ``Session.end_episode(keep=True)``; carries the cause key so a
+    frontend can route on it without matching on prose."""
+
+    def __init__(self, cause: str, message: str) -> None:
+        self.cause = cause
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class StateDescriptor:
     """The static shape of one embodiment's state stream, read by the Session and
@@ -70,6 +162,31 @@ class RecordingSource(Protocol):
     (counted by the Session, never swallowed). ``disable_all`` is the optional
     kill-switch hook (torque-off); a source with no actuation may omit it.
     ``close`` releases the connection; a source with nothing to release may omit it.
+
+    **Cameras are the same kind of optional member**, discovered by ``getattr`` the
+    way ``disable_all`` and ``close`` are — not part of the required surface, so a
+    state-only source implements nothing new. A source that captures video exposes
+    BOTH of:
+
+    ``cameras``
+        A list of :class:`newt.recording.CameraSpec` — one per camera the source
+        actually opened, with the id the source chose. The Session declares exactly
+        these in ``episode.json`` and opens one encoder per entry. A camera that
+        failed to open belongs nowhere in this list; refusing the whole run is the
+        source's call, and a source that quietly drops it from the list has turned
+        a hardware failure into a silently shorter episode.
+
+    ``read_frames()``
+        One read per declared camera, returned as ``{camera id: frame}`` where a
+        frame is an HxWx3 ``bgr24`` array. ``None`` (or an absent key) is a dropped
+        frame for that camera — counted, never substituted. The call may block as
+        the hardware blocks; it runs on its own thread and never delays state
+        capture.
+
+    The division of labor this expresses: **the source opens, reads and closes
+    cameras; the library encodes, timestamps and enforces the frame-count
+    invariant.** The library holds no camera identity — ids travel as opaque
+    strings the source chose, exactly as channel names already do.
     """
 
     descriptor: StateDescriptor
