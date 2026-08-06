@@ -132,6 +132,21 @@ def _resolve_key() -> str | None:
     return os.environ.get("NT_API_KEY") or read_api_key()
 
 
+def _key_source() -> str | None:
+    """Name where ``_resolve_key`` found the key — same precedence, re-derived.
+
+    A refused key has two causes with two different fixes, and they must not share
+    a sentence: a stale ``NT_API_KEY`` quietly outranking a good credentials file
+    is fixed by unsetting it, and no amount of running ``newt login`` will help.
+    A revoked stored key is fixed by logging in again. Told apart only here.
+    """
+    if os.environ.get("NT_API_KEY"):
+        return "NT_API_KEY"
+    if read_api_key():
+        return "~/.nt/credentials"
+    return None
+
+
 def _fetch_registry(console: str, api_key: str | None, *, timeout: float = 10.0) -> object:
     """GET the console's template registry. Sent with the key when there is one, so the
     response can include the private kits this developer is entitled to."""
@@ -298,15 +313,31 @@ def _say_console_unreachable(name: str, console: str, exc: RegistryUnavailable) 
 
 
 def _say_key_rejected(console: str, reason: str) -> None:
-    """One cause, one message, whichever call it surfaced on.
+    """One refusal, said once — but split by where the refused key came from.
 
     A key can be refused while listing templates or while downloading one. That is
-    the same problem with the same fix, so it gets the same sentence — but written
-    once, here, rather than typed out twice and left to drift apart.
+    the same problem with the same fix, so it is written once here rather than
+    typed out twice and left to drift apart. What it is NOT the same as is which
+    key got sent: naming the source is the difference between a developer running
+    `newt login` a fourth time and a developer running `unset NT_API_KEY` once.
     """
     print(f"newt create: the console rejected your key ({reason}).", file=sys.stderr)
+
+    if _key_source() == "NT_API_KEY":
+        print(
+            "        The key came from NT_API_KEY, which outranks ~/.nt/credentials — so if you "
+            "just ran `newt login`, that is NOT the key that was sent.",
+            file=sys.stderr,
+        )
+        print(
+            "        Fix: `unset NT_API_KEY` to use the key `newt login` stored, or set it to a "
+            "key that is still valid.",
+            file=sys.stderr,
+        )
+        return
+
     print(
-        "        The key was found and sent — it was refused.",
+        "        The key was read from ~/.nt/credentials and sent — it was refused.",
         file=sys.stderr,
     )
     print(
