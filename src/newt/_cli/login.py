@@ -205,7 +205,19 @@ def cmd_login(args: list[str]) -> int:
                 print("  Key written to:  ~/.nt/credentials  (mode 0600)")
                 print(f"  Key prefix:      {prefix}…")
                 print(f"  Device:          {device}")
-                print("\nThe SDK will read this key automatically. No NT_API_KEY needed.")
+                # "Logged in" and "this key is the one that gets used" are different
+                # claims, and NT_API_KEY is where they come apart: it outranks the file
+                # we just wrote, so every later command keeps sending the old key while
+                # this message says the new one is live. Saying so is the whole fix —
+                # a silently-ignored login reads to a developer as a console that
+                # rejects freshly-minted keys.
+                override = os.environ.get("NT_API_KEY")
+                if override and override != key:
+                    print("\n  NT_API_KEY is set in this shell, and it outranks ~/.nt/credentials.")
+                    print("  Until you clear it, newt keeps sending THAT key — not the one just written.")
+                    print("  Fix: run `unset NT_API_KEY` (this shell only), then try your command again.")
+                else:
+                    print("\nThe SDK will read this key automatically. No NT_API_KEY needed.")
                 print("To revoke this key, visit the console key management page.")
                 print("\nUsing Claude Code? Run `newt skill install` to equip it with the onboarding guide.")
             return 0
