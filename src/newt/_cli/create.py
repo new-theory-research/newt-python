@@ -557,7 +557,14 @@ def _first_free_suffixed_name(dest: pathlib.Path) -> pathlib.Path | None:
 
     Bounded so a directory somehow occupied at every suffix up to 999 does not
     spin forever; past that we have nothing concrete to suggest and say so.
+
+    ``dest.with_name`` raises ``ValueError`` when ``dest`` has no basename to
+    replace — ``.`` and ``/`` both resolve to an empty ``.name``. There is no
+    suffixed name to suggest for a path shaped like that, so it is treated the
+    same as suffixes 2-999 all being taken: no free name, caller falls back.
     """
+    if not dest.name:
+        return None
     for n in range(2, _MAX_SUFFIX_ATTEMPTS + 1):
         candidate = dest.with_name(f"{dest.name}-{n}")
         if not candidate.exists():
