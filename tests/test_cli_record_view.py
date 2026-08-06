@@ -261,6 +261,11 @@ def test_the_json_frontend_emits_the_view_as_a_record_not_as_prose(fake_view, ca
     that can record is the difference between a viewer and a remote control. It is
     asserted false here because this session was started without the flag — the
     default is look-only and the event says so rather than staying silent.
+
+    `push` is here on the same argument one level down: among pages that *can*
+    record, whether a kept take leaves the rig is the difference between a
+    collection run and a local rehearsal, and an agent cannot tell those apart by
+    looking at the URL either.
     """
     _open_view(
         _Session(), _parse(["--task", "t", "--view", "--view-port", "9300"]), as_json=True
@@ -275,6 +280,7 @@ def test_the_json_frontend_emits_the_view_as_a_record_not_as_prose(fake_view, ca
         "network_url": "http://192.168.1.50:9300/",
         "robot_drawn": False,
         "control": False,
+        "push": False,
         "page_dir": None,
         "note": (
             "no robot drawn — this rig's source declares no description. "
@@ -505,3 +511,147 @@ def test_the_two_refusals_are_not_the_same_string(
 
     assert plain and composed
     assert plain != composed
+
+
+# --------------------------------------------------------------------------- #
+# --push — where a kept take goes, and whether the page can say so
+# --------------------------------------------------------------------------- #
+
+def test_push_is_off_by_default_and_takes_stay_on_the_rig():
+    """The default sends nothing anywhere, and that has to be the default.
+
+    `--push` uploads what the cameras saw to an account. A flag that did that
+    without being typed would make every rehearsal a publication.
+    """
+    opts = _parse(["--task", "t", "--simulate"])
+
+    assert opts["push"] is False
+
+
+def test_push_parses():
+    opts = _parse(["--task", "t", "--view", "--control", "--push"])
+
+    assert opts["push"] is True
+
+
+def test_without_push_the_control_layer_is_given_no_destination(fake_view):
+    """No sink factory means every take reports `local-only` and names where it is.
+
+    This is the honest default rather than an oversight: the Session's own
+    LocalSink already committed the episode, and a second delivery to the same
+    directory would be one delivery too many.
+    """
+    _open_view(_Session(), _parse(["--task", "t", "--view", "--control"]))
+
+    control = _FakeView.instances[-1].kwargs["control"]
+    assert control is not None
+    assert control._sink_for is None
+    assert control._pushes is None
+
+
+def test_push_gives_the_control_layer_a_sink_per_dataset(fake_view):
+    """One sink per dataset name, not one per session.
+
+    NT's store is a namespace per dataset and refuses a name it has already seen,
+    so a session recording into two datasets that shared one sink would be wrong
+    at the second one. The factory shape is what makes that impossible.
+    """
+    _open_view(_Session(), _parse(["--task", "t", "--view", "--control", "--push"]))
+
+    control = _FakeView.instances[-1].kwargs["control"]
+    assert control._sink_for is not None
+    assert control._pushes is not None
+
+
+def test_push_builds_a_cloud_sink_named_for_the_dataset(fake_view, monkeypatch):
+    """The dataset the take names is the namespace the episode lands in.
+
+    Asserted through the factory rather than through a live upload: what matters
+    here is that the name travels, and a sink built for the wrong dataset would
+    put a session's episodes in somebody else's namespace.
+    """
+    import newt.recording
+
+    built = []
+
+    class _Sink:
+        def __init__(self, dataset, **kwargs):
+            built.append(dataset)
+
+        def deliver(self, episode_dir):
+            pass
+
+    monkeypatch.setattr(newt.recording, "NTCloudSink", _Sink)
+    _open_view(_Session(), _parse(["--task", "t", "--view", "--control", "--push"]))
+
+    control = _FakeView.instances[-1].kwargs["control"]
+    control._sink_for("kitchen-pours", "pour the water")
+
+    assert built == ["kitchen-pours"]
+
+
+def test_push_without_control_is_refused_and_says_why(capsys):
+    """Uploading with nothing to report the upload to is the silent half of a
+    feature, so it is refused rather than accepted.
+
+    The push state of each take is read off the session-control routes. Without
+    them the episodes would leave the rig and the operator would have no surface
+    that says whether any of them arrived.
+    """
+    rc = cmd_record(["--task", "t", "--simulate", "--view", "--push"])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert "--push without --control" in err
+    assert "Fix: add --control" in err
+
+
+def test_the_three_flag_refusals_are_three_different_strings(capsys):
+    """Rule 12 across the set: --control, --page-dir and --push each fail for
+    their own reason and each names its own next step.
+
+    One shared "that flag needs another flag" string would tell an operator
+    which flag was wrong and nothing about what to do instead.
+    """
+    cmd_record(["--task", "t", "--simulate", "--control"])
+    control = capsys.readouterr().err
+
+    cmd_record(["--task", "t", "--simulate", "--page-dir", "/tmp/nowhere"])
+    page_dir = capsys.readouterr().err
+
+    cmd_record(["--task", "t", "--simulate", "--view", "--push"])
+    push = capsys.readouterr().err
+
+    assert control and page_dir and push
+    assert len({control, page_dir, push}) == 3
+
+
+def test_a_terminal_reading_control_also_reads_where_takes_go(fake_view, capsys):
+    """Both branches are printed, so neither is inferred from silence.
+
+    The flags are typed once and the session runs for hours. Whoever walks up to
+    this terminal should be able to read off it both that the page can record and
+    whether what it records leaves the building.
+    """
+    _open_view(_Session(), _parse(["--task", "t", "--view", "--control"]))
+    local = capsys.readouterr().out
+
+    _open_view(_Session(), _parse(["--task", "t", "--view", "--control", "--push"]))
+    pushing = capsys.readouterr().out
+
+    assert "stay on this rig" in local
+    assert "--push" in local
+    assert "NT cloud namespace" in pushing
+    assert "stay on this rig" not in pushing
+
+
+def test_the_json_view_event_carries_push(fake_view, capsys):
+    _open_view(
+        _Session(),
+        _parse(["--task", "t", "--view", "--control", "--push"]),
+        as_json=True,
+    )
+
+    event = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert event["control"] is True
+    assert event["push"] is True
