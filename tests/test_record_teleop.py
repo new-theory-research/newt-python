@@ -37,13 +37,20 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import io
+import json
+import re
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from newt._cli.record import _EpisodeRecorder, _refuse_composed, cmd_record
 from newt.recording import JointState, Session, StateDescriptor
-from newt.teleop import TeleopError, run_session
+from newt.teleop import ActionRejected, TeleopError, run_session
+
+_ROOT = Path(__file__).resolve().parent.parent
+_SRC = _ROOT / "src"
 
 _HAVE_EXTRA = (
     importlib.util.find_spec("mcap") is not None
@@ -220,6 +227,41 @@ def _last(log: list[str], prefix: str) -> int:
 # Fidelity — the recorded action is the action that was sent
 # --------------------------------------------------------------------------- #
 
+class _RereadingSource(_ComposedSource):
+    """The optimization the fidelity test exists to catch.
+
+    Identical in every way an exit code or a frame count can see: same channels,
+    same joints, same one-frame-per-tick rhythm, no drops. The single difference
+    is that `read_state` takes a fresh look at the leader instead of reporting
+    the action it just handed over — a value of the right type, the right length
+    and the right magnitude, describing a moment nobody commanded. That is Rule
+    10's failure shape exactly, and it is the reason a fidelity test that cannot
+    fail is not a test.
+    """
+
+    def read_state(self):
+        self.state_reads += 1
+        self._sent = None
+        fresh = [float(self.tick) + 0.5 + i for i, _ in enumerate(JOINTS)]
+        return {
+            LEADER: JointState(positions=list(fresh)),
+            FOLLOWER: JointState(positions=list(fresh)),
+        }
+
+
+def _drove_what_it_recorded(source, recorder) -> bool:
+    """Every recorded frame equals the action `send_action` was handed for it."""
+    if len(source.sent) != len(recorder.frames):
+        return False
+    for action, (channels, _ts) in zip(source.sent, recorder.frames):
+        expected = [action[f"{n}.pos"] for n in JOINTS]
+        if channels[LEADER].positions != expected:
+            return False
+        if channels[FOLLOWER].positions != expected:
+            return False
+    return True
+
+
 def test_the_recorded_action_is_the_one_that_drove_the_follower(clock, capsys):
     """Every recorded leader frame is the action `send_action` received.
 
@@ -238,9 +280,31 @@ def test_the_recorded_action_is_the_one_that_drove_the_follower(clock, capsys):
     assert rc == 0
     assert len(source.sent) == 4
     assert len(recorder.frames) == 4
-    for action, (channels, _ts) in zip(source.sent, recorder.frames):
-        expected = [action[f"{n}.pos"] for n in JOINTS]
-        assert channels[LEADER].positions == expected
+    assert _drove_what_it_recorded(source, recorder)
+    # And the values are actually distinct tick to tick, so the check above is
+    # discriminating rather than comparing a constant against itself.
+    recorded = [tuple(channels[LEADER].positions) for channels, _ in recorder.frames]
+    assert len(set(recorded)) == 4
+
+
+def test_a_source_that_re_reads_the_leader_fails_the_fidelity_check(clock, capsys):
+    """The fidelity check can fail, and this is what failing looks like.
+
+    A re-reading source produces the same tick count, the same frame count, the
+    same exit code and zero drops — everything a summary line reports is
+    identical. The only thing that separates it from a faithful one is the
+    invariant above, which is why that invariant is the test and the counts are
+    not.
+    """
+    log: list[str] = []
+    source = _RereadingSource(log, ticks_before=4)
+    recorder = _Recorder(log)
+
+    rc = run_session(source, rate_hz=30, kill=_Kill(), recorder=recorder)
+
+    assert rc == 0
+    assert len(recorder.frames) == len(source.sent) == 4  # indistinguishable by count
+    assert not _drove_what_it_recorded(source, recorder)
 
 
 def test_the_leader_is_read_once_per_tick_and_the_state_comes_from_that_read(
@@ -620,6 +684,101 @@ def test_the_composed_refusal_never_offers_simulate_as_the_way_out(
     assert "--simulate" not in err
 
 
+def test_a_factory_that_cannot_be_found_says_the_rig_is_still_dark(
+    tmp_path, monkeypatch
+):
+    """Phase one failing and phase two failing are different problems.
+
+    An import that fails called nothing, so nothing is connected. A factory that
+    raises partway through was *in the middle of connecting and energizing* when
+    it did. Collapsing both into `[newt record] <exception>` leaves an operator
+    with no way to tell whether there is a rig standing energized in the next
+    room — which is the only part of either message they have to act on.
+    """
+    rc, err = _run_composed(["--source", "no_such_rig_module:make_demo"], monkeypatch)
+
+    assert rc == 1
+    assert "could not be found" in err
+    assert "nothing is connected and nothing is energized" in err
+    assert "newt rest" not in err  # there is nothing to put away
+
+
+_RAISING_FACTORY = """
+from newt.teleop import drives_and_records
+
+
+@drives_and_records
+def make_demo():
+    raise RuntimeError("leader answered, follower did not")
+"""
+
+
+def test_a_factory_that_raises_mid_bring_up_says_the_rig_may_be_up(
+    tmp_path, monkeypatch
+):
+    """The other half of the pair above, and the one that costs something.
+
+    This factory declared, so it was allowed to run — and it raised after
+    reaching one arm. The verb cannot know how far it got, so it says the one
+    true thing (this is the call that energizes) and names the recovery, rather
+    than reporting the exception and letting the operator assume the failure was
+    clean.
+    """
+    _rig_module(tmp_path, monkeypatch, "raising_rig", _RAISING_FACTORY)
+
+    rc, err = _run_composed(["--source", "raising_rig:make_demo"], monkeypatch)
+
+    assert rc == 1
+    assert "raised while building it" in err
+    assert "leader answered, follower did not" in err  # the kit's own words, kept
+    assert "newt rest" in err
+    assert "nothing is connected" not in err
+
+
+@pytest.mark.parametrize(
+    "args, marker",
+    [
+        (["--bimanual"], "--bimanual: that flag shapes the simulated joint stream"),
+        (["--drop-every", "5"], "--drop-every: that flag shapes the simulated"),
+        (["--target", "3"], "exactly one episode per run"),
+    ],
+)
+def test_a_flag_this_path_cannot_honour_is_refused_not_ignored(
+    args, marker, monkeypatch
+):
+    """Accepting a flag and doing nothing with it is the silent-default failure.
+
+    `--bimanual` and `--drop-every` only ever meant something to the simulated
+    stream; `--target` means something real and means it per-session, on a path
+    that runs one episode and exits. All three used to parse cleanly and vanish,
+    so a run with `--target 10` looked like it obeyed and stopped after one — a
+    green check that could not fail.
+    """
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+
+    rc = cmd_record(["--task", "t", "--teleop", "--source", "x:y", *args])
+
+    assert rc == 1
+    assert marker in err.getvalue()
+
+
+def test_the_two_simulate_only_flags_are_named_together_not_swallowed(monkeypatch):
+    """Both passed, both named. A refusal that mentions one leaves the other to
+    be discovered on the next run, which is two trips to the bench."""
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+
+    rc = cmd_record(
+        ["--task", "t", "--teleop", "--bimanual", "--drop-every", "5", "--source", "x:y"]
+    )
+
+    assert rc == 1
+    assert "--bimanual" in err.getvalue() and "--drop-every" in err.getvalue()
+
+
 def test_the_help_says_the_flag_is_temporary(monkeypatch, capsys):
     """The door is spelled provisionally and says so where an operator reads it.
 
@@ -702,3 +861,286 @@ def test_the_kill_path_leaves_no_directory(tmp_path):
     assert recorder.path is None
     assert list(tmp_path.glob("*/episode.json")) == []
     session.close()
+
+
+# --------------------------------------------------------------------------- #
+# Five causes, five strings — the whole path, not one function's four branches
+# --------------------------------------------------------------------------- #
+
+class _RejectingSink(_ComposedSource):
+    """The driven part refuses the action: built in the wrong action space."""
+
+    def send_action(self, action) -> None:
+        raise ActionRejected("this part takes joint targets; that action is a pose")
+
+
+class _MuteRecorder(_ComposedSource):
+    """Drove the rig fine, then could not say what it did. The clock is gone."""
+
+    def read_state(self):
+        raise OSError("state socket closed")
+
+
+def test_the_five_ways_this_can_refuse_do_not_share_a_string(clock, capsys):
+    """Rule 12 across the whole composed path, asserted rather than argued.
+
+    These five reach an operator through three different layers — two are
+    shape refusals from the frontend, two are the library's tick failing, and one
+    is the stand-down before anything connects. All five end the same run with
+    nothing recorded, so the string is the only thing that tells a reader which
+    one they got, and "the source refused" would be five wrong answers.
+
+    The fifth is the one that was broken: it is `newt teleop`'s stand-down,
+    borrowed whole, and it used to greet an operator who typed `newt record
+    --teleop` with teleop's name on it and teleop's command as the fix — a verb
+    that drives the rig and writes nothing, which is what they were avoiding.
+    """
+    from newt._cli.record import _COMPOSED_SCRIPTED_FIX
+    from newt._cli.teleop import _stand_down_no_tty
+
+    texts = [
+        _refuse_composed(_TeleopOnly()),
+        _refuse_composed(_RecordOnly()),
+    ]
+
+    for source in (_RejectingSink([]), _MuteRecorder([])):
+        capsys.readouterr()
+        run_session(source, rate_hz=30, kill=_Kill(), recorder=_Recorder([]))
+        texts.append(capsys.readouterr().err)
+
+    capsys.readouterr()
+    _stand_down_no_tty("newt record", "--teleop needs a TTY", _COMPOSED_SCRIPTED_FIX)
+    texts.append(capsys.readouterr().err)
+
+    assert all(t for t in texts)
+    assert len(set(texts)) == 5, "two causes are sharing a string"
+    # Each names its own cause, so "distinct" is not five near-identical strings
+    # separated by a tick number.
+    assert "drives the rig but has nothing to record" in texts[0]
+    assert "records the rig but does not drive it" in texts[1]
+    assert "rejected the action" in texts[2]
+    assert "could not say what it did" in texts[3]
+    assert "no keyboard" in texts[4]
+
+
+def test_the_composed_stand_down_names_its_own_verb_not_teleops(capsys):
+    """The two no-TTY stand-downs are two causes, and they must read that way.
+
+    Same underlying condition, two commands, two fixes. The one that matters is
+    the fix line: telling an operator who wanted a recorded demonstration to go
+    run `newt teleop` sends them to the verb that moves the arms and writes
+    nothing — advice that produces the bug report they were already filing.
+    """
+    from newt._cli.record import _COMPOSED_SCRIPTED_FIX
+    from newt._cli.teleop import _stand_down_no_tty
+
+    capsys.readouterr()
+    assert _stand_down_no_tty() == 2
+    plain = capsys.readouterr().err
+    assert (
+        _stand_down_no_tty("newt record", "--teleop needs a TTY", _COMPOSED_SCRIPTED_FIX)
+        == 2
+    )
+    composed = capsys.readouterr().err
+
+    assert plain != composed
+    assert "[newt teleop]" in plain and "[newt teleop]" not in composed
+    assert "newt record --teleop" in composed
+    # And the composed one answers the question its own path raises: a bounded
+    # run still writes an episode, and --json is not the way around this.
+    assert "KEPT" in composed and "--json" in composed
+
+
+# --------------------------------------------------------------------------- #
+# The composability gate — a body the library has never met
+# --------------------------------------------------------------------------- #
+
+_SECOND_BODY = '''
+"""A bench cell where a handwheel drives a gantry, and the pair records itself.
+
+Nothing here subclasses anything the library ships. It is a different shape from
+the pair the composed path was built against: five axes instead of three joints,
+one moving part instead of two, its own channel names, and a driver that is not
+an arm at all.
+"""
+from newt.recording import JointState, StateDescriptor
+from newt.teleop import drives_and_records
+
+AXES = ["x", "y", "z", "tilt", "jaw"]
+DRIVER = "bench_cell/handwheel"
+DRIVEN = "bench_cell/gantry"
+
+
+class _Axis:
+    name = "gantry"
+
+    def halt(self):
+        pass
+
+    def rest(self):
+        pass
+
+
+class GantryDemonstration:
+    drives_and_records = True
+
+    def __init__(self):
+        self.descriptor = StateDescriptor(
+            arms=[{"id": "bench_cell"}],
+            channels=[DRIVER, DRIVEN],
+            joint_names=list(AXES),
+            state_fields=["positions"],
+        )
+        self._sent = None
+        self.tick = 0
+
+    def describe(self):
+        return "bench cell (handwheel drives gantry, recorded)"
+
+    def moving_parts(self):
+        return [_Axis()]
+
+    def read_action(self):
+        self.tick += 1
+        if self.tick > 3:
+            raise KeyboardInterrupt
+        return {axis: float(self.tick) + i for i, axis in enumerate(AXES)}
+
+    def send_action(self, action):
+        self._sent = action
+
+    def read_state(self):
+        sent, self._sent = self._sent, None
+        if sent is None:
+            return {DRIVER: None, DRIVEN: None}
+        row = [sent[a] for a in AXES]
+        return {DRIVER: JointState(positions=list(row)),
+                DRIVEN: JointState(positions=list(row))}
+
+    def disable_all(self):
+        pass
+
+    def close(self):
+        pass
+
+
+@drives_and_records
+def make_demo():
+    return GantryDemonstration()
+'''
+
+
+def test_a_second_body_records_a_demonstration_with_no_library_change(
+    tmp_path, monkeypatch, capsys
+):
+    """The gate newtrino-015 set: a second rig that declares it composes, composes.
+
+    This body shares no code, no base class and no shape with the pair the path
+    was written against — different axis count, different channel names, one
+    moving part, and a driver that is a handwheel rather than an arm. It reaches
+    the tick loop through the same resolve → import → declaration-gate → build
+    sequence and drives through the same `run_session`. If the library had
+    learned anything about the first rig, this is where that shows up: as a
+    refusal, a shape assumption, or a name it does not recognize.
+
+    Runs without the recording extra, because what it proves is the seam and not
+    the file format — the end-to-end episode is the test below.
+    """
+    from newt._cli._source_spec import build_source, import_factory
+    from newt._cli.record import _refuse_composed, _refuse_undeclared_factory
+
+    _rig_module(tmp_path, monkeypatch, "gantry_rig", _SECOND_BODY)
+    spec = "gantry_rig:make_demo"
+
+    factory = import_factory(spec)
+    assert _refuse_undeclared_factory(spec, factory) is None
+    source = build_source(spec, factory)
+    assert _refuse_composed(source) is None
+
+    recorder = _Recorder([])
+    rc = run_session(source, rate_hz=30, kill=_Kill(), recorder=recorder)
+
+    assert rc == 0
+    assert recorder.kept is True
+    assert len(recorder.frames) == 3
+    channels, _ts = recorder.frames[0]
+    assert sorted(channels) == ["bench_cell/gantry", "bench_cell/handwheel"]
+    assert len(channels["bench_cell/handwheel"].positions) == 5
+
+
+@needs_extra
+def test_the_second_bodys_episode_lands_through_the_whole_verb(
+    tmp_path, monkeypatch
+):
+    """Same body, all the way to a directory on disk, through `cmd_record`.
+
+    The test above proves the seam; this one proves the product — one command, a
+    rig nobody in the library has heard of, and an episode written with that
+    rig's own channel names in it.
+    """
+    _rig_module(tmp_path, monkeypatch, "gantry_rig_e2e", _SECOND_BODY)
+    dest = tmp_path / "episodes"
+
+    rc, err = _run_composed(
+        ["--source", "gantry_rig_e2e:make_demo", "--dest", str(dest)], monkeypatch
+    )
+
+    assert rc == 0, err
+    written = list(dest.glob("*/episode.json"))
+    assert len(written) == 1
+    meta = json.loads(written[0].read_text())
+    assert "bench_cell/handwheel" in json.dumps(meta)
+
+
+def test_the_library_holds_no_name_this_body_chose():
+    """The rig's vocabulary travels as data; the SDK never learns it.
+
+    Its axes, its channels and the thing driving it are all named in the episode
+    it just wrote and must appear nowhere in the source of the library that
+    wrote it. Looked for as string literals, which is what special-casing a rig
+    actually looks like — `if channel == "bench_cell/gantry"` — rather than as
+    substrings, so a docstring using one of these words as English is not a
+    finding.
+
+    This is the tree-wide half of the card's fence. The other half is the diff
+    grep below, which is the only one that can police generic role words like
+    leader and follower: those already appear in the library's own simulated
+    bimanual stream, so a whole-tree ban on them would fail on code this card
+    never touched.
+    """
+    literal = re.compile(r"""['"][^'"]*(?:handwheel|bench_cell|gantry)[^'"]*['"]""", re.I)
+    hits = [
+        f"{path.relative_to(_SRC)}:{i}"
+        for path in sorted(_SRC.rglob("*.py"))
+        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1)
+        if literal.search(line)
+    ]
+    assert hits == [], "the library learned a name belonging to a rig: " + "; ".join(hits)
+
+
+def test_no_embodiment_string_entered_the_library_on_this_branch():
+    """The card's own fence, run as a test instead of by hand.
+
+    A diff and not a tree scan, deliberately: `leader` and `follower` are the
+    roles the library's simulated bimanual stream has always used, so the
+    question worth asking is not whether they appear but whether this branch
+    added any. `newt-python` is public, and a rig's vendor, product name or
+    factory name landing in it is the leak class — a receipt worth citing in a
+    commit is not worth compiling in.
+    """
+    banned = re.compile(
+        r"^\+.*(lerobot|trossen|widowx|yam|leader|follower|live_pair)", re.I
+    )
+    proc = subprocess.run(
+        ["git", "diff", "origin/main...HEAD", "--", "src/"],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"no origin/main to diff against: {proc.stderr.strip()}")
+
+    hits = [line for line in proc.stdout.splitlines() if banned.match(line)]
+    assert hits == [], "an embodiment's name entered src/ on this branch:\n" + "\n".join(
+        hits
+    )
