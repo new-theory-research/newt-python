@@ -21,7 +21,7 @@ What these encode (the WHY, not just the WHAT):
   where to declare and names nothing. Inventing a plausible roster to look
   helpful is Rule 10's failure wearing a friendly face, and the test for it
   asserts an *absence*.
-- **Fifteen causes, fifteen strings.** Rule 12 made executable: two different
+- **Nineteen causes, nineteen strings.** Rule 12 made executable: two different
   problems must never print the same sentence, because an operator who cannot
   tell them apart cannot fix either. Asserted pairwise, and asserted again on
   first lines alone — a shared opening line collapses two diagnoses no matter
@@ -29,7 +29,7 @@ What these encode (the WHY, not just the WHAT):
 - **The namespace a source is declared under is not the command anyone types.**
   For `rest`, `record` and `teleop` they are the same word, which is why one
   argument doing both jobs went unnoticed; `newt record --teleop` resolves under
-  `demonstration` and there is no such command. So the eleven are provoked
+  `demonstration` and there is no such command. So the nineteen are provoked
   twice, in one tmp dir so nothing but the branding differs, and both sets go
   into the pairwise corpus. A refusal has to name the command in every line the
   reader retypes and the verb in every line about where a declaration lives —
@@ -43,6 +43,11 @@ import pytest
 
 from newt._cli import _source_spec
 from newt._cli._source_spec import SourceNotResolved, resolve_spec
+# Bound at import, so it survives conftest's autouse patch of the module
+# attribute: this is the only handle in the suite on the *real* working-directory
+# reader, and the four tests at the bottom of this file are the only ones that
+# want it.
+from newt._cli._source_spec import _cwd_kit_declaring as _the_real_cwd_reader
 from newt._cli.record import _COMPOSED_COMMAND, _COMPOSED_EXAMPLE, _COMPOSED_VERB
 
 
@@ -75,6 +80,27 @@ def _declare(monkeypatch, **by_verb):
         "_declaring_verbs",
         lambda: sorted(verb for verb, entries in by_verb.items() if entries),
     )
+
+
+def _stand_in_a_kit(monkeypatch, tmp_path, *verbs):
+    """Put the caller inside a kit checkout that publishes ``verbs``.
+
+    The seam, not the filesystem: what the working directory holds is real state
+    on a real bench, and the tests that drive the reader itself are the four at
+    the bottom of this file. Everything else says which world it is in.
+
+    Called with no verbs, it says the other thing out loud — *you are not
+    standing in a kit that publishes anything* — which is why ``_every_refusal``
+    opens with it. `monkeypatch` outlives a single call to that helper, so a
+    corpus that only ever set this seam would carry the last world of one run
+    into the first cause of the next."""
+    project = (tmp_path / "kit-checkout").resolve()
+    monkeypatch.setattr(
+        _source_spec,
+        "_cwd_kit_declaring",
+        lambda verb: project if verb in verbs else None,
+    )
+    return project
 
 
 def _config(monkeypatch, tmp_path, body, *, name="nt.toml"):
@@ -456,28 +482,31 @@ def test_sources_is_read_in_isolation_from_the_kits_own_tables(monkeypatch, tmp_
 
 
 # --------------------------------------------------------------------------- #
-# Fifteen causes, fifteen strings (card test 4)
+# Nineteen causes, nineteen strings (card test 4)
 # --------------------------------------------------------------------------- #
 
 def _every_refusal(
     monkeypatch, tmp_path, *, verb="rest", command=None, example=REST_EXAMPLE
 ) -> dict[str, str]:
-    """Provoke all fifteen refusals for real and collect what each one printed.
+    """Provoke all nineteen refusals for real and collect what each one printed.
 
     Built by driving ``resolve_spec`` rather than by reading the strings out of
     the module, so a cause that stops being reachable takes this test down with
     it.
 
-    Eleven until newtrino-035, fifteen after: four of the eleven fired in two
-    environments that print one sentence between them — nothing publishing to
-    ``newt`` at all, and kits publishing for other verbs — so each of those four
-    is provoked from both. The count moved because the corpus did.
+    Eleven until newtrino-035, nineteen after. Four of the eleven fired in three
+    situations that printed one sentence between them — nothing publishing to
+    ``newt`` at all, kits publishing for other verbs, and the kit sitting in the
+    directory the operator is standing in while a different ``newt`` answers —
+    so each of those four is provoked from all three. The count moved because
+    the corpus did.
 
     ``verb`` and ``command`` are separable here for the same reason they are
     separable in the resolver: the composed path resolves in one namespace and
-    is typed as another command, and every one of these fifteen has to come out
+    is typed as another command, and every one of these nineteen has to come out
     right on both."""
     tmp_path.mkdir(parents=True, exist_ok=True)
+    _stand_in_a_kit(monkeypatch, tmp_path)  # ...in no kit, until case 16 says so
     messages: dict[str, str] = {}
 
     def _catch(label, flag):
@@ -594,13 +623,45 @@ def _every_refusal(
     )
     _catch("file-declares-other-verbs-verb-not-published", None)
 
+    # 16-19 — the same four again, in the world where the kit is the directory
+    # the operator is standing in and the running newt is not the project's.
+    # Nothing is missing there, so the two readings above are both true and both
+    # useless: they send someone to install a kit they are standing inside.
+    # Minimal pairs with 7, 8, 10 and 11 — same empty registry, same config
+    # file, one variable moved.
+    _declare(monkeypatch)
+    _stand_in_a_kit(monkeypatch, tmp_path, verb)
+
+    # 16 — a typed short name, standing in the kit that publishes the verb.
+    _no_config(monkeypatch, tmp_path)
+    _catch("typed-name-kit-is-the-cwd", "live_pair")
+
+    # 17 — a file-declared short name, standing in that kit.
+    _config(
+        monkeypatch, tmp_path, f'[sources]\n{verb} = "live_pair"\n', name="orphan.toml"
+    )
+    _catch("config-name-kit-is-the-cwd", None)
+
+    # 18 — nothing given, no file, standing in that kit.
+    _no_config(monkeypatch, tmp_path)
+    _catch("no-file-kit-is-the-cwd", None)
+
+    # 19 — a file that declares other verbs, standing in that kit.
+    _config(
+        monkeypatch,
+        tmp_path,
+        '[sources]\nsomeotherverb = "teleop_source:live_pair"\n',
+        name="other-verbs.toml",
+    )
+    _catch("file-declares-other-verbs-kit-is-the-cwd", None)
+
     return messages
 
 
 def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
-    """The fifteen as `newt rest`, plus the same fifteen as the composed path.
+    """The nineteen as `newt rest`, plus the same nineteen as the composed path.
 
-    Thirty strings from one resolver, and no two of them may match. The
+    Thirty-eight strings from one resolver, and no two of them may match. The
     composed half is not decoration: it is the half where the namespace and the
     command are different words, so it is the half a template that reuses one
     for the other collapses on."""
@@ -623,7 +684,7 @@ def _both_corpora(monkeypatch, tmp_path) -> dict[str, str]:
     return corpus
 
 
-def test_fifteen_causes_produce_fifteen_distinct_strings(monkeypatch, tmp_path):
+def test_nineteen_causes_produce_nineteen_distinct_strings(monkeypatch, tmp_path):
     """Rule 12, executable. "Could any other cause produce this identical
     string?" answered by asking the code instead of the author.
 
@@ -631,13 +692,14 @@ def test_fifteen_causes_produce_fifteen_distinct_strings(monkeypatch, tmp_path):
     into "your file declares nothing" behind one template — a change that reads
     as tidying and lands as two problems wearing one face.
 
-    Twenty-two until newtrino-035. It moved to thirty because four causes each
-    became two, not because the literal was bumped to make a red test green: the
-    four minimal pairs in ``_every_refusal`` are what produce the new eight, and
-    deleting any of them takes this count with it.
+    Twenty-two until newtrino-035. It moved to thirty-eight because four causes
+    each became three, not because the literal was bumped to make a red test
+    green: the twelve cases in ``_every_refusal`` that share a symptom and split
+    on which world produced it are what carry the new sixteen, and deleting any
+    of them takes this count with it.
     """
     messages = _both_corpora(monkeypatch, tmp_path)
-    assert len(messages) == 30, "a cause stopped being reachable"
+    assert len(messages) == 38, "a cause stopped being reachable"
 
     seen: dict[str, str] = {}
     for label, message in messages.items():
@@ -645,7 +707,7 @@ def test_fifteen_causes_produce_fifteen_distinct_strings(monkeypatch, tmp_path):
         seen[message] = label
 
 
-def test_the_fifteen_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
+def test_the_nineteen_refusals_differ_on_their_first_line(monkeypatch, tmp_path):
     """The diagnosis is the first line — the rest is the fix.
 
     An operator at a bench reads one line before deciding what kind of problem
@@ -725,6 +787,159 @@ def test_an_empty_registry_and_a_skipped_verb_are_two_different_refusals(
     assert "live_pair" not in verb_not_published
 
 
+# --------------------------------------------------------------------------- #
+# The kit you are standing in (newtrino-035, § Direction)
+# --------------------------------------------------------------------------- #
+
+def test_standing_inside_the_kit_is_a_different_refusal_from_having_no_kit(
+    monkeypatch, tmp_path
+):
+    """The second bench receipt, pinned as a minimal pair.
+
+    She was inside the kit's checkout. The kit publishes the verb. The refusal
+    told her no installed kit declares anything for it "in this environment" —
+    true of the global tool she typed, and it reads as *go install something*
+    when what she needed was four characters. Two environments were in play and
+    the message could only see one.
+
+    So the same empty registry now splits again on a fact about the directory,
+    and the two refusals must not open alike: one is "nothing is publishing to
+    newt anywhere I can see", the other is "it is publishing right here, and I
+    am not the newt that project runs". The second hands a command; asserting
+    that it *is* a command is the point of this test, because an explanation of
+    environments is what shipped and what failed.
+    """
+    _declare(monkeypatch)
+    _no_config(monkeypatch, tmp_path)
+
+    with pytest.raises(SourceNotResolved) as exc:
+        resolve_spec("rest", None, REST_EXAMPLE)
+    no_kit_anywhere = str(exc.value)
+
+    project = _stand_in_a_kit(monkeypatch, tmp_path, "rest")
+    with pytest.raises(SourceNotResolved) as exc:
+        resolve_spec("rest", None, REST_EXAMPLE)
+    standing_in_it = str(exc.value)
+
+    assert no_kit_anywhere.splitlines()[0] != standing_in_it.splitlines()[0], (
+        "the kit in the cwd still opens with the diagnosis for having no kit"
+    )
+
+    # What it noticed: the project, by path, and that this newt is not its newt.
+    assert str(project) in standing_in_it
+    assert sys.executable in standing_in_it
+
+    # The move is a command, typed as typed. Not a paragraph about environments.
+    assert "uv run newt rest" in standing_in_it
+
+    # And the advice that was wrong here is gone: they are standing in the kit,
+    # so "install it, or go find the environment it is in" is a wild goose chase
+    # with the goose in the room.
+    assert "Install your rig's kit" in no_kit_anywhere
+    assert "Install your rig's kit" not in standing_in_it
+
+
+def test_the_cwd_kit_is_read_from_a_declaration_and_nothing_else(monkeypatch, tmp_path):
+    """The real reader, driven against real directories — the seam's other half.
+
+    Everything else in this file patches ``_cwd_kit_declaring`` so no test reads
+    the directory pytest was launched from. That makes this the one place the
+    reader itself is falsifiable, so all four of its answers are driven here:
+    a project that publishes the verb, one that publishes something else, a
+    directory with no readable project at all, and the case where re-running
+    would change nothing.
+
+    The fence it keeps is the same one the registry read keeps. A *declaration*
+    in a file the developer wrote is a fact; a directory that merely looks like
+    a kit is a guess, and guessing at file layout is how the SDK learns an
+    embodiment's conventions.
+    """
+    project = tmp_path / "kit-checkout"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    # No project file at all — nothing to read, nothing claimed.
+    assert _the_real_cwd_reader("rest") is None
+
+    # A project that publishes something else. Present, readable, and not the
+    # answer to this verb: the fork is per-verb or it sends people to `uv run`
+    # for a verb that project cannot serve either.
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "a-kit"\n\n'
+        '[project.entry-points."newt.sources.record"]\nbench_pair = "akit.rig:record"\n',
+        encoding="utf-8",
+    )
+    assert _the_real_cwd_reader("rest") is None
+    assert _the_real_cwd_reader("record") == project.resolve()
+
+    # Broken TOML is somebody else's problem and not the one being reported.
+    # This read is a courtesy on the way to a refusal about a missing source;
+    # complaining about a second thing here buries the first.
+    (project / "pyproject.toml").write_text("[project\nname =\n", encoding="utf-8")
+    assert _the_real_cwd_reader("record") is None
+
+
+def test_the_kit_in_the_cwd_says_nothing_when_you_are_already_running_its_newt(
+    monkeypatch, tmp_path
+):
+    """`uv run newt rest` must never be the answer to `uv run newt rest`.
+
+    The fork exists because two environments were in play. When the interpreter
+    already *is* the project's, there is no second environment to send anyone
+    to, and handing back the command they just typed is a loop wearing a fix's
+    clothes — worse than the message it replaced, which at least pointed
+    somewhere. So the reader answers None and the older, still-true reading of
+    the registry gets the refusal back.
+    """
+    project = tmp_path / "kit-checkout"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "a-kit"\n\n'
+        '[project.entry-points."newt.sources.rest"]\nbench_pair = "akit.rig:rest"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+
+    assert _the_real_cwd_reader("rest") == project.resolve()
+
+    monkeypatch.setattr(sys, "prefix", str(project / ".venv"))
+    assert _the_real_cwd_reader("rest") is None
+
+
+def test_no_refusal_reads_the_directory_pytest_happens_to_run_from(
+    monkeypatch, tmp_path
+):
+    """The directory half of the machine-dependence trap, closed the same way.
+
+    `conftest` patches the working-directory read by *function*. A refusal that
+    reached the filesystem itself would notice whatever project the developer
+    launched pytest from — this repo has a `pyproject.toml`, so the sentence
+    would differ between a checkout, a CI runner, and a tmp dir, and the suite
+    would be describing the machine instead of the code.
+
+    Driven through conftest's fence alone, with no `_stand_in_a_kit` call: the
+    corpus patches the seam at every step, so it would pass with the fence
+    deleted, and a guard that cannot fail is not a guard. Verified by deleting
+    the conftest line and watching this fail.
+    """
+    kit = tmp_path / "a-real-kit-checkout"
+    kit.mkdir()
+    (kit / "pyproject.toml").write_text(
+        '[project]\nname = "a-kit"\n\n'
+        '[project.entry-points."newt.sources.rest"]\nbench_pair = "akit.rig:rest"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(kit)
+
+    _no_config(monkeypatch, tmp_path)
+    with pytest.raises(SourceNotResolved) as exc:
+        resolve_spec("rest", None, REST_EXAMPLE)
+    message = str(exc.value)
+
+    assert str(kit) not in message, "a refusal read the real working directory"
+    assert "uv run" not in message
+
+
 def test_no_refusal_reads_the_environment_pytest_happens_to_run_in(
     monkeypatch, tmp_path
 ):
@@ -758,8 +973,8 @@ def test_no_refusal_reads_the_environment_pytest_happens_to_run_in(
         resolve_spec("rest", None, REST_EXAMPLE)
     assert "publishes any source to newt" in str(exc.value)
 
-    # Then the whole corpus, which catches a third probe that skips both seams.
-    assert len(_both_corpora(monkeypatch, tmp_path)) == 30
+    # Then the whole corpus, which catches a fourth probe that skips every seam.
+    assert len(_both_corpora(monkeypatch, tmp_path)) == 38
 
 
 # --------------------------------------------------------------------------- #
@@ -774,7 +989,7 @@ def test_the_composed_path_never_tells_an_operator_to_run_a_command_that_exists_
     There is no `newt demonstration`. A refusal branded with the namespace hands
     the operator a fix instruction for a verb the dispatcher does not have, so
     they run it, get "unknown verb", and are now debugging the wrong thing.
-    Asserted across all fifteen causes rather than the one that was reported,
+    Asserted across all nineteen causes rather than the one that was reported,
     because the branding came from a single argument doing two jobs and every
     string that argument reached had the same bug.
     """
@@ -785,7 +1000,7 @@ def test_the_composed_path_never_tells_an_operator_to_run_a_command_that_exists_
         command=_COMPOSED_COMMAND,
         example=_COMPOSED_EXAMPLE,
     )
-    assert len(messages) == 15
+    assert len(messages) == 19
 
     for label, message in messages.items():
         assert "newt demonstration" not in message, (
