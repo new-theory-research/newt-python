@@ -60,10 +60,10 @@ from newt.teleop import DRIVES_AND_RECORDS
 
 def _usage() -> None:
     print("Usage: newt record [options]")
-    print("")
+    print()
     print("  Record NT v0.0.3 episodes from an embodiment. SPACE starts/stops an")
     print("  episode; ENTER keeps it, D discards, R redoes. Ctrl+H is the kill.")
-    print("")
+    print()
     print("Options:")
     print("  --task TEXT     Language task prompt recorded in every episode (required).")
     print("  --dest DIR      Episode output directory (default: ./episodes).")
@@ -97,7 +97,7 @@ def _usage() -> None:
     print("                  This flag is a bench door pending the naming ruling in")
     print("                  newtrino-030 — expect it to be spelled differently, and")
     print("                  the config key to move with it.")
-    print("")
+    print()
     print("  Recording needs the extra:  pip install \"newt[recording]\"")
 
 
@@ -796,7 +796,9 @@ def _run_teleop(opts: dict) -> int:
 
         try:
             factory = import_factory(spec)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — see comment below: nothing was
+            # called yet, so any failure here is a resolve-time problem the operator
+            # needs to see as text, not as a traceback.
             # Phase one failed: the name did not resolve to a callable. Nothing
             # was called, so the honest thing to say is that the rig is still
             # dark — which is also what tells the operator this is a spelling
@@ -829,7 +831,10 @@ def _run_teleop(opts: dict) -> int:
                 file=sys.stderr,
             )
             return 130
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — the rig's own factory can raise
+            # anything while bringing arbitrary hardware up; this call is what
+            # connects and energizes, so the failure must be reported (with the
+            # put-away instruction below), never let propagate as a bare traceback.
             # Phase two failed: the factory was found, it had declared itself,
             # and it raised partway through bringing the rig up. The state of
             # the rig is the thing that separates this from the refusal above —
@@ -1001,8 +1006,8 @@ def cmd_record(args: list[str]) -> int:
 
     try:
         session = _build_session(opts)
-    except Exception as exc:
-        # Lantern (missing extra) or construction failure — surface it, don't trace.
+    except Exception as exc:  # noqa: BLE001 — Lantern (missing extra) or a
+        # construction failure — surface it, don't trace.
         print(f"[newt record] {exc}", file=sys.stderr)
         return 1
     if session is None:

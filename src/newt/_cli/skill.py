@@ -23,19 +23,19 @@ def cmd_skill(args: list[str]) -> int:
 
 def _usage() -> None:
     print("Usage: newt skill <subcommand> [options]")
-    print("")
+    print()
     print("Subcommands:")
     print("  install  Copy the newt-onboarding guide into .claude/skills/ in the current directory")
-    print("")
+    print()
     print("Options:")
     print("  --json   Emit machine-readable JSON")
 
 
 def _usage_install() -> None:
     print("Usage: newt skill install [options]")
-    print("")
+    print()
     print("  Copy the newt-onboarding guide into .claude/skills/ in the current directory.")
-    print("")
+    print()
     print("Options:")
     print("  --json   Emit machine-readable JSON")
     print("  -h, --help  Show this message and exit")
@@ -51,7 +51,9 @@ def _cmd_skill_install(args: list[str]) -> int:
     try:
         ref = importlib.resources.files("newt") / "skills" / "newt-onboarding" / "SKILL.md"
         skill_text = ref.read_text(encoding="utf-8")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — CLI command boundary: a bundled
+        # package resource "should" always be readable, but a packaging or
+        # permission issue must report as a clean CLI failure, not a traceback.
         if as_json:
             print(json.dumps({"ok": False, "error": str(exc)}))
         else:

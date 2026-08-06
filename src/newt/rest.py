@@ -55,8 +55,9 @@ Exit codes:
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 #: Every part ran its declared sequence, was de-energized, and said what state
 #: it ended in. The saying is what this code certifies — the state itself is
@@ -403,7 +404,10 @@ def _run_sequence(part: Restable, steps: Sequence[RestStep]) -> tuple[str, tuple
         try:
             _say(f"{part.name}: {step.name}…")
             step.run()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a rest step is arbitrary
+            # part-declared hardware motion; whatever it raises must be reported
+            # (per the docstring above) and must not stop this part from still
+            # being de-energized below, nor abort any other part's own sequence.
             _say(
                 f"{part.name} stopped on {step.name!r} ({type(exc).__name__}: {exc}). "
                 "It is wherever that step left it, and the rest of its sequence is "
@@ -428,7 +432,10 @@ def _de_energize(part: Restable) -> tuple[bool, str | None, str | None]:
     """
     try:
         part.halt()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — the halt call itself is what must
+        # never propagate uncaught: a raised halt still needs the "may STILL BE
+        # HOLDING TORQUE" warning below, which an unhandled traceback would not
+        # reliably deliver before the process exits.
         _say(
             f"HALT UNANSWERED on {part.name} ({type(exc).__name__}: {exc}). That part "
             "may STILL BE HOLDING TORQUE — power it down at the wall before "
@@ -450,7 +457,10 @@ def _de_energize(part: Restable) -> tuple[bool, str | None, str | None]:
 
     try:
         state = reporter()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — the halt already succeeded above;
+        # this only reads back a state report, and a raise here must degrade to
+        # "unconfirmed" (per the docstring's three-ways-unconfirmed contract), not
+        # crash after the part is already de-energized.
         _say(
             f"{part.name} was de-energized, but would not say what state it is in "
             f"({type(exc).__name__}: {exc}). The halt call returned; the read back did "
@@ -486,7 +496,9 @@ def _describe(source: object) -> str:
     """
     try:
         return str(source.describe())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — per the docstring above, this verb
+        # runs *after* something already broke, so a raising describe() must not
+        # abort the actual rest sequence — it degrades to an "unnamed" label.
         return f"unnamed ({type(exc).__name__} from describe(): {exc})"
 
 
@@ -525,7 +537,7 @@ def _report(rig: str, outcomes: Sequence[PartOutcome], interrupted: bool) -> Non
         # line below carries that, so one word can never stand in for two.
         f"run:         {'interrupted (Ctrl+C)' if interrupted else 'completed'}\n"
         "parts:\n" + "\n".join(lines) + "\n"
-        f"ended:       "
+        "ended:       "
         + (
             # Not "all parts off". Every part was halted and every part answered
             # when asked; what the answers mean is the rig's vocabulary, printed

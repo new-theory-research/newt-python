@@ -84,15 +84,21 @@ def parse_templates(payload: object) -> list[Template]:
     which is a different and wrong answer.
     """
     if not isinstance(payload, dict):
-        raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
+        raise ValueError(  # noqa: TRY004 — this function's contract (and
+            # create.py's single `except ValueError` around it, and
+            # test_malformed_registry_is_an_error_not_an_empty_list) is a uniform
+            # ValueError for every malformed-shape case; splitting the type checks
+            # into TypeError would fork that contract and break the caller's catch.
+            f"expected a JSON object, got {type(payload).__name__}"
+        )
     rows = payload.get("templates")
     if not isinstance(rows, list):
-        raise ValueError("no 'templates' array in the response")
+        raise ValueError("no 'templates' array in the response")  # noqa: TRY004 — see comment above
 
     out: list[Template] = []
     for row in rows:
         if not isinstance(row, dict):
-            raise ValueError(f"template entry is not an object: {row!r}")
+            raise ValueError(f"template entry is not an object: {row!r}")  # noqa: TRY004 — see comment above
         name = row.get("name")
         visibility = row.get("visibility")
         if not isinstance(name, str) or not name:

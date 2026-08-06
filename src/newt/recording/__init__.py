@@ -35,6 +35,8 @@ missing.
 """
 from __future__ import annotations
 
+from newt.recording._cloud_sink import NTCloudSink
+
 # Featherweight seam — stdlib only, safe to import without the extra.
 from newt.recording._lantern import RecordingExtraMissing
 from newt.recording._seam import (
@@ -47,26 +49,25 @@ from newt.recording._seam import (
     SimulatedSource,
     StateDescriptor,
 )
-from newt.recording._cloud_sink import NTCloudSink
 from newt.recording._session import DEFAULT_STATE_HZ, Session, SessionStatus
 from newt.recording._sink import LocalSink, Sink
 
 __all__ = [
     "BIMANUAL_DESCRIPTOR",
+    "DEFAULT_STATE_HZ",
+    "SINGLE_ARM_DESCRIPTOR",
     "CameraCaptureFailed",
     "CameraOpenError",
     "CameraSpec",
-    "DEFAULT_STATE_HZ",
     "JointState",
     "LocalSink",
     "NTCloudSink",
     "RecordingExtraMissing",
     "RecordingSource",
-    "SINGLE_ARM_DESCRIPTOR",
-    "Sink",
-    "SimulatedSource",
     "Session",
     "SessionStatus",
+    "SimulatedSource",
+    "Sink",
     "StateDescriptor",
     "validate",
 ]

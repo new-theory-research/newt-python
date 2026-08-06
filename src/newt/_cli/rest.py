@@ -34,16 +34,16 @@ from newt._cli._source_spec import SourceNotResolved, load_source, resolve_spec
 
 def _usage() -> None:
     print("Usage: newt rest [options]")
-    print("")
+    print()
     print("  Ask an embodiment to run its own declared rest sequence, then leave")
     print("  every part de-energized and report the state each one reports back.")
     print("  The rig declares what putting itself away means; this verb never")
     print("  picks a pose. A part that declares no rest sequence is refused, by")
     print("  name, before anything moves.")
-    print("")
+    print()
     print("  Reach for it after a session was killed or faulted, when there is no")
     print("  clean exit path left to ride and the arms are wherever they stopped.")
-    print("")
+    print()
     print("Options:")
     print("  --source SPEC   Which rest source to run — either a short name your")
     print("                  kit declares, or a full MODULE:FACTORY import path")
@@ -52,10 +52,10 @@ def _usage() -> None:
     print("                  reads [sources].rest from your site config")
     print("                  ($NT_SITE_CONFIG, else ~/.config/nt/nt.toml), else the")
     print("                  one rest source your kit declares. The flag always wins.")
-    print("")
+    print()
     print("  This moves hardware. It does not change what any arm believes about")
     print("  its own zero — it is not a calibration command.")
-    print("")
+    print()
     print("Exit codes:")
     print("  0    every part rested, de-energized, and said what state it ended")
     print("       in — that answer is printed for you, never graded here")
@@ -127,9 +127,10 @@ def cmd_rest(args: list[str]) -> int:
             file=sys.stderr,
         )
         return 130
-    except Exception as exc:
-        # The factory's own refusal — a missing address, a missing driver.
-        # Surface it, don't trace it.
+    except Exception as exc:  # noqa: BLE001 — the factory's own refusal — a
+        # missing address, a missing driver. `load_source` runs a developer-supplied
+        # factory (arbitrary code, arbitrary hardware bring-up); it can raise
+        # anything, and this command's job is to surface it, not trace it.
         print(f"[newt rest] {exc}", file=sys.stderr)
         return EXIT_USAGE
 

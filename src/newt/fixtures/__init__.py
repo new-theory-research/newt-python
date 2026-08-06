@@ -13,6 +13,6 @@ warnings.warn(
     stacklevel=2,
 )
 
-from newt.snapshots import available, load  # noqa: E402, F401
+from newt.snapshots import available, load
 
-__all__ = ["load", "available"]
+__all__ = ["available", "load"]

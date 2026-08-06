@@ -20,7 +20,7 @@ class RecordingExtraMissing(ImportError):
     """
 
 
-def require(module_name: str, dep: str) -> "object":
+def require(module_name: str, dep: str) -> object:
     """Import ``module_name``, or raise a lantern naming the ``recording`` extra.
 
     ``dep`` is the human-facing distribution that provides the module (e.g.
