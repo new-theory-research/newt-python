@@ -36,6 +36,7 @@ import termios
 import threading
 import tty
 
+from newt._cli import _lease
 from newt._cli._source_spec import SourceNotResolved, load_source, resolve_spec
 
 # Ctrl+H. The same byte `newt record` reads for the same meaning.
@@ -62,6 +63,10 @@ def _usage() -> None:
     print("                  else the one your kit declares. The flag always wins.")
     print("  --rate HZ       Ticks per second (default: 30). The source is built")
     print("                  at the rate it is driven at — one decision, not two.")
+    print("  --take          Take the arms from a lease whose holder stopped")
+    print("                  checking in. Never takes them from a live session:")
+    print("                  the arms are single-client, and a session that is")
+    print("                  still answering is asked to let go where it runs.")
     print()
     print("  Needs a real terminal: with no keyboard there is no Ctrl+H, and this")
     print("  verb moves hardware. Nothing connects until the kill key is armed.")
@@ -80,16 +85,20 @@ def _parse(args: list[str]) -> dict:
     opts = {
         "source": None,
         "rate": _DEFAULT_RATE_HZ,
+        "take": False,
     }
     # option -> (key, converter)
     valued = {
         "--source": ("source", str),
         "--rate": ("rate", _rate),
     }
+    flags = {"--take": "take"}
     i = 0
     while i < len(args):
         a = args[i]
-        if a in valued:
+        if a in flags:
+            opts[flags[a]] = True
+        elif a in valued:
             key, conv = valued[a]
             i += 1
             if i >= len(args):
@@ -264,48 +273,65 @@ def cmd_teleop(args: list[str]) -> int:
         )
         return 2
 
-    # The kill key comes before the source, not after: the factory is what
-    # connects and energizes, and a session that cannot be killed must never
-    # reach it. Both stand-downs below leave nothing connected.
-    if not sys.stdin.isatty():
-        return _stand_down_no_tty()
-
-    kill_key = KillKey()
-    if not kill_key.arm():
-        return _stand_down_unarmed()
+    # The arms are single-client, and the lease is written before anything is
+    # reached for. It goes here, ahead of the kill key, for two reasons: nothing
+    # is armed or connected yet if this refuses, and the refusal prints into a
+    # cooked terminal — a lantern rendered in raw mode stair-steps down the
+    # screen, which is not the way to tell somebody a colleague is driving.
+    try:
+        arms = _lease.claim(verb="teleop", command="newt teleop", take=opts["take"])
+    except _lease.LeaseError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     try:
+        # The kill key comes before the source, not after: the factory is what
+        # connects and energizes, and a session that cannot be killed must never
+        # reach it. Both stand-downs below leave nothing connected.
+        if not sys.stdin.isatty():
+            return _stand_down_no_tty()
+
+        kill_key = KillKey()
+        if not kill_key.arm():
+            return _stand_down_unarmed()
+
         try:
-            source = load_source(spec)
-        except KeyboardInterrupt:
-            # Bring-up is where the factory connects, and on real hardware that
-            # is seconds of blocking vendor motion — long enough for an operator
-            # to change their mind. 130, unlike the Ctrl+C that ends a live
-            # session (0): that one is the documented way to finish, this one is
-            # an abort before the session started. Putting away whatever came up
-            # is the factory's job; it is the only thing holding those handles.
-            print(
-                "\n[newt teleop] bring-up interrupted (Ctrl+C) — the session never "
-                "started. Check what the source reported about anything it had already "
-                "connected.",
-                file=sys.stderr,
+            try:
+                source = load_source(spec)
+            except KeyboardInterrupt:
+                # Bring-up is where the factory connects, and on real hardware that
+                # is seconds of blocking vendor motion — long enough for an operator
+                # to change their mind. 130, unlike the Ctrl+C that ends a live
+                # session (0): that one is the documented way to finish, this one is
+                # an abort before the session started. Putting away whatever came up
+                # is the factory's job; it is the only thing holding those handles.
+                print(
+                    "\n[newt teleop] bring-up interrupted (Ctrl+C) — the session never "
+                    "started. Check what the source reported about anything it had already "
+                    "connected.",
+                    file=sys.stderr,
+                )
+                return 130
+            except Exception as exc:  # noqa: BLE001 — the factory's own refusal — a
+                # missing address, a missing driver. `load_source` runs a
+                # developer-supplied factory (arbitrary code, arbitrary hardware
+                # bring-up); it can raise anything, and this command's job is to
+                # surface it, not trace it.
+                print(f"[newt teleop] {exc}", file=sys.stderr)
+                return 1
+
+            from newt.teleop import run_session
+
+            return run_session(
+                source,
+                rate_hz=opts["rate"],
+                kill=kill_key.fired,
+                source_receipt=source_receipt,
             )
-            return 130
-        except Exception as exc:  # noqa: BLE001 — the factory's own refusal — a
-            # missing address, a missing driver. `load_source` runs a
-            # developer-supplied factory (arbitrary code, arbitrary hardware
-            # bring-up); it can raise anything, and this command's job is to
-            # surface it, not trace it.
-            print(f"[newt teleop] {exc}", file=sys.stderr)
-            return 1
-
-        from newt.teleop import run_session
-
-        return run_session(
-            source,
-            rate_hz=opts["rate"],
-            kill=kill_key.fired,
-            source_receipt=source_receipt,
-        )
+        finally:
+            kill_key.restore()
     finally:
-        kill_key.restore()
+        # Giving the arms back is what makes the next session see `free` rather
+        # than a lease with nobody home. A killed session cannot run this, which
+        # is exactly why `expired` exists as its own state.
+        _lease.release(arms)

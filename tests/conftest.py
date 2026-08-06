@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from newt import _credentials
-from newt._cli import _source_spec, logout, status
+from newt._cli import _lease, _source_spec, logout, status
 
 
 @pytest.fixture(autouse=True)
@@ -69,3 +69,21 @@ def _no_real_credentials_file(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(logout, "CREDENTIALS_DIR", cred_dir)
     monkeypatch.setattr(logout, "CREDENTIALS_PATH", cred_path)
     monkeypatch.setattr(status, "CREDENTIALS_PATH", cred_path)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_arms_lease(monkeypatch, tmp_path_factory):
+    """No test can take, expire or delete the arms lease on a real bench.
+
+    Same import-time-constant trap as the credentials file above, and a worse
+    blast radius: ``~/.nt/arms.lease`` is what tells a running ``newt collect``
+    that it still owns the motors. A test that wrote one would refuse a
+    developer's next ``newt teleop`` with a session that never existed; a test
+    that deleted one would hand a second claimant the arms of a rig that is
+    mid-recording.
+    """
+    home = tmp_path_factory.mktemp("nt-lease-home")
+    lease_dir = home / ".nt"
+    monkeypatch.setattr(_lease, "LEASE_DIR", lease_dir)
+    monkeypatch.setattr(_lease, "LEASE_PATH", lease_dir / "arms.lease")
+    monkeypatch.setattr(_lease, "LOCK_PATH", lease_dir / "arms.lease.lock")
