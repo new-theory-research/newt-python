@@ -571,6 +571,22 @@ _COMPOSED_UNARMED_FIX = (
     "        episode was opened."
 )
 
+#: Said out loud because the bench hit the other version of it: `newt record`
+#: applied tension to two arms it was only reading, so the operator could not
+#: move the follower by hand and nothing had told them why. This path energizes
+#: too, and the difference is that here it is the point — a verb that drives has
+#: to hold the parts it is about to command. Stating it is what makes it a
+#: decision rather than an inherited side effect, and it goes after the preflight
+#: because by then the factory has already brought the rig up: the operator is
+#: standing in front of two live arms as they read it.
+_COMPOSED_ENGAGEMENT = (
+    "\n[newt record] both arms are up and energized. This verb drives, so it owns "
+    "that: the follower is held because it is about to be commanded, and the "
+    "leader is held by its own servos and is still the arm you move by hand.\n"
+    "              If the leader will not move by hand, stop — that is a rig that "
+    "cannot be demonstrated on, and no amount of pulling makes it one."
+)
+
 
 def _refuse_undeclared_factory(spec: str, factory) -> str | None:
     """The gate, read off the factory *before it is called*, or None to proceed.
@@ -695,7 +711,7 @@ class _EpisodeRecorder:
     def __init__(self, session) -> None:
         self._session = session
         self.episode_id = session.start_episode()
-        self.path: "Path | None" = None
+        self.path: Path | None = None
         self.refused = False
 
     def record_tick(self, channels, ts_ns: int) -> None:
@@ -854,6 +870,8 @@ def _run_teleop(opts: dict) -> int:
         )
         if not _print_preflight(session, as_json=False):
             return 2
+
+        print(_COMPOSED_ENGAGEMENT, flush=True)
 
         recorder = _EpisodeRecorder(session)
         print(

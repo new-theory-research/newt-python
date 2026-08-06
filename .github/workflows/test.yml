@@ -24,5 +24,16 @@ jobs:
         run: ruff check src/
       - name: Dependency check
         run: deptry .
-      - name: Test
+      # Two runs, because a single one always silently skips something. Bare,
+      # the episode-on-disk tests are skipped behind the [recording] extra —
+      # which is how the card's own composability gate sat green without ever
+      # asserting anything for two cycles. With the extra, the inverted gates
+      # that prove the missing-mcap lantern are the ones that skip. Neither run
+      # alone can claim the suite is green, so CI does both. The bare *install*
+      # closure stays purity.yml's job; this is only about which tests execute.
+      - name: Test (bare install — the missing-extra lanterns run here)
+        run: pytest
+      - name: Install the recording extra
+        run: uv pip install --system -e ".[recording]"
+      - name: Test (with the extra — the episode-on-disk tests run here)
         run: pytest

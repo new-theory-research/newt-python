@@ -418,7 +418,7 @@ def _loop(
     rate_hz: float,
     kill: threading.Event,
     tally: Tally,
-    recorder: "TickRecorder | None" = None,
+    recorder: TickRecorder | None = None,
 ) -> None:
     """Hand each action from the source to the sink, at rate_hz, until aborted.
 
@@ -529,7 +529,7 @@ def run_session(
     *,
     rate_hz: float = DEFAULT_RATE_HZ,
     kill: threading.Event,
-    recorder: "TickRecorder | None" = None,
+    recorder: TickRecorder | None = None,
 ) -> int:
     """Drive ``source`` at ``rate_hz`` until the kill fires or the operator ends it.
 
