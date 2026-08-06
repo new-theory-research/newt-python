@@ -28,12 +28,12 @@ import importlib
 import io
 import json
 import sys
+from typing import ClassVar
 
 import pytest
 
 import newt.live
 from newt._cli.record import _open_view, _parse, cmd_record
-
 
 # --------------------------------------------------------------------------- #
 # Stand-ins
@@ -42,7 +42,7 @@ from newt._cli.record import _open_view, _parse, cmd_record
 class _FakeView:
     """A LiveView that starts, remembers its construction, and draws nothing."""
 
-    instances: list[_FakeView] = []
+    instances: ClassVar[list[_FakeView]] = []
     #: On the class, because "this machine cannot name itself on a network" is a
     #: property of the machine and a test sets it for the whole run, not per view.
     network_address = "192.168.1.50"
@@ -167,7 +167,7 @@ def test_the_stream_port_is_the_page_port_plus_one(fake_view):
     assert view.kwargs["grpc_port"] == 9201
 
 
-def test_no_view_port_takes_the_librarys_default(fake_view, capsys):
+def test_no_view_port_takes_the_librarys_default(fake_view):
     from newt.live import DEFAULT_PORT
 
     view = _open_view(_Session(), _parse(["--task", "t", "--view"]))
