@@ -61,9 +61,10 @@ class Resolved(NamedTuple):
     """What the ladder answered, and what the verb still owes the operator.
 
     ``receipt`` is the short phrase a verb folds into the line it was already
-    printing — ``live_pair (from the trossen-widowx kit)``. It is set on exactly
-    one rung: the one where nothing was typed and no file was read, so an
-    installed kit's lone declaration answered on the operator's behalf. Every
+    printing — ``<name> (from the <dist> kit)``, both halves filled in from the
+    declaration that answered. It is set on exactly one rung: the one where
+    nothing was typed and no file was read, so an installed kit's lone
+    declaration answered on the operator's behalf. Every
     other rung is either their own keystrokes or a file that already named
     itself on stderr, and a verb handed ``None`` says nothing extra.
 
