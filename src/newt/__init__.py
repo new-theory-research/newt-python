@@ -19,6 +19,9 @@ Public surface:
 - `newt.ConnectionDroppedError` — raised when the WS connection drops mid-session with
                                  no error envelope and no known close code (1006/1011 or
                                  codeless); message carries a cold-load retry hint
+- `newt.EndpointUnavailableError` — raised when the WS upgrade is rejected at the HTTP
+                                 layer for a non-auth reason (404 = endpoint not deployed /
+                                 stale registry URL; 5xx = service down). Never an API-key issue.
 - `newt.EmbodimentError`      — raised when Robot(embodiment=...) receives an invalid
                                  value: a string name, a conflict with read_state=/execute=,
                                  or an object missing one or both required methods
@@ -73,6 +76,7 @@ from newt._client.robot import (
     ContractMismatchError,
     DegradationWarning,
     EmbodimentError,
+    EndpointUnavailableError,
     EnvOverrideWarning,
     ForbiddenError,
     InferenceResponse,
@@ -100,6 +104,7 @@ __all__ = [
     "DegradationWarning",
     "Embodiment",
     "EmbodimentError",
+    "EndpointUnavailableError",
     "EnvOverrideWarning",
     "ForbiddenError",
     "InferenceResponse",
