@@ -72,23 +72,23 @@ def _c(code: str, text: str) -> str:
 
 def _usage() -> None:
     print("Usage: newt run <tag> [options]")
-    print("")
+    print()
     print("  Run one real inference against your model and print what came back.")
     print("  Loads a bundled observation, calls the model once against prod, and prints")
     print("  the resolved model, the round-trip latency, and the action-chunk shape.")
-    print("")
+    print()
     print("  No robot is connected and nothing moves — this is a live inference against")
     print("  your model, not a robot demo.")
-    print("")
+    print()
     print("Arguments:")
     print("  <tag>   Model tag or UID to run (required)")
-    print("")
+    print()
     print("Options:")
     print("  --snapshot <name>  Bundled observation to send (default: matched to the")
     print("                     model's contract — 8-axis rig, 6-axis SO-101)")
     print("  --prompt <text>    Override the snapshot's recorded prompt")
     print("  --json             Emit machine-readable JSON")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY        API key override (overrides ~/.nt/credentials).")
     print("  NT_BOOTSTRAP_URL  Override registry discovery base URL.")
@@ -194,7 +194,7 @@ def _render_human(tag: str, resp, snapshot: str) -> None:
     print(f"  latency   {_c(_MINT, _latency_line(resp))}")
     print(f"  action    {_shape_str(resp.action_chunk)}  {_c(_GRAY, ' '.join(resp.axes))}")
     print(f"  snapshot  {_c(_GRAY, snapshot)}")
-    print("")
+    print()
     # The non-negotiable honesty seam: a live inference is NOT a live robot. Wording is
     # the worker's canonical framing (no docs `run` line existed to track — flagged for
     # the follow-on docs arc to ratify).
@@ -345,9 +345,8 @@ def cmd_run(args: list[str]) -> int:
     explicit_snapshot = _opt_value(args, "--snapshot")
     prompt_override = _opt_value(args, "--prompt")
 
-    from newt import snapshots
-
     import newt
+    from newt import snapshots
 
     # Construct the Robot FIRST — it fetches the registry and resolves the tag's contract,
     # which contract-aware snapshot selection needs. Construction is also where auth /

@@ -55,8 +55,9 @@ Exit codes:
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 #: Every part ran its declared sequence, was de-energized, and said what state
 #: it ended in. The saying is what this code certifies — the state itself is
@@ -525,7 +526,7 @@ def _report(rig: str, outcomes: Sequence[PartOutcome], interrupted: bool) -> Non
         # line below carries that, so one word can never stand in for two.
         f"run:         {'interrupted (Ctrl+C)' if interrupted else 'completed'}\n"
         "parts:\n" + "\n".join(lines) + "\n"
-        f"ended:       "
+        "ended:       "
         + (
             # Not "all parts off". Every part was halted and every part answered
             # when asked; what the answers mean is the rig's vocabulary, printed

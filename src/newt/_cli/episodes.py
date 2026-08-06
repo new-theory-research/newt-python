@@ -49,21 +49,21 @@ _DEFAULT_EPISODES_DIR = "episodes"
 
 def _usage() -> None:
     print("Usage: newt episodes <subcommand> [options]")
-    print("")
+    print()
     print("Subcommands:")
     print("  validate <dir>       Validate an episode_<id> directory against the NT v0.0.3 invariants.")
     print("  push [dir]           Upload recorded episodes (default: ./episodes) into your NT namespace.")
     print("  pull <dataset>       Download a staged dataset back down from your NT namespace.")
-    print("")
+    print()
     print("Options:")
     print("  --dataset <name>     (push) The dataset name to land the episodes under. Required.")
     print("  --dest <dir>         (pull) Where to write the dataset (default: ./<dataset>).")
     print("  --json               Emit machine-readable JSON.")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials).")
     print("  NT_CONSOLE_URL  Console URL (default: https://newtheory-console.vercel.app)")
-    print("")
+    print()
     print("  Validation needs the extra:  pip install \"newt[recording]\"")
 
 

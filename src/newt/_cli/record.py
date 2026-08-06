@@ -60,10 +60,10 @@ from newt.teleop import DRIVES_AND_RECORDS
 
 def _usage() -> None:
     print("Usage: newt record [options]")
-    print("")
+    print()
     print("  Record NT v0.0.3 episodes from an embodiment. SPACE starts/stops an")
     print("  episode; ENTER keeps it, D discards, R redoes. Ctrl+H is the kill.")
-    print("")
+    print()
     print("Options:")
     print("  --task TEXT     Language task prompt recorded in every episode (required).")
     print("  --dest DIR      Episode output directory (default: ./episodes).")
@@ -97,7 +97,7 @@ def _usage() -> None:
     print("                  This flag is a bench door pending the naming ruling in")
     print("                  newtrino-030 — expect it to be spelled differently, and")
     print("                  the config key to move with it.")
-    print("")
+    print()
     print("  Recording needs the extra:  pip install \"newt[recording]\"")
 
 

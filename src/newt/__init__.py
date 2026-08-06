@@ -65,6 +65,7 @@ Internal:
 
 __version__ = "0.0.1"
 
+from newt import snapshots
 from newt._client.robot import (
     AuthError,
     BaseNotDeployableError,
@@ -89,7 +90,6 @@ from newt._client.robot import (
     list_models,
 )
 from newt._embodiment import Embodiment
-from newt import snapshots
 
 __all__ = [
     "AuthError",
@@ -113,8 +113,8 @@ __all__ = [
     "ServerError",
     "VerifierError",
     "VerifierTransientRetry",
-    "snapshots",
     "list_models",
+    "snapshots",
 ]
 
 

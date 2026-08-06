@@ -23,7 +23,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -73,7 +73,7 @@ _GCS_COLLISION_CODES = frozenset({"AccessDenied", "Forbidden"})
 
 
 def _rfc3339_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _gcs_error_code(exc: HTTPError) -> str | None:
@@ -131,7 +131,7 @@ def _parse_expiry(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -569,7 +569,7 @@ class NTCloudSink:
                 # Don't retry into a dead URL: a signed URL lives ~15 min, but a very large file on
                 # a very slow link can take longer than that across attempts. If it's already
                 # expired, retrying only earns a guaranteed 4xx — fail now, distinctly (Rule 12).
-                if expires_at is not None and datetime.now(timezone.utc) >= expires_at:
+                if expires_at is not None and datetime.now(UTC) >= expires_at:
                     raise RuntimeError(
                         f"NTCloudSink: upload of {remote_path!r} stalled and its signed upload URL "
                         f"expired before it could complete (signed URLs are valid ~15 min; a very "

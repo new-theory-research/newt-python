@@ -260,11 +260,11 @@ def _validate_name(raw: str | None) -> tuple[str | None, str | None]:
 
 def _usage() -> None:
     print("Usage: newt finetune (--dataset <path|name> | --handle <job> | --list) [--status] [--json]")
-    print("")
+    print()
     print("  Launch a training run on NT's GPUs with your key, then watch it to")
     print("  completion. The launch happens server-side under NT's Modal credentials —")
     print("  no Modal credential ever touches this client.")
-    print("")
+    print()
     print("Options:")
     print("  --dataset <path|name>  What to fine-tune on. Pass a local folder (e.g.")
     print("                         ./my-export) to upload it and launch on it, or a")
@@ -286,7 +286,7 @@ def _usage() -> None:
     print("                         handle with --status.")
     print("  --json                 Emit machine-readable JSON (handle + terminal state;")
     print("                         with --list, the raw runs array).")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY      API key override (overrides ~/.nt/credentials).")
     print("  NT_CONSOLE_URL  Console URL (default: https://newtheory-console.vercel.app)")
@@ -686,7 +686,7 @@ def _make_progress(out, total_bytes: int):
             flush=True,
         )
         if done_files == total_files:
-            print("", file=out)
+            print(file=out)
 
     return _progress
 
@@ -880,14 +880,14 @@ def cmd_finetune(args: list[str]) -> int:
         print(f"  watch page:   {console}/runs/{job_handle}", file=out)
         print(f"  check later:  newt finetune --handle {job_handle} --status", file=out)
         print(f"  re-attach:    newt finetune --handle {job_handle}", file=out)
-        print("", file=out)
+        print(file=out)
         # What to expect — training runs on New Theory's GPUs, so be explicit about the
         # phases and the cold-start latency; silence should never read as "stuck".
         print(_c(_GRAY, "  Runs on New Theory's GPUs. What happens next:"), file=out)
         print(_c(_GRAY, "    1. starting up  — container boot + base-checkpoint download (a few min, up to ~15 on a cold start)"), file=out)
         print(_c(_GRAY, "    2. training     — live step / loss / throughput / ETA stream below"), file=out)
         print(_c(_GRAY, "    3. wrap-up      — checkpoint registered, model goes live"), file=out)
-        print("", file=out)
+        print(file=out)
 
     print(f"Watching {job_handle} … (Ctrl-C to stop watching; the run keeps going)", file=out, flush=True)
 

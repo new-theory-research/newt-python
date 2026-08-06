@@ -52,8 +52,9 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 DEFAULT_RATE_HZ = 30.0
 

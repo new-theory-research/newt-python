@@ -81,7 +81,7 @@ class EpisodeWriter:
     _tmp: Path = field(init=False)
     _start_ns: int = field(init=False)
     _state_ns: list[int] = field(init=False, default_factory=list)
-    _frame_writers: dict[str, "subprocess.Popen"] = field(init=False, default_factory=dict)
+    _frame_writers: dict[str, subprocess.Popen] = field(init=False, default_factory=dict)
     _frame_counts: dict[str, int] = field(init=False, default_factory=dict)
     _state_count: int = field(init=False, default=0)
     _dropped_state: int = field(init=False, default=0)
@@ -140,7 +140,7 @@ class EpisodeWriter:
             cam_dir.mkdir(parents=True, exist_ok=True)
             self._frame_writers[cam.id] = self._spawn_encoder(cam, cam_dir / "color.mp4")
 
-    def _spawn_encoder(self, cam: CameraSpec, out_path: Path) -> "subprocess.Popen":
+    def _spawn_encoder(self, cam: CameraSpec, out_path: Path) -> subprocess.Popen:
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "rawvideo", "-pix_fmt", "bgr24",

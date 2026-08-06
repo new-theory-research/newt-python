@@ -58,14 +58,14 @@ def _device_name() -> str:
 
 def _usage() -> None:
     print("Usage: newt login [options]")
-    print("")
+    print()
     print("  Opens a browser pairing flow and writes your API key to ~/.nt/credentials.")
     print("  In headless environments, set NT_API_KEY instead.")
-    print("")
+    print()
     print("Options:")
     print("  --print  Print the key to stdout; do not write credentials.")
     print("           Compose with: KEY=$(newt login --print)")
-    print("")
+    print()
     print("Environment:")
     print("  NT_API_KEY     Set this instead of running login (CI, agents, SSH).")
     print("  NT_CONSOLE_URL Override the console URL (default: https://newtheory-console.vercel.app)")

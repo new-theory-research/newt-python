@@ -23,19 +23,19 @@ def cmd_skill(args: list[str]) -> int:
 
 def _usage() -> None:
     print("Usage: newt skill <subcommand> [options]")
-    print("")
+    print()
     print("Subcommands:")
     print("  install  Copy the newt-onboarding guide into .claude/skills/ in the current directory")
-    print("")
+    print()
     print("Options:")
     print("  --json   Emit machine-readable JSON")
 
 
 def _usage_install() -> None:
     print("Usage: newt skill install [options]")
-    print("")
+    print()
     print("  Copy the newt-onboarding guide into .claude/skills/ in the current directory.")
-    print("")
+    print()
     print("Options:")
     print("  --json   Emit machine-readable JSON")
     print("  -h, --help  Show this message and exit")
