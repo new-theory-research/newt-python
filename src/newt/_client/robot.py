@@ -1455,7 +1455,7 @@ class Robot:
             http_code = getattr(status, "status_code", 0) if status else 0
             # Any HTTP-status rejection of the WS *upgrade* is an endpoint/transport
             # problem, never an NT-API-key problem. The key is validated AFTER the
-            # socket is accepted: serve_modela.py accepts, checks the Bearer token, then
+            # socket is accepted: the server accepts, checks the Bearer token, then
             # closes with WS code 4001 (handled in the recv loop, raised as AuthError
             # there). So a rejected key never reaches this branch. The old code mapped
             # every InvalidStatus to "Authentication failed — check your API key",
