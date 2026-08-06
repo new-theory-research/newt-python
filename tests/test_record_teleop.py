@@ -22,11 +22,19 @@ What these encode (the WHY, not just the WHAT):
 - **Plain ``newt record`` is untouched.** The pushed path is opt-in at
   construction, and a Session that polls refuses a pushed frame rather than
   interleaving two clocks into one episode.
+- **Declare, then build.** The declaration is read off the factory before the
+  factory is called, and a factory that has not declared is never called at all.
+  Construction is what connects and energizes a rig, so a verb that validates
+  afterwards has already moved metal it never approved — that is not a
+  hypothetical, it is what `newt rest --source recording_source:live_pair` did to
+  two arms on 2026-08-05. The test asserts on whether the factory *ran*, because
+  an exit code cannot tell a refusal-before from a refusal-after.
 
 No hardware, no sleeping, a fake clock. Nothing here proves an arm moved.
 """
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import io
 import sys
@@ -415,7 +423,6 @@ def test_a_source_that_declares_both_is_accepted():
 @pytest.mark.parametrize(
     "args, marker",
     [
-        (["--task", "t", "--teleop"], "--source is required"),
         (["--task", "t", "--teleop", "--source", "x:y", "--simulate"],
          "no simulated demonstration"),
         (["--task", "t", "--teleop", "--source", "x:y", "--json"], "no kill key"),
@@ -437,6 +444,180 @@ def test_the_flag_combinations_that_cannot_work_refuse_before_anything_connects(
 
     assert rc == 1
     assert marker in err.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Declare, then build — the refusal that happens while the rig is still dark
+# --------------------------------------------------------------------------- #
+
+_LYING_FACTORY = """
+ran = False
+
+
+def make_demo():
+    global ran
+    ran = True
+    return object()
+"""
+
+_DECLARED_FACTORY = """
+from newt.teleop import drives_and_records
+
+ran = False
+
+
+@drives_and_records
+def make_demo():
+    global ran
+    ran = True
+    return object()
+"""
+
+
+def _rig_module(tmp_path, monkeypatch, name: str, text: str):
+    """A real module on a real sys.path, whose factory records whether it ran.
+
+    Written and imported for real rather than monkeypatched in: the invariant
+    under test is exactly the difference between what `import` does and what
+    `call` does, and a stubbed loader would prove the test's own arrangement
+    instead of the order the verb runs in.
+    """
+    (tmp_path / f"{name}.py").write_text(text)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    return importlib.import_module(name)
+
+
+class _Tty(io.StringIO):
+    """stdin that claims to be a terminal — the composed path refuses without one."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _run_composed(args, monkeypatch):
+    """`newt record --teleop …` with the kill key stubbed and nothing real behind it."""
+    from newt._cli.teleop import KillKey
+
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(KillKey, "arm", lambda self: True)
+    monkeypatch.setattr(KillKey, "restore", lambda self: None)
+
+    rc = cmd_record(["--task", "pick up the cup", "--teleop", *args])
+    return rc, err.getvalue()
+
+
+def test_an_undeclared_factory_is_refused_without_ever_being_called(
+    tmp_path, monkeypatch
+):
+    """The MUST-FIX, asserted on the side effect and not on the exit code.
+
+    A factory is what connects and energizes a rig. Refusing after it has run
+    leaves an operator holding two torqued arms they never approved and cannot
+    move by hand — which is the bench incident this ordering exists to prevent.
+    So the assertion that matters is ``ran is False``: the verb read the
+    declaration off the callable and stopped there.
+    """
+    mod = _rig_module(tmp_path, monkeypatch, "undeclared_rig", _LYING_FACTORY)
+
+    rc, err = _run_composed(["--source", "undeclared_rig:make_demo"], monkeypatch)
+
+    assert rc == 2
+    assert mod.ran is False, "the factory ran — the rig was built before it was allowed"
+    assert "does not declare drives_and_records" in err
+    assert "nothing is connected and nothing is energized" in err
+
+
+def test_a_declared_factory_runs_and_the_object_is_checked_again(
+    tmp_path, monkeypatch
+):
+    """The declaration is a gate, not a promise — and the second check catches the lie.
+
+    Same exit code as the refusal above and a different string, because they are
+    different causes with different next steps: one is a factory that never
+    should have been called, the other is a factory that claimed more than it
+    built. The rig is up in this one, and the message says so.
+    """
+    mod = _rig_module(tmp_path, monkeypatch, "declared_rig", _DECLARED_FACTORY)
+
+    rc, err = _run_composed(["--source", "declared_rig:make_demo"], monkeypatch)
+
+    assert rc == 2
+    assert mod.ran is True, "a declared factory was gated out — the gate is too tight"
+    assert "neither drives nor records" in err
+    assert "does not declare drives_and_records" not in err
+
+
+# --------------------------------------------------------------------------- #
+# Where the composed source comes from — its own namespace, not record's
+# --------------------------------------------------------------------------- #
+
+def test_a_configured_rig_records_a_demonstration_without_naming_a_factory(
+    tmp_path, monkeypatch
+):
+    """Two words plus a task, on a bench that declared itself once (newtrino-029).
+
+    Asserted on which factory was reached rather than on an exit code, because
+    an exit code cannot tell a resolved default from a lucky no-op. And the
+    provenance line is asserted too: a source nobody typed has to say where it
+    came from before anything starts.
+    """
+    mod = _rig_module(tmp_path, monkeypatch, "configured_rig", _LYING_FACTORY)
+    config = tmp_path / "nt.toml"
+    config.write_text('[sources]\ndemonstration = "configured_rig:make_demo"\n')
+    monkeypatch.setenv("NT_SITE_CONFIG", str(config))
+
+    rc, err = _run_composed([], monkeypatch)
+
+    assert rc == 2
+    assert mod.ran is False
+    assert "configured_rig:make_demo" in err
+    assert str(config.resolve()) in err
+
+
+def test_a_rig_that_declared_only_record_is_not_volunteered_for_this(
+    tmp_path, monkeypatch
+):
+    """`[sources].record` is not an answer to "what drives this rig while reading it".
+
+    The recording factory reads two arms and drives neither — running it here is
+    the exact thing that looked like it should work at the bench and did not.
+    Reaching for it because it is the nearest declared thing would be the
+    identity-fill failure with a friendly face, so the refusal names the key
+    that is missing and leaves the record factory alone.
+    """
+    mod = _rig_module(tmp_path, monkeypatch, "record_only_rig", _LYING_FACTORY)
+    config = tmp_path / "nt.toml"
+    config.write_text('[sources]\nrecord = "record_only_rig:make_demo"\n')
+    monkeypatch.setenv("NT_SITE_CONFIG", str(config))
+
+    rc, err = _run_composed([], monkeypatch)
+
+    assert rc == 2
+    assert mod.ran is False
+    assert "demonstration" in err
+    assert "It declares: record." in err
+
+
+def test_the_composed_refusal_never_offers_simulate_as_the_way_out(
+    tmp_path, monkeypatch
+):
+    """Plain `record`'s unresolved-source refusal ends with "or try --simulate".
+
+    On this path that would be advice the very next branch refuses: there is no
+    simulated demonstration, because a demonstration is a person moving a real
+    arm. A fix line that does not work is worse than no fix line.
+    """
+    monkeypatch.setenv("NT_SITE_CONFIG", str(tmp_path / "absent" / "nt.toml"))
+
+    rc, err = _run_composed([], monkeypatch)
+
+    assert rc == 2
+    assert "no source to run" in err
+    assert "--simulate" not in err
 
 
 def test_the_help_says_the_flag_is_temporary(monkeypatch, capsys):

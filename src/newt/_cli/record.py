@@ -32,6 +32,11 @@ Ctrl+C puts them away — and adds one decision of its own: the kill discards th
 episode, every other ending keeps it, and which one happened is printed rather
 than left to the exit code. The flag is spelled provisionally; newtrino-030
 names it.
+
+**Declare, then build.** The factory's declaration is read before the factory is
+called, so a rig that is not going to be allowed to do this is refused while it
+is still dark. Construction is what connects and energizes; a verb that
+validates after it has built has already moved metal it never approved.
 """
 from __future__ import annotations
 
@@ -43,7 +48,14 @@ import time
 import tty
 from pathlib import Path
 
-from newt._cli._source_spec import SourceNotResolved, load_source, resolve_spec
+from newt._cli._source_spec import (
+    SourceNotResolved,
+    build_source,
+    import_factory,
+    load_source,
+    resolve_spec,
+)
+from newt.teleop import DRIVES_AND_RECORDS
 
 
 def _usage() -> None:
@@ -73,11 +85,15 @@ def _usage() -> None:
     print("  --json          Agent mode: line-delimited JSON events + stdin commands.")
     print("  --teleop        TEMPORARY DOOR — record a demonstration: one embodiment")
     print("                  drives another and the same tick writes the episode.")
-    print("                  Needs a --source that declares it does both.")
+    print("                  The factory must declare it does both, and that is read")
+    print("                  before anything connects. Resolves its source from")
+    print("                  [sources].demonstration, not [sources].record — driving")
+    print("                  and reading are different factories on the same rig.")
     print("                  One episode per run; Ctrl+C ends it and keeps it,")
     print("                  Ctrl+H kills (de-energize where it stands, no episode).")
     print("                  This flag is a bench door pending the naming ruling in")
-    print("                  newtrino-030 — expect it to be spelled differently.")
+    print("                  newtrino-030 — expect it to be spelled differently, and")
+    print("                  the config key to move with it.")
     print("")
     print("  Recording needs the extra:  pip install \"newt[recording]\"")
 
@@ -503,19 +519,70 @@ def _run_json(session, opts: dict) -> int:
 # is too temporary to introduce.
 # --------------------------------------------------------------------------- #
 
-#: What a rig sets to say it does both. Asked for, never inferred: an object
-#: carrying `send_action` next to `read_state` is a shape, and a shape is not a
-#: statement that driving and recording the same rig at once is a thing this rig
-#: means to do. The name is provisional with the flag.
-_DECLARATION = "drives_and_records"
+#: What a rig sets to say it does both — the public word, from `newt.teleop`, so
+#: a kit author has something to import instead of a string copied out of a CLI
+#: module. Asked for, never inferred: an object carrying `send_action` next to
+#: `read_state` is a shape, and a shape is not a statement that driving and
+#: recording the same rig at once is a thing this rig means to do.
+_DECLARATION = DRIVES_AND_RECORDS
+
+#: The verb namespace the composed path resolves its source in — separate from
+#: `record`, because the factory that reads a rig and the factory that drives it
+#: while reading it are different code, and a bench that has declared one has
+#: not declared the other. Provisional with the flag: `--teleop` and
+#: `[sources].demonstration` are the same naming question and they move together.
+_COMPOSED_VERB = "demonstration"
+
+#: What the composed path shows an operator who has nothing declared. Not
+#: `make_source` — the factory this path needs builds a different rig.
+_COMPOSED_EXAMPLE = "mypkg.rig:make_demo"
+
+
+def _refuse_undeclared_factory(spec: str, factory) -> str | None:
+    """The gate, read off the factory *before it is called*, or None to proceed.
+
+    Every other refusal on this path costs the operator two connected arms: the
+    factory is what brings the rig up and energizes it, so a verb that builds
+    first and validates second has already moved metal it never approved. This
+    one is free — it happens while the rig is still dark, so "nothing moved" is
+    a fact rather than a hope. (Receipt, 2026-08-05: `newt rest` pointed at a
+    read-only factory by a one-word typo, which connected and energized a rig on
+    its way to a refusal that could not put back what it had just brought up.)
+
+    Import is what happened; construction is what did not. A module-level
+    `@drives_and_records` marker is readable from the first and gates the
+    second.
+    """
+    if getattr(factory, _DECLARATION, False) is True:
+        return None
+    return (
+        f"The factory {spec} does not declare {_DECLARATION}, and this verb will not "
+        "connect a rig to find out whether it meant to.\n"
+        "Yours: the factory was found and NOT called. Recording a demonstration means "
+        "one object drives the rig and reports what it drove on the same tick, and a "
+        "factory that has not said it builds that is either the wrong one or a rig "
+        "that has not been taught this yet.\n"
+        "Do now: nothing is connected and nothing is energized — this was checked "
+        "before the factory ran, which is why there is nothing to put away.\n"
+        f"Then: decorate the factory that builds the driving-and-recording pair with "
+        f"`@newt.teleop.drives_and_records` (and set `{_DECLARATION} = True` on the "
+        f"object it returns), or point this at that factory if it already exists — "
+        f"`newt record --teleop --source {_COMPOSED_EXAMPLE}`."
+    )
 
 
 def _refuse_composed(source) -> str | None:
-    """The refusal for a source that cannot do this, or None if it can.
+    """The second check, on the object the factory returned — or None if it holds.
 
     Four causes, four strings. The presence checks below choose *which* message
     an operator gets; none of them grants the capability — that is the
     declaration's job, and the last branch is the only one that says yes.
+
+    Reaching any of these means the factory carried the declaration and what it
+    built does not back it, so every string here says that: the rig is up,
+    because a declared factory is allowed to run. Belt and braces to the gate in
+    `_refuse_undeclared_factory`, and the only thing that can catch a factory
+    that claims more than it builds.
     """
     drives = all(
         callable(getattr(source, member, None))
@@ -529,49 +596,51 @@ def _refuse_composed(source) -> str | None:
         return (
             "This source records the rig but does not drive it, so nothing would move "
             "and the episode would be a rig sitting still.\n"
-            "Yours: the --source you passed is a recording source — it reads the rig and "
-            "drives none of it. Running it under --teleop is the one thing that looks "
-            "like it should work and does not.\n"
-            "Do now: nothing has been recorded. Whatever the factory connected is "
-            "connected.\n"
-            "Then: point --source at the factory that builds the pair for driving AND "
-            f"recording (it declares {_DECLARATION}), or drop --teleop and record the "
-            "arms as something else moves them."
+            f"Yours: the factory declared {_DECLARATION} and built a recording source — "
+            "it reads the rig and drives none of it. That combination is a bug in the "
+            "kit, not a wrong flag: the declaration is what let this factory run at "
+            "all.\n"
+            "Do now: nothing has been recorded, and the rig this factory brought up is "
+            "up. Put it away with `newt rest`.\n"
+            f"Then: the declared factory has to return the pair built for driving AND "
+            "recording — or the declaration belongs on the other factory in that module."
         )
     if drives and not records:
         return (
             "This source drives the rig but has nothing to record from it, so there "
             "would be a demonstration and no episode of it.\n"
-            "Yours: the --source you passed is a teleop source — it has read_action() "
-            "and send_action() but no descriptor/read_state() for the episode to be "
-            "written from.\n"
-            "Do now: nothing has been recorded. Whatever the factory connected is "
-            "connected.\n"
-            "Then: use the factory that builds the composed pair, or run `newt teleop "
-            "--source ...` if driving without recording is what you meant."
+            f"Yours: the factory declared {_DECLARATION} and built a teleop source — it "
+            "has read_action() and send_action() but no descriptor/read_state() for the "
+            "episode to be written from.\n"
+            "Do now: nothing has been recorded, and the rig this factory brought up is "
+            "up. Put it away with `newt rest`.\n"
+            "Then: the declared factory has to return the composed pair — or drop the "
+            "declaration and run `newt teleop --source ...`, which is what this object "
+            "is actually for."
         )
     if not drives and not records:
         return (
             "This source neither drives nor records — it is not a rig this verb can "
             "use at all.\n"
-            "Yours: the object --source built has neither read_action()/send_action() "
-            "nor descriptor/read_state().\n"
-            "Do now: nothing has been recorded. Whatever the factory connected is "
-            "connected.\n"
-            "Then: check that MODULE:FACTORY is the one you meant — a factory that "
-            "returns a config, a driver handle or None lands exactly here."
+            f"Yours: the factory declared {_DECLARATION} and returned an object with "
+            "neither read_action()/send_action() nor descriptor/read_state(). A factory "
+            "that returns a config, a driver handle or None lands exactly here.\n"
+            "Do now: nothing has been recorded. Whether anything connected is up to "
+            "what that factory did before it returned — check its output above.\n"
+            "Then: the declaration is on a factory that does not build a source. Move "
+            "it to the one that does."
         )
     if getattr(source, _DECLARATION, False) is not True:
         return (
-            f"This source can drive and can record, but it does not declare "
-            f"{_DECLARATION}, so this verb will not decide for it that doing both at "
-            "once is safe on this rig.\n"
+            f"This source can drive and can record, but the object does not declare "
+            f"{_DECLARATION} — only the factory did, and this verb takes the object's "
+            "word over the factory's.\n"
             "Yours: the object has the methods for both halves. That is a shape, not a "
             "statement — a part built to be read can be sent actions it will refuse, "
             "and finding that out mid-demonstration is the failure this refusal "
             "exists to prevent.\n"
-            "Do now: nothing has been recorded. Whatever the factory connected is "
-            "connected.\n"
+            "Do now: nothing has been recorded, and the rig this factory brought up is "
+            "up. Put it away with `newt rest`.\n"
             f"Then: set `{_DECLARATION} = True` on the object your factory returns, "
             "once the part it drives is built the way driving needs."
         )
@@ -638,9 +707,13 @@ def _run_teleop(opts: dict) -> int:
 
     The order is the safety argument, and it is `newt teleop`'s: the kill key is
     armed before the factory runs, because the factory is what connects and
-    energizes, and a session that cannot be killed must never reach it. What is
-    new is only where the episode opens — after the preflight the operator reads,
-    and before the first tick.
+    energizes, and a session that cannot be killed must never reach it.
+
+    Two things this path adds to that order. The episode opens after the
+    preflight the operator reads and before the first tick. And the factory's
+    declaration is read *between* finding it and calling it — declare, then
+    build — so a rig that was never going to be allowed to do this is refused
+    while it is still dark.
     """
     from newt._cli.teleop import KillKey, _stand_down_no_tty, _stand_down_unarmed
     from newt.teleop import run_session
@@ -655,7 +728,26 @@ def _run_teleop(opts: dict) -> int:
     session = None
     try:
         try:
-            source = _load_source(opts["source"])
+            spec = resolve_spec(_COMPOSED_VERB, opts["source"], _COMPOSED_EXAMPLE)
+        except SourceNotResolved as exc:
+            # No `--simulate` postscript here: this is the one path that forbids
+            # it, and offering it as the way out would be advice that refuses.
+            print(str(exc), file=sys.stderr)
+            return 2
+
+        try:
+            factory = import_factory(spec)
+        except Exception as exc:
+            print(f"[newt record] {exc}", file=sys.stderr)
+            return 1
+
+        refusal = _refuse_undeclared_factory(spec, factory)
+        if refusal is not None:
+            print(f"\n[newt record] REFUSING TO RECORD — {refusal}", file=sys.stderr)
+            return 2
+
+        try:
+            source = build_source(spec, factory)
         except KeyboardInterrupt:
             print(
                 "\n[newt record] bring-up interrupted (Ctrl+C) — nothing was recorded "
@@ -733,19 +825,6 @@ def cmd_record(args: list[str]) -> int:
         return 1
 
     if opts["teleop"]:
-        if not opts["source"]:
-            print(
-                "newt record --teleop: --source is required — it is what knows which "
-                "embodiment drives which, and how to build the driven one so that it "
-                "can be driven.",
-                file=sys.stderr,
-            )
-            print(
-                "        Fix: newt record --teleop --source mypkg.rig:make_demo "
-                "--task \"pick up the cup\"",
-                file=sys.stderr,
-            )
-            return 1
         if opts["simulate"]:
             print(
                 "[newt record] --teleop and --simulate: there is no simulated "

@@ -363,16 +363,19 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
     )
 
 
-def load_source(spec: str):
-    """Import a developer's source from a ``module:factory`` spec and construct it.
+def import_factory(spec: str):
+    """Phase one: find the factory a spec names. **Never calls it.**
 
-    The factory is called with no arguments — it owns producing a fully formed
-    source (descriptor included) for whatever rig it wraps; the CLI never
-    guesses at embodiment shape.
+    Import is not connect; construction is. Splitting the two is what lets a
+    verb read what a factory *declares* while the rig is still dark, and refuse
+    before anything energizes — the bench receipt is a ``newt rest`` pointed at
+    a read-only factory by a one-word typo, which connected and energized a rig
+    on its way to a refusal that then admitted it had no way to put back what it
+    had just brought up (2026-08-05).
 
-    Every failure point names the spec and what went wrong (Rule 10) — no
-    silent fallback. Raises; the caller renders the message and exits, the
-    loud-not-traced path."""
+    Verbs with nothing to validate call ``load_source`` and never see this
+    split. Verbs that gate on a declaration call this, read it off the returned
+    callable, and only then call ``build_source``."""
     import importlib
 
     if ":" not in spec:
@@ -388,11 +391,16 @@ def load_source(spec: str):
             f"--source {spec!r}: failed to import module {module_name!r}: {exc}"
         ) from exc
     try:
-        factory = getattr(module, factory_name)
+        return getattr(module, factory_name)
     except AttributeError:
         raise RuntimeError(
             f"--source {spec!r}: module {module_name!r} has no attribute {factory_name!r}"
         ) from None
+
+
+def build_source(spec: str, factory):
+    """Phase two: call the factory. This is the call that touches hardware."""
+    factory_name = spec.partition(":")[2]
     try:
         return factory()
     except Exception as exc:
@@ -400,3 +408,16 @@ def load_source(spec: str):
             f"--source {spec!r}: factory {factory_name!r} raised while constructing "
             f"the source: {exc}"
         ) from exc
+
+
+def load_source(spec: str):
+    """Import a developer's source from a ``module:factory`` spec and construct it.
+
+    The factory is called with no arguments — it owns producing a fully formed
+    source (descriptor included) for whatever rig it wraps; the CLI never
+    guesses at embodiment shape.
+
+    Every failure point names the spec and what went wrong (Rule 10) — no
+    silent fallback. Raises; the caller renders the message and exits, the
+    loud-not-traced path."""
+    return build_source(spec, import_factory(spec))
