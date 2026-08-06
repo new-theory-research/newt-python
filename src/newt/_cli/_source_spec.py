@@ -59,9 +59,10 @@ REGISTRY_GROUP = "newt.sources"
 class SourceNotResolved(Exception):
     """No source spec could be resolved for a verb — the four causes below.
 
-    Carries a fully rendered, verb-prefixed message; the caller prints it and
-    exits. Distinct from the errors ``load_source`` raises, which are about a
-    spec we *have* and could not honour."""
+    Carries a fully rendered message prefixed with the command the operator
+    typed; the caller prints it and exits. Distinct from the errors
+    ``load_source`` raises, which are about a spec we *have* and could not
+    honour."""
 
 
 def site_config_path() -> tuple[Path, str]:
@@ -79,11 +80,14 @@ def site_config_path() -> tuple[Path, str]:
     )
 
 
-def _read_declared_sources(verb: str, path: Path, provenance: str) -> dict:
+def _read_declared_sources(verb: str, command: str, path: Path, provenance: str) -> dict:
     """Take ``[sources]`` out of the rig's config and hand back the raw map.
 
     Opens the TOML, takes one table, returns strings. Everything else in the
-    file is the kit's and is left untouched — see SOURCES_TABLE above."""
+    file is the kit's and is left untouched — see SOURCES_TABLE above.
+
+    ``verb`` is the key looked up; ``command`` is what the operator types. See
+    ``resolve_spec`` for why those are two arguments and not one."""
     import tomllib
 
     try:
@@ -93,21 +97,21 @@ def _read_declared_sources(verb: str, path: Path, provenance: str) -> dict:
         # Cause 3: the file is there and it is broken. The operator has a typo,
         # not a gap — a different problem from cause 2, so a different string.
         raise SourceNotResolved(
-            f"newt {verb}: your rig config at {path} ({provenance}) is not valid TOML: {exc}\n"
+            f"newt {command}: your rig config at {path} ({provenance}) is not valid TOML: {exc}\n"
             f"        That file is yours, not newt's — fix the syntax at the line named above.\n"
             f"        To get moving right now, bypass the file: "
-            f"newt {verb} --source MODULE:FACTORY"
+            f"newt {command} --source MODULE:FACTORY"
         ) from exc
     except OSError as exc:
         # Present-but-unreadable: a permissions or device problem, which is
         # neither "no file" nor "bad TOML".
         raise SourceNotResolved(
-            f"newt {verb}: your rig config at {path} ({provenance}) exists but could not be "
+            f"newt {command}: your rig config at {path} ({provenance}) exists but could not be "
             f"read: {exc}\n"
             f"        That is a filesystem problem on this machine, not a newt one — check the "
             f"file's permissions.\n"
             f"        To get moving right now, bypass the file: "
-            f"newt {verb} --source MODULE:FACTORY"
+            f"newt {command} --source MODULE:FACTORY"
         ) from exc
 
     declared = raw.get(SOURCES_TABLE, {})
@@ -115,15 +119,16 @@ def _read_declared_sources(verb: str, path: Path, provenance: str) -> dict:
         isinstance(key, str) and isinstance(value, str) for key, value in declared.items()
     ):
         # Also cause 3: the table parsed, but it is not the shape this reader
-        # accepts. Say what shape was expected.
+        # accepts. Say what shape was expected. The key in the sample table is
+        # the verb, not the command — it is the line the operator edits.
         raise SourceNotResolved(
-            f"newt {verb}: your rig config at {path} ({provenance}) has a [{SOURCES_TABLE}] "
+            f"newt {command}: your rig config at {path} ({provenance}) has a [{SOURCES_TABLE}] "
             f"table that is not a flat map of verb name to MODULE:FACTORY string.\n"
             f"        newt expects exactly this shape, and reads nothing else from the file:\n"
             f"            [{SOURCES_TABLE}]\n"
             f'            {verb} = "MODULE:FACTORY"\n'
             f"        Fix the table in that file, or bypass it: "
-            f"newt {verb} --source MODULE:FACTORY"
+            f"newt {command} --source MODULE:FACTORY"
         )
     return declared
 
@@ -159,14 +164,20 @@ def _offered(entries: list[tuple[str, str, str]]) -> str:
     )
 
 
-def _resolve_short(verb: str, name: str, example: str, origin: str | None) -> str:
+def _resolve_short(
+    verb: str, command: str, name: str, example: str, origin: str | None
+) -> str:
     """Turn a bare name into a spec, using only what a kit declared.
 
     ``origin`` is None when the operator typed the name and a rendered
     "your rig config at ... declares" clause when a *file* did. The two get
     different refusals for the same reason cause 4 exists: reading "no source
     named 'live_par'" while holding a terminal where you typed no --source
-    sends you looking in the wrong place (Rule 12)."""
+    sends you looking in the wrong place (Rule 12).
+
+    ``verb`` names the namespace these declarations live in; ``command`` names
+    the thing the operator retypes with the fix. On most verbs they are the same
+    word — see ``resolve_spec`` for the path where they are not."""
     entries = _declared_sources(verb)
     matches = [entry for entry in entries if entry[0] == name]
 
@@ -178,11 +189,11 @@ def _resolve_short(verb: str, name: str, example: str, origin: str | None) -> st
         # friendly face — it drives *an* arm, silently, possibly not yours.
         declarers = ", ".join(f"{dist} ({spec})" for _, spec, dist in matches)
         raise SourceNotResolved(
-            f"newt {verb}: the name {name!r} is declared for {verb} by more than one installed "
-            f"kit, and newt will not guess which one drives your rig.\n"
+            f"newt {command}: the name {name!r} is declared for {verb} by more than one "
+            f"installed kit, and newt will not guess which one drives your rig.\n"
             f"        Declared by:  {declarers}\n"
             f"        Name the code directly to settle it:  "
-            f"newt {verb} --source {matches[0][1]}\n"
+            f"newt {command} --source {matches[0][1]}\n"
             f"        Or uninstall the kit you don't mean to be running."
         )
 
@@ -193,21 +204,21 @@ def _resolve_short(verb: str, name: str, example: str, origin: str | None) -> st
             # Cause 5-flag: they typed a name, and it wasn't there. The fix is
             # usually one character, and they can see it from here.
             raise SourceNotResolved(
-                f"newt {verb}: no source named {name!r} is declared for {verb}.\n"
+                f"newt {command}: no source named {name!r} is declared for {verb}.\n"
                 f"        This machine offers, for {verb}:  {offered}\n"
-                f"        Fix the name:  newt {verb} --source {first}\n"
+                f"        Fix the name:  newt {command} --source {first}\n"
                 f"        Or name the code directly, which needs no declaration:  "
-                f"newt {verb} --source {example}"
+                f"newt {command} --source {example}"
             )
         # Cause 5-config: a *file* named it. Say so before anything else, or the
         # operator goes looking at a command line they never typed it on.
         raise SourceNotResolved(
-            f"newt {verb}: {origin} = {name!r}, and no source by that name is declared "
+            f"newt {command}: {origin} = {name!r}, and no source by that name is declared "
             f"for {verb}.\n"
             f"        You did not type this — it came from that file. This machine offers, "
             f"for {verb}:  {offered}\n"
             f"        Fix the value there, or override it this once:  "
-            f"newt {verb} --source {first}"
+            f"newt {command} --source {first}"
         )
 
     # Nothing declared at all. Different cause, different fix: the name may be
@@ -215,25 +226,27 @@ def _resolve_short(verb: str, name: str, example: str, origin: str | None) -> st
     # X" alone would send them to fix a spelling that isn't wrong.
     if origin is None:
         raise SourceNotResolved(
-            f"newt {verb}: no source named {name!r} is declared for {verb} — and neither is "
+            f"newt {command}: no source named {name!r} is declared for {verb} — and neither is "
             f"anything else. No installed kit declares any source for {verb} on this machine.\n"
             f"        A bare name is an alias an installed kit publishes, and newt found no "
             f"declarations at all — check that your rig's kit is installed in this environment.\n"
             f"        Or name the code directly, which needs no declaration:  "
-            f"newt {verb} --source {example}"
+            f"newt {command} --source {example}"
         )
     raise SourceNotResolved(
-        f"newt {verb}: {origin} = {name!r}, and no installed kit declares any source for "
+        f"newt {command}: {origin} = {name!r}, and no installed kit declares any source for "
         f"{verb} on this machine.\n"
         f"        You did not type this — it came from that file. A bare name is an alias an "
         f"installed kit publishes, and newt found no declarations at all — check that your "
         f"rig's kit is installed in this environment.\n"
         f"        Or name the code directly, which needs no declaration:  "
-        f"newt {verb} --source {example}"
+        f"newt {command} --source {example}"
     )
 
 
-def resolve_spec(verb: str, flag: str | None, example: str) -> str:
+def resolve_spec(
+    verb: str, flag: str | None, example: str, *, command: str | None = None
+) -> str:
     """The one answer to "which factory builds this rig?", for every verb.
 
     The ladder, stated once and tested as a unit:
@@ -263,22 +276,46 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
     failure mode this would otherwise introduce). stderr, not stdout, because
     ``newt record --json`` puts a machine-read stream on stdout.
 
-    ``example`` is the verb's own ``MODULE:FACTORY`` example, used in refusals."""
+    ``example`` is the verb's own ``MODULE:FACTORY`` example, used in refusals.
+
+    ``command`` is the two jobs ``verb`` used to do, pulled apart. ``verb`` is
+    the *namespace* a declaration lives in — the key in ``[sources]``, the tail
+    of the ``newt.sources.<verb>`` entry-point group. ``command`` is what the
+    operator types at a shell. For ``rest``, ``record`` and ``teleop`` those are
+    the same word, which is why they were one argument and why nobody noticed;
+    on the composed path they are not. ``newt record --teleop`` resolves in the
+    ``demonstration`` namespace, and a refusal that brands itself with the
+    namespace prints ``newt demonstration --source ...`` — a fix instruction for
+    a command that does not exist, which is Rule 12 failing on its own terms:
+    loud, and pointing at nothing.
+
+    So the split runs through every string below. A line that says *where the
+    declaration lives* keeps the verb — ``[sources].demonstration`` is the line
+    the operator opens an editor and types, and renaming it in a message would
+    be a different lie. A line the operator retypes at a prompt takes the
+    command. One message legitimately does both: it says the name is declared
+    for ``demonstration`` and to fix it with ``newt record --teleop --source``,
+    because those are two different places and the message names each
+    correctly."""
+    command = command or verb
+
     if flag and ":" in flag:
         return flag
     if flag:
         # Rung 2. Nothing was substituted — they named it — so no provenance
         # line; there is nothing to declare that they don't already know.
-        return _resolve_short(verb, flag, example, origin=None)
+        return _resolve_short(verb, command, flag, example, origin=None)
 
     path, provenance = site_config_path()
     have_config = path.exists()
-    declared = _read_declared_sources(verb, path, provenance) if have_config else {}
+    declared = (
+        _read_declared_sources(verb, command, path, provenance) if have_config else {}
+    )
     spec = declared.get(verb)
 
     if spec and ":" in spec:
         print(
-            f"[newt {verb}] source {spec} — declared as [{SOURCES_TABLE}].{verb} in {path}",
+            f"[newt {command}] source {spec} — declared as [{SOURCES_TABLE}].{verb} in {path}",
             file=sys.stderr,
         )
         return spec
@@ -292,9 +329,9 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
         origin = (
             f"your rig config at {path} ({provenance}) declares [{SOURCES_TABLE}].{verb}"
         )
-        resolved = _resolve_short(verb, spec, example, origin=origin)
+        resolved = _resolve_short(verb, command, spec, example, origin=origin)
         print(
-            f"[newt {verb}] source {resolved} — declared as [{SOURCES_TABLE}].{verb} = "
+            f"[newt {command}] source {resolved} — declared as [{SOURCES_TABLE}].{verb} = "
             f'"{spec}" in {path}',
             file=sys.stderr,
         )
@@ -307,7 +344,7 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
         # was read, so this is the substitution most in need of declaring.
         name, resolved, dist = entries[0]
         print(
-            f"[newt {verb}] source {resolved} — the only source {dist} declares for {verb}, "
+            f"[newt {command}] source {resolved} — the only source {dist} declares for {verb}, "
             f"and your rig config names no default",
             file=sys.stderr,
         )
@@ -318,10 +355,10 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
         # for good. No interactive prompt — a recovery verb must not block on a
         # menu with an arm moving, and a prompt breaks every non-tty caller.
         raise SourceNotResolved(
-            f"newt {verb}: more than one source is declared for {verb}, and your rig config "
+            f"newt {command}: more than one source is declared for {verb}, and your rig config "
             f"names no default.\n"
             f"        Declared for {verb}:  {_offered(entries)}\n"
-            f"        Pick one now:  newt {verb} --source {entries[0][0]}\n"
+            f"        Pick one now:  newt {command} --source {entries[0][0]}\n"
             f"        Or declare a default, once, in {path}:  "
             f'[{SOURCES_TABLE}]  {verb} = "{entries[0][0]}"'
         )
@@ -334,14 +371,14 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
         # refusal that cannot enumerate, so it says plainly that it found
         # nothing to read rather than inventing a roster to look helpful.
         raise SourceNotResolved(
-            f"newt {verb}: no source to run. --source was not given, there is no config file "
+            f"newt {command}: no source to run. --source was not given, there is no config file "
             f"at {path} ({provenance}), and no installed kit declares a source for {verb}.\n"
             f"        Nothing on this machine has been told which factory builds your rig. "
             f"Declare it once:\n"
             f"            [{SOURCES_TABLE}]\n"
             f'            {verb} = "{example}"\n'
-            f"        in {path}, and `newt {verb}` is all you ever type again.\n"
-            f"        Or pass it this once: newt {verb} --source {example}"
+            f"        in {path}, and `newt {command}` is all you ever type again.\n"
+            f"        Or pass it this once: newt {command} --source {example}"
         )
 
     # Cause 2: the file was found and read, and it declares nothing for *this*
@@ -354,25 +391,28 @@ def resolve_spec(verb: str, flag: str | None, example: str) -> str:
         else f"It has no [{SOURCES_TABLE}] table at all."
     )
     raise SourceNotResolved(
-        f"newt {verb}: your rig config at {path} ({provenance}) declares no source for "
+        f"newt {command}: your rig config at {path} ({provenance}) declares no source for "
         f"{verb!r}. {has} No installed kit declares one for {verb} either.\n"
         f"        Add the line to that file:\n"
         f"            [{SOURCES_TABLE}]\n"
         f'            {verb} = "{example}"\n'
-        f"        Or pass it this once: newt {verb} --source {example}"
+        f"        Or pass it this once: newt {command} --source {example}"
     )
 
 
-def load_source(spec: str):
-    """Import a developer's source from a ``module:factory`` spec and construct it.
+def import_factory(spec: str):
+    """Phase one: find the factory a spec names. **Never calls it.**
 
-    The factory is called with no arguments — it owns producing a fully formed
-    source (descriptor included) for whatever rig it wraps; the CLI never
-    guesses at embodiment shape.
+    Import is not connect; construction is. Splitting the two is what lets a
+    verb read what a factory *declares* while the rig is still dark, and refuse
+    before anything energizes — the bench receipt is a ``newt rest`` pointed at
+    a read-only factory by a one-word typo, which connected and energized a rig
+    on its way to a refusal that then admitted it had no way to put back what it
+    had just brought up (2026-08-05).
 
-    Every failure point names the spec and what went wrong (Rule 10) — no
-    silent fallback. Raises; the caller renders the message and exits, the
-    loud-not-traced path."""
+    Verbs with nothing to validate call ``load_source`` and never see this
+    split. Verbs that gate on a declaration call this, read it off the returned
+    callable, and only then call ``build_source``."""
     import importlib
 
     if ":" not in spec:
@@ -388,11 +428,16 @@ def load_source(spec: str):
             f"--source {spec!r}: failed to import module {module_name!r}: {exc}"
         ) from exc
     try:
-        factory = getattr(module, factory_name)
+        return getattr(module, factory_name)
     except AttributeError:
         raise RuntimeError(
             f"--source {spec!r}: module {module_name!r} has no attribute {factory_name!r}"
         ) from None
+
+
+def build_source(spec: str, factory):
+    """Phase two: call the factory. This is the call that touches hardware."""
+    factory_name = spec.partition(":")[2]
     try:
         return factory()
     except Exception as exc:
@@ -400,3 +445,16 @@ def load_source(spec: str):
             f"--source {spec!r}: factory {factory_name!r} raised while constructing "
             f"the source: {exc}"
         ) from exc
+
+
+def load_source(spec: str):
+    """Import a developer's source from a ``module:factory`` spec and construct it.
+
+    The factory is called with no arguments — it owns producing a fully formed
+    source (descriptor included) for whatever rig it wraps; the CLI never
+    guesses at embodiment shape.
+
+    Every failure point names the spec and what went wrong (Rule 10) — no
+    silent fallback. Raises; the caller renders the message and exits, the
+    loud-not-traced path."""
+    return build_source(spec, import_factory(spec))
