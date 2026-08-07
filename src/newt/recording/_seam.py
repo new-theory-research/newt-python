@@ -99,23 +99,27 @@ class CameraOpenError(RuntimeError):
         )
 
 
-class DriveFailed(RuntimeError):
-    """The source's ``drive()`` step raised part-way through a session.
+# --- the two ways the driving half of a recording fails ---------------------
+#
+# Driving does not belong to an episode the way a writer does — it runs from the
+# moment the session starts ticking until the session closes, takes and gaps
+# alike. So it fails in two places that must never share a string: inside a take
+# (an episode exists and is refused) and between takes (no episode exists, and
+# what is refused is starting the next one).
 
-    Capture stops with it: a tick that could not drive the rig is a tick nobody
-    demonstrated, and an episode whose joints go still half-way through — with
-    nothing in the file saying the driving stopped — is the camera-that-ends-early
-    failure wearing different clothes. Raised by ``Session.end_episode(keep=True)``,
-    which abandons the episode rather than committing it.
+DRIVE_FAILURE_CAUSES = (
+    "stopped_mid_episode",
+    "stopped_between_takes",
+)
 
-    ``detail`` is the source's own exception, verbatim: what driving means is the
-    source's, and so is the reason it stopped.
-    """
 
-    def __init__(self, detail: str) -> None:
-        self.detail = detail
-        super().__init__(
-            f"The rig stopped being driven part-way through the session: the source's "
+def drive_failure_message(cause: str, detail: str) -> str:
+    """The message for one drive failure cause. ``detail`` is the source's own
+    exception, verbatim: what driving means is the source's, and so is the reason
+    it stopped."""
+    if cause == "stopped_mid_episode":
+        return (
+            f"The rig stopped being driven part-way through the episode: the source's "
             f"drive() raised ({detail}).\n"
             "Yours: whatever this source drives went unreachable, refused the move, or "
             "faulted. Nothing stale was re-sent to cover the gap, and no tick after it "
@@ -127,6 +131,44 @@ class DriveFailed(RuntimeError):
             "Then: the message in the parentheses is the source's, not the library's. "
             "That is where the fix is."
         )
+    if cause == "stopped_between_takes":
+        return (
+            "This session stopped being able to drive the rig between takes, so it "
+            f"will not open another episode: the source's drive() raised ({detail}).\n"
+            "Yours: driving runs from the moment the session starts ticking, not just "
+            "while an episode is open — so it stopped in the gap, with nothing "
+            "recording. No episode was started and nothing was written.\n"
+            "Do now: the rig is standing where it stopped being driven and may still "
+            "be holding — put it away with `newt rest` before walking up to it. This "
+            "session will not drive again: close it and start a new one once the "
+            "source can drive, rather than recording takes nothing is moving.\n"
+            "Then: the message in the parentheses is the source's, not the library's. "
+            "That is where the fix is."
+        )
+    # Never reached through the call sites above; kept so an added cause that
+    # forgets its string fails loudly instead of rendering an empty one.
+    raise AssertionError(f"no message written for drive failure cause {cause!r} ({detail})")
+
+
+class DriveFailed(RuntimeError):
+    """The source's ``drive()`` step raised, so the session stopped driving.
+
+    A tick that could not drive the rig is a tick nobody demonstrated, and an
+    episode whose joints go still half-way through — with nothing in the file
+    saying the driving stopped — is the camera-that-ends-early failure wearing
+    different clothes. Raised by ``Session.end_episode(keep=True)``, which
+    abandons the episode rather than committing it, and by
+    ``Session.start_episode()``, which refuses to open a take on a session whose
+    driving already died.
+
+    Carries the cause key so a frontend can route on it without matching on
+    prose, exactly as ``CameraCaptureFailed`` does.
+    """
+
+    def __init__(self, cause: str, detail: str) -> None:
+        self.cause = cause
+        self.detail = detail
+        super().__init__(drive_failure_message(cause, detail))
 
 
 class CameraCaptureFailed(RuntimeError):
@@ -282,10 +324,11 @@ class RecordingSource(Protocol):
         records exactly as it always did; nothing is inferred from the presence
         of ``send_action`` or any other shape.
 
-        Raising from it stops capture and refuses the episode
-        (:class:`DriveFailed`) rather than recording a rig that quietly went
-        still. Drops belong in ``read_state()``, which reports them per channel;
-        ``drive()`` raises only when the driving itself has stopped.
+        Raising from it stops capture and refuses the episode — the one in
+        flight, or the next one if it stopped in the gap between takes
+        (:class:`DriveFailed`, two causes) — rather than recording a rig that
+        quietly went still. Drops belong in ``read_state()``, which reports them
+        per channel; ``drive()`` raises only when the driving itself has stopped.
     """
 
     descriptor: StateDescriptor

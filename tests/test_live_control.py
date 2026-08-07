@@ -82,12 +82,14 @@ class _StubSession:
     "forwards" is checkable at all.
     """
 
-    def __init__(self, *, recording=False):
+    def __init__(self, *, recording=False, drives=False):
         self.started: list[dict] = []
         self.ended: list[bool] = []
         self.tagged: list[list[str]] = []
         self._recording = recording
         self.camera_failure = None
+        self.drives = drives
+        self.drive_failure = None
         self.last_episode_counts = (7, 1)
 
     def status(self):
@@ -110,6 +112,7 @@ class _StubSession:
         return {
             "source_kind": "StubSource",
             "state_hz": 30,
+            "drives": self.drives,
             "task": "session default task",
             "cameras": [{"id": "wrist", "width": 640, "height": 480, "fps": 30}],
         }
@@ -441,6 +444,40 @@ def test_a_dead_camera_bridge_is_reported_before_the_next_take(tmp_path):
     assert cameras["bridge"] == "failed"
     assert "stopped_answering" in cameras["bridge_detail"]
     assert "usb reset" in cameras["bridge_detail"]
+
+
+def test_a_driving_session_reports_that_it_drives_and_that_it_still_does(tmp_path):
+    """A page showing a live pose looks the same whether the follower is tracking
+    or standing still, so the payload says which — and says it for a session that
+    drives nothing too, rather than leaving the row absent to be read as either."""
+    watching = SessionControl(_StubSession(), dataset_root=tmp_path)
+    driving = SessionControl(_StubSession(drives=True), dataset_root=tmp_path)
+
+    look_only = watching.session_status()["drive"]
+    assert look_only["declares"] is False
+    assert look_only["state"] == "not-driven"
+    assert look_only["detail"] is None
+
+    moving = driving.session_status()["drive"]
+    assert moving["declares"] is True
+    assert moving["state"] == "ok"
+    assert "not a probe" in moving["basis"]
+
+
+def test_driving_that_died_between_takes_reaches_the_page(tmp_path):
+    """The gap is where driving dies unwatched: nothing is recording, no readout
+    is printing, and the next take would be three minutes of a rig that stopped
+    moving before it started. ``end_episode`` cannot say it — no episode is open."""
+    session = _StubSession(drives=True)
+    session.drive_failure = ConnectionError("the follower stopped answering")
+    control = SessionControl(session, dataset_root=tmp_path)
+
+    drive = control.session_status()["drive"]
+
+    assert drive["declares"] is True
+    assert drive["state"] == "stopped"
+    assert "ConnectionError" in drive["detail"]
+    assert "the follower stopped answering" in drive["detail"]
 
 
 @needs_extra

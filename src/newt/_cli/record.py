@@ -351,8 +351,20 @@ def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> 
     try:
         while True:
             print("\n[session] SPACE to start an episode (Ctrl+C to end the session) …", flush=True)
-            if not _wait_for_space(session):
+            idle = _wait_for_space(session)
+            if idle == "kill":
                 return 130  # Ctrl+H during idle
+            if idle == "drive_stopped":
+                # Said here rather than at the next start_episode(), which refuses
+                # too: the operator is standing at the rig waiting to press SPACE,
+                # and the three minutes this saves are the three they would have
+                # spent recording something that stopped moving before they began.
+                print(
+                    f"\n{_drive_stopped_between_takes(session.drive_failure)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 3
             ep_id = session.start_episode()
             print(f"[rec] episode {ep_id} — recording (SPACE to stop) …", flush=True)
 
@@ -450,14 +462,48 @@ def _read_key(timeout: float) -> str | None:
         return None
 
 
-def _wait_for_space(session) -> bool:
-    """Block until SPACE (start). Returns False if Ctrl+H (kill) is pressed."""
+def _drive_stopped_between_takes(exc: Exception) -> str:
+    """What the keyboard loop says when driving died in the gap.
+
+    Its own string, and deliberately not either of the library's two: those are
+    said to somebody who asked to keep an episode, or who asked to start one.
+    This is said to somebody standing at the rig with their thumb over SPACE,
+    which changes both what is true (no episode exists) and what to do next.
+    """
+    return (
+        f"[newt record] DRIVING STOPPED BETWEEN TAKES — the source's drive() raised "
+        f"({type(exc).__name__}: {exc}).\n"
+        "        Yours: a driving session keeps driving in the gaps between takes, "
+        "and it stopped in one. Nothing was recording, so no episode is affected and "
+        "nothing partial was written.\n"
+        "        Do now: the session is closing, which torques the rig off through "
+        "the source's own disable_all — but it is standing where it stopped being "
+        "driven, so look before you reach. Then fix what the message in the "
+        "parentheses names (it is the source's, not ours) and run the same command "
+        "again."
+    )
+
+
+def _wait_for_space(session) -> str:
+    """Block until SPACE (``"start"``), Ctrl+H (``"kill"``), or the rig stopping
+    being driven underneath the wait (``"drive_stopped"``).
+
+    The third answer is the whole reason this watches the session and not only the
+    keyboard. A driving session keeps driving between takes, so this is exactly
+    where driving dies unobserved: nothing is recording, the readout is not
+    printing, and the next thing that happens is somebody pressing SPACE and
+    spending three minutes recording a rig that stopped moving before they
+    started. ``drive_failure`` is None every iteration on a session that does not
+    drive, which is what makes the check free on every other rig.
+    """
     while True:
+        if session.drive_failure is not None:
+            return "drive_stopped"
         key = _read_key(0.1)
         if key == _CTRL_H:
-            return False
+            return "kill"
         if key == _SPACE:
-            return True
+            return "start"
 
 
 def _record_until_stop(session) -> bool:
