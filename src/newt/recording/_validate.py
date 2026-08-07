@@ -21,6 +21,7 @@ lantern guard.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -98,6 +99,10 @@ def validate(episode_dir: Path) -> dict:
     )
 
     cameras = meta.get("camera_config", {}).get("cameras", [])
+    for cam in cameras:
+        cam_id = cam.get("id", "<missing-id>")
+        ok, detail = _geometry_provenance_check(cam)
+        record(f"geometry_provenance[{cam_id}]", ok, detail)
     if not cameras:
         record("frame_count_invariant", True, "no cameras — invariant not applicable")
     else:
@@ -117,6 +122,74 @@ def validate(episode_dir: Path) -> dict:
             )
 
     return _verdict(episode_dir, checks)
+
+
+def _geometry_provenance_check(camera: dict) -> tuple[bool, str]:
+    provenance = camera.get("geometry_provenance")
+    if provenance is None:
+        return True, "no geometry claim — episode predates explicit geometry provenance"
+    if not isinstance(provenance, dict):
+        return False, _geometry_repair("geometry_provenance must be an object")
+
+    kind = provenance.get("kind")
+    extrinsics = camera.get("extrinsics")
+    if kind == "invalid":
+        if extrinsics is not None:
+            return False, _geometry_repair("invalid geometry also carries extrinsics")
+        if not _nonempty(provenance.get("reason")):
+            return False, _geometry_repair("invalid geometry has no non-empty reason")
+        return True, f"explicitly invalid: {provenance['reason']}"
+    if kind not in {"measured", "declared"}:
+        return False, _geometry_repair(f"unknown geometry provenance kind {kind!r}")
+    if not _is_extrinsics(extrinsics):
+        return False, _geometry_repair(f"{kind} geometry has no finite 4x4 extrinsics matrix")
+    if kind == "measured":
+        receipt = provenance.get("receipt")
+        if not _portable_receipt(receipt):
+            return False, _geometry_repair(
+                "measured geometry has no portable episode-relative receipt"
+            )
+        return True, f"measured geometry; calibration receipt: {receipt}"
+    source = provenance.get("source")
+    if not _nonempty(source):
+        return False, _geometry_repair("declared geometry has no non-empty source")
+    return True, f"declared geometry; source: {source}"
+
+
+def _geometry_repair(cause: str) -> str:
+    return (
+        f"{cause}; episode metadata is inconsistent — the recording owner must repair "
+        "the camera's extrinsics and geometry_provenance together"
+    )
+
+
+def _nonempty(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _portable_receipt(value: object) -> bool:
+    if not _nonempty(value):
+        return False
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _is_extrinsics(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(
+            isinstance(row, list)
+            and len(row) == 4
+            and all(
+                isinstance(number, (int, float))
+                and not isinstance(number, bool)
+                and math.isfinite(number)
+                for number in row
+            )
+            for row in value
+        )
+    )
 
 
 def _scan_mcap(path: Path):

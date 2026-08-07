@@ -21,6 +21,7 @@ through the lantern guard — this module is never reached by a bare ``import ne
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import shutil
@@ -67,6 +68,14 @@ class CameraSpec:
     width: int
     height: int
     fps: int = 30
+    extrinsics: list[list[float]] | None = None
+    geometry_kind: str = "invalid"
+    geometry_receipt: str | None = None
+    geometry_source: str | None = None
+    geometry_reason: str | None = "not_provided"
+
+    def __post_init__(self) -> None:
+        _validate_camera_geometry(self)
 
 
 @dataclass
@@ -332,12 +341,7 @@ class EpisodeWriter:
             "height": first.height,
             "fps": first.fps,
             "cameras": [
-                {
-                    "id": cam.id,
-                    "frame": "world",
-                    # No color_intrinsics: uncalibrated cameras declare none rather
-                    # than inventing them. color-only (no depth_intrinsics) per v0.0.3.
-                }
+                _camera_entry(cam)
                 for cam in self.cameras
             ],
         }
@@ -363,6 +367,87 @@ def _ffprobe_frame_count(path: Path) -> int:
     )
     text = out.stdout.strip()
     return int(text) if text.isdigit() else 0
+
+
+def _camera_entry(cam: CameraSpec) -> dict:
+    entry = {
+        "id": cam.id,
+        "frame": "world",
+        "geometry_provenance": {"kind": cam.geometry_kind},
+    }
+    if cam.extrinsics is not None:
+        entry["extrinsics"] = cam.extrinsics
+    detail_key = {
+        "measured": "receipt",
+        "declared": "source",
+        "invalid": "reason",
+    }[cam.geometry_kind]
+    entry["geometry_provenance"][detail_key] = getattr(cam, f"geometry_{detail_key}")
+    return entry
+
+
+def _validate_camera_geometry(cam: CameraSpec) -> None:
+    if cam.geometry_kind not in {"measured", "declared", "invalid"}:
+        raise ValueError(
+            f"camera {cam.id!r} has unknown geometry provenance {cam.geometry_kind!r}; "
+            "the camera configuration owner must choose 'measured', 'declared', or 'invalid'"
+        )
+    if cam.geometry_kind == "invalid":
+        if cam.extrinsics is not None:
+            raise ValueError(
+                f"camera {cam.id!r} declares invalid geometry but also supplies extrinsics; "
+                "the camera configuration owner must remove the pose or mark its actual source"
+            )
+        if not _nonempty(cam.geometry_reason):
+            raise ValueError(
+                f"camera {cam.id!r} declares invalid geometry without a reason; "
+                "the camera configuration owner must provide geometry_reason"
+            )
+        return
+    if not _is_extrinsics(cam.extrinsics):
+        raise ValueError(
+            f"camera {cam.id!r} declares {cam.geometry_kind} geometry without a finite 4x4 "
+            "extrinsics matrix; the camera configuration owner must provide the pose"
+        )
+    if cam.geometry_kind == "measured" and not _portable_receipt(cam.geometry_receipt):
+        raise ValueError(
+            f"camera {cam.id!r} declares measured geometry without a portable calibration "
+            "receipt; provide a non-empty episode-relative geometry_receipt"
+        )
+    if cam.geometry_kind == "declared" and not _nonempty(cam.geometry_source):
+        raise ValueError(
+            f"camera {cam.id!r} declares geometry without naming its source; the camera "
+            "configuration owner must provide geometry_source"
+        )
+
+
+def _nonempty(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _portable_receipt(value: object) -> bool:
+    if not _nonempty(value):
+        return False
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _is_extrinsics(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(
+            isinstance(row, list)
+            and len(row) == 4
+            and all(
+                isinstance(number, (int, float))
+                and not isinstance(number, bool)
+                and math.isfinite(number)
+                for number in row
+            )
+            for row in value
+        )
+    )
 
 
 def _rfc3339_ns(ns: int) -> str:
