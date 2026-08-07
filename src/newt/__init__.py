@@ -34,6 +34,10 @@ Public surface:
                                  (client-side before WS connection, or WS close 4404)
 - `newt.ContractMismatchError` — raised when obs frame shapes don't match the resolved
                                  model's declared contract (WS close 4422)
+- `newt.FrameTooLargeError`   — raised when a packed obs frame exceeds the inbound size
+                                 limit (client-side, before ws.send() — nothing reaches
+                                 the wire); distinct from ContractMismatchError, which is
+                                 about shape, not byte size
 - `newt.ServerError`          — raised on server-side inference or internal error
                                  (WS close 4500)
 - `newt.VerifierError`        — raised when the console verifier is unavailable at
@@ -80,6 +84,7 @@ from newt._client.robot import (
     EndpointUnavailableError,
     EnvOverrideWarning,
     ForbiddenError,
+    FrameTooLargeError,
     InferenceResponse,
     ModelContract,
     ModelNotFoundError,
@@ -107,6 +112,7 @@ __all__ = [
     "EndpointUnavailableError",
     "EnvOverrideWarning",
     "ForbiddenError",
+    "FrameTooLargeError",
     "InferenceResponse",
     "ModelContract",
     "ModelNotFoundError",
