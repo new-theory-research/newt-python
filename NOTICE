@@ -1,0 +1,48 @@
+Third-party code redistributed in this repository
+=================================================
+
+Four files under `src/newt/live/` are adapted from someone else's work and carry
+their copyright. Both licences that work is offered under require the licence
+text and the copyright notice to travel with any copy, so both texts are in
+`licenses/` and both ship inside the wheel — the adapted files are shipped as
+package data, which means every install is a redistribution.
+
+  src/newt/live/page/index.html   the embedded-viewer page
+  src/newt/live/page/app.js       the focus patch, the viewer options, the import
+  src/newt/live/page/view.css     the canvas sizing rule
+  src/newt/live/_assets.py        the version pin, the file names, the routing
+
+  Upstream:   https://github.com/mission-robotics-ai/so100-hackathon
+              (a fork of https://github.com/rerun-io/so100-hackathon)
+  Copyright:  Rerun Technologies AB <opensource@rerun.io>
+  Licence:    MIT OR Apache-2.0, at your option
+
+  Texts:      licenses/LICENSE-MIT.rerun      (verbatim from upstream)
+              licenses/LICENSE-APACHE.rerun   (verbatim from upstream)
+
+Each of those four files names the upstream, the copyright holder and the licence
+pair in its own header, and says which parts are theirs and which are ours. Those
+headers are the attribution; this file and `licenses/` are the licence text the
+attribution was never a substitute for.
+
+`rerun-sdk` itself is a declared dependency of the `[view]` extra, not vendored
+code — pip installs it, and it carries its own licence metadata.
+
+
+newt's own licence
+------------------
+
+Not declared. This repository has no LICENSE file and `pyproject.toml` carries no
+`license` field, so nothing here states the terms newt is offered under, and this
+file does not invent them: choosing a licence for a public SDK is a decision with
+consequences for everyone who installs it, and it belongs to whoever owns the
+project rather than to whoever last edited it.
+
+What that means in practice, said plainly rather than left to be discovered: an
+outside reader has no stated permission to use, copy or modify newt, whatever the
+repository's visibility suggests. The absence above is the only honest reading of
+that, and the reason it is written down here is so the gap is visible rather than
+inferred.
+
+Nothing in this file affects the third-party terms above. Rerun's code is licensed
+by Rerun, and those terms hold whatever newt's own turn out to be.
