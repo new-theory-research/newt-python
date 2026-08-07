@@ -44,6 +44,10 @@ def _dispatch(args: list[str]) -> int:
         from newt._cli.create import cmd_create
         return cmd_create(args[1:])
 
+    if cmd == "setup":
+        from newt._cli.setup import cmd_setup
+        return cmd_setup(args[1:])
+
     if cmd == "models":
         from newt._cli.models import cmd_models
         return cmd_models(args[1:])
@@ -118,6 +122,7 @@ def _usage() -> None:
     print("  login    Authenticate and store credentials in ~/.nt/credentials")
     print("  logout   Remove local credentials (key remains valid until revoked on the console)")
     print("  create   Start a project from a starter kit (try: newt create)")
+    print("  setup    Run the setup your installed kit declares (try: newt setup)")
     print("  models   List every model your key can drive")
     print("  status   Show your current key, identity, and registry connectivity")
     print("  run      Run one real inference against your model (try: newt run <tag>)")

@@ -108,6 +108,40 @@ It also has to be installed into the environment `newt` runs from. A globally
 installed `newt` cannot see a kit that lives in a project's `.venv`; from inside
 that project, the command is `uv run newt teleop`.
 
+## Declaring setup from a kit
+
+A kit's **setup** is whatever gets a machine ready to drive its rig — installing
+drivers, discovering the hardware, writing the rig's config. `newt` does not know
+what any of that means for your rig, and will not guess. It knows one thing: a
+kit can declare a setup, and `newt setup` is the door onto it.
+
+```toml
+[project.entry-points."newt.setup"]
+bench = "mypkg.setup:setup"
+```
+
+The group is flat — there is one setup, so there is no verb tail. The value is
+`MODULE:CALLABLE`, the same shape a source's value takes. `newt` imports the
+module, looks up the callable, and calls it once, in `newt`'s own process, with
+the arguments that followed `newt setup` as a list of strings — so your setup's
+own flags reach it unchanged and `newt` never learns what they mean. Return `0`
+or `None` when it worked, non-zero when it did not; `newt setup` exits with your
+code. Your output goes straight to the terminal, so progress and prompts both
+work.
+
+Declare one and `newt setup` runs it, naming your kit as it starts. Declare two
+and it refuses and lists them, because choosing which setup owns a machine is not
+ours to do — `newt setup --kit <name>` settles it.
+
+If your setup is a shell script today, keep it. Point the callable at it: your
+kit knows where its own files live, and `newt` does not need to. A kit that
+declares nothing gets a refusal that names your kit and stops, rather than a
+guess at a path we made up.
+
+Entry points are install metadata here too — a new declaration is invisible until
+the kit is installed again, into the environment `newt` runs from. From inside a
+project, that is `uv run newt setup`.
+
 ## Full guide
 
 **[Getting started →](https://newtheory-docs.vercel.app/docs/getting-started)** — install, auth, first inference call, no robot required.
