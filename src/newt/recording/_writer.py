@@ -28,6 +28,8 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from newt.recording._lantern import require
@@ -270,6 +272,9 @@ class EpisodeWriter:
                     "Episode discarded; nothing written."
                 )
 
+        sdk_version, sdk_version_source = _sdk_version_info()
+        sdk_commit, sdk_commit_dirty, sdk_commit_source = _git_info()
+
         episode = {
             "episode_config": {
                 "task_name": self.task_name,
@@ -286,6 +291,17 @@ class EpisodeWriter:
                 "author": self.author,
                 "license": self.license,
                 "verified": False,
+            },
+            # Writer identity: what software wrote this file, separate from
+            # `provenance` (who authored the episode). Each value is either
+            # genuinely determined (source says how) or None with an honest
+            # "undetermined: <reason>" source — never a plausible-looking guess.
+            "writer": {
+                "sdk_version": sdk_version,
+                "sdk_version_source": sdk_version_source,
+                "sdk_commit": sdk_commit,
+                "sdk_commit_dirty": sdk_commit_dirty,
+                "sdk_commit_source": sdk_commit_source,
             },
             "recording_started_at": _rfc3339_ns(self._start_ns),
             "format_version": FORMAT_VERSION,
@@ -350,6 +366,59 @@ class EpisodeWriter:
             f.flush()
             os.fsync(f.fileno())
         os.rename(tmp, path)
+
+
+def _sdk_version_info() -> tuple[str | None, str]:
+    """This install's ``newt`` version and how it was determined. Prefers
+    ``importlib.metadata`` (works for any install method that registers package
+    metadata — pip, uv, git-ref, wheel); falls back to the hardcoded
+    ``newt.__version__`` constant only when metadata can't be read (editable
+    installs, some dev layouts), and records that fallback as a fallback rather
+    than presenting it as equally reliable — ``__version__`` is known to drift
+    from the installed version (Rule 10: state the mechanism, not just the
+    value)."""
+    try:
+        return _pkg_version("newt"), "importlib.metadata"
+    except PackageNotFoundError:
+        from newt import __version__
+
+        return __version__, "fallback: newt.__version__ (importlib.metadata unavailable; may be stale)"
+
+
+def _git_info() -> tuple[str | None, bool | None, str]:
+    """Git commit + dirty flag for the running newt-python checkout, sourced by
+    invoking git against this file's own directory. commit/dirty are ``None``
+    with an honest reason in the returned source string when git metadata isn't
+    determinable — no git binary, a non-git checkout (wheel/sdist install), or a
+    git invocation that errors are all real possible outcomes, not bugs to
+    paper over."""
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        commit_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, None, f"undetermined: git rev-parse failed to run ({exc.__class__.__name__})"
+    if commit_result.returncode != 0:
+        return None, None, "undetermined: not a git checkout"
+    commit = commit_result.stdout.strip()
+
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return commit, None, (
+            f"git rev-parse HEAD (dirty flag undetermined: git status failed to run, "
+            f"{exc.__class__.__name__})"
+        )
+    if status_result.returncode != 0:
+        return commit, None, "git rev-parse HEAD (dirty flag undetermined: git status exited non-zero)"
+
+    dirty = bool(status_result.stdout.strip())
+    return commit, dirty, "git rev-parse HEAD + git status --porcelain"
 
 
 def _ffprobe_frame_count(path: Path) -> int:

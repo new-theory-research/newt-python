@@ -227,6 +227,83 @@ def test_simulated_session_produces_valid_episodes(tmp_path):
 
 
 @needs_extra
+def test_writer_identity_is_recorded_and_separate_from_provenance(tmp_path):
+    """A real `keep()` stamps a `writer` block distinct from `provenance`: SDK
+    version via importlib.metadata (this is a real, non-editable install of the
+    package under test, so version + git commit are both genuinely determined),
+    and the checkout's own git commit + dirty flag. `provenance` keeps its
+    existing author-identity meaning untouched.
+    """
+    from newt.recording import validate
+
+    _run_simulated_session(tmp_path, ["keep"])
+    episodes = sorted(tmp_path.glob("episode_*"))
+    assert len(episodes) == 1
+    assert validate(episodes[0])["valid"]
+
+    meta = json.loads((episodes[0] / "episode.json").read_text())
+    writer = meta["writer"]
+
+    assert writer["sdk_version"] == "0.0.3"
+    assert writer["sdk_version_source"] == "importlib.metadata"
+    assert writer["sdk_commit"] is not None
+    assert writer["sdk_commit_source"] == "git rev-parse HEAD + git status --porcelain"
+    assert writer["sdk_commit_dirty"] in (True, False)
+
+    # provenance is untouched and still means author identity, not writer identity.
+    assert meta["provenance"] == {
+        "author": "newt-recording/alpha",
+        "license": "UNVERIFIED-ALPHA",
+        "verified": False,
+    }
+
+
+def test_sdk_version_falls_back_honestly_when_metadata_unavailable(monkeypatch):
+    """importlib.metadata.version("newt") raising PackageNotFoundError is a real
+    outcome (editable/dev layouts) — the writer falls back to newt.__version__
+    per pointer 4, but the source string names it a fallback rather than
+    presenting it as equivalent to importlib.metadata."""
+    from newt.recording import _writer
+
+    def _raise(_name: str) -> str:
+        raise _writer.PackageNotFoundError("newt")
+
+    monkeypatch.setattr(_writer, "_pkg_version", _raise)
+
+    version, source = _writer._sdk_version_info()
+
+    from newt import __version__
+
+    assert version == __version__
+    assert "fallback" in source
+    assert "newt.__version__" in source
+
+
+def test_git_commit_is_honestly_undetermined_outside_a_git_checkout(monkeypatch):
+    """When git can't resolve a commit for the running checkout (wheel install,
+    no git binary, a non-git directory), the writer records `None` with an
+    honest "undetermined: <reason>" source — never a plausible-looking SHA it
+    didn't actually verify."""
+    from newt.recording import _writer
+
+    class _FakeResult:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+            self.stdout = ""
+
+    def _fake_run(cmd, **kwargs):
+        return _FakeResult(returncode=128)  # git's "not a repository" exit code
+
+    monkeypatch.setattr(_writer.subprocess, "run", _fake_run)
+
+    commit, dirty, source = _writer._git_info()
+
+    assert commit is None
+    assert dirty is None
+    assert source.startswith("undetermined:")
+
+
+@needs_extra
 def test_discard_leaves_no_directory(tmp_path):
     """Discard leaves nothing — a discarded episode never appears on disk.
 
