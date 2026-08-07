@@ -60,6 +60,9 @@ _HAVE_EXTRA = (
 needs_extra = pytest.mark.skipif(not _HAVE_EXTRA, reason="needs the [recording] extra (mcap/protobuf)")
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "newt"
+_UNDECODABLE_SCHEMA_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "undecodable_protobuf_schema"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +227,77 @@ def test_simulated_session_produces_valid_episodes(tmp_path):
         assert meta["episode_config"]["task_name"] == "pick up the cup"
         assert meta["provenance"]["verified"] is False
         assert meta["format_version"] == "0.0.3"
+
+
+@needs_extra
+def test_validate_rejects_proto_source_stored_as_protobuf_schema():
+    """The real defect-shape fixture fails on decodability, while its MCAP
+    container remains structurally readable."""
+    from newt.recording import validate
+
+    result = validate(_UNDECODABLE_SCHEMA_FIXTURE)
+    checks = {check["check"]: check for check in result["checks"]}
+
+    assert result["valid"] is False
+    assert checks["data_mcap_readable"] == {
+        "check": "data_mcap_readable",
+        "ok": True,
+        "detail": "container records are structurally readable",
+    }
+    failure = checks["protobuf_channels_decodable"]
+    assert failure["ok"] is False
+    assert ".proto source text" in failure["detail"]
+    assert 'syntax = "proto3"' in failure["detail"]
+    assert "recording writer" in failure["detail"]
+    assert "descriptor-set bytes" in failure["detail"]
+
+
+@needs_extra
+def test_validate_distinguishes_message_decode_failure(tmp_path):
+    """A valid descriptor set paired with a malformed first message names the
+    message/schema mismatch, not the source-text or descriptor-build causes."""
+    from mcap.writer import Writer
+
+    from newt.recording import validate
+    from newt.recording._proto import file_descriptor_set
+
+    episode = tmp_path / "episode_bad_message"
+    episode.mkdir()
+    (episode / "episode.json").write_text(
+        json.dumps({"format_version": "0.0.3", "camera_config": {"cameras": []}})
+    )
+    with (episode / "data.mcap").open("wb") as stream:
+        writer = Writer(stream)
+        writer.start()
+        schema_id = writer.register_schema(
+            name="robot.RobotState",
+            encoding="protobuf",
+            data=file_descriptor_set(),
+        )
+        channel_id = writer.register_channel(
+            topic="robot_state/test-arm",
+            message_encoding="protobuf",
+            schema_id=schema_id,
+        )
+        writer.add_message(
+            channel_id=channel_id,
+            log_time=1,
+            publish_time=1,
+            data=b"\x0a\x05x",
+        )
+        writer.finish()
+
+    result = validate(episode)
+    failure = next(
+        check for check in result["checks"] if check["check"] == "protobuf_channels_decodable"
+    )
+
+    assert result["valid"] is False
+    assert failure["ok"] is False
+    assert "schema rebuilt, but its first message does not decode" in failure["detail"]
+    assert ".proto source text" not in failure["detail"]
+    assert "cannot rebuild" not in failure["detail"]
+    assert "recording writer" in failure["detail"]
 
 
 @needs_extra
