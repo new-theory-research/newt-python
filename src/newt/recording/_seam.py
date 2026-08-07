@@ -99,6 +99,36 @@ class CameraOpenError(RuntimeError):
         )
 
 
+class DriveFailed(RuntimeError):
+    """The source's ``drive()`` step raised part-way through a session.
+
+    Capture stops with it: a tick that could not drive the rig is a tick nobody
+    demonstrated, and an episode whose joints go still half-way through — with
+    nothing in the file saying the driving stopped — is the camera-that-ends-early
+    failure wearing different clothes. Raised by ``Session.end_episode(keep=True)``,
+    which abandons the episode rather than committing it.
+
+    ``detail`` is the source's own exception, verbatim: what driving means is the
+    source's, and so is the reason it stopped.
+    """
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(
+            f"The rig stopped being driven part-way through the session: the source's "
+            f"drive() raised ({detail}).\n"
+            "Yours: whatever this source drives went unreachable, refused the move, or "
+            "faulted. Nothing stale was re-sent to cover the gap, and no tick after it "
+            "was recorded.\n"
+            "Do now: the episode was discarded, so nothing partial was written, and "
+            "capture stopped when driving did. The rig is standing where it stopped "
+            "being driven and may still be holding — put it away with `newt rest` "
+            "before walking up to it.\n"
+            "Then: the message in the parentheses is the source's, not the library's. "
+            "That is where the fix is."
+        )
+
+
 class CameraCaptureFailed(RuntimeError):
     """The camera bridge failed part-way through an episode, so the episode was
     refused rather than committed with video that ends before its joints do.
@@ -239,6 +269,23 @@ class RecordingSource(Protocol):
     cameras; the library encodes, timestamps and enforces the frame-count
     invariant.** The library holds no camera identity — ids travel as opaque
     strings the source chose, exactly as channel names already do.
+
+    ``drive()``
+        The optional third member, and the one that makes recording a
+        demonstration one action rather than two. A source that moves its rig
+        every tick exposes ``drive()``; the Session calls it at the top of each
+        tick, immediately before ``read_state()``, so the state a tick records is
+        the state of a rig that has already been told where to go. It takes no
+        arguments and returns nothing: **what driving means is entirely the
+        source's** — which part is driven, from what, what an action is — and the
+        library learns only that there is a step to take. A source without it
+        records exactly as it always did; nothing is inferred from the presence
+        of ``send_action`` or any other shape.
+
+        Raising from it stops capture and refuses the episode
+        (:class:`DriveFailed`) rather than recording a rig that quietly went
+        still. Drops belong in ``read_state()``, which reports them per channel;
+        ``drive()`` raises only when the driving itself has stopped.
     """
 
     descriptor: StateDescriptor
