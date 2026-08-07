@@ -8,10 +8,11 @@ Checks, in order:
   1. episode.json present and parses — the atomic completeness marker. Its
      absence means the episode is partial and must be skipped.
   2. format_version is the one format this library writes (single-format law).
-  3. data.mcap present and readable.
-  4. A robot_state channel is present with more than zero messages.
-  5. State timestamps are monotonic non-decreasing.
-  6. For each camera, the MCAP color-marker count equals the encoded video frame
+  3. data.mcap present and structurally readable.
+  4. Every protobuf channel decodes at least one message with its declared schema.
+  5. A robot_state channel is present with more than zero messages.
+  6. State timestamps are monotonic non-decreasing.
+  7. For each camera, the MCAP color-marker count equals the encoded video frame
      count from ffprobe (the frame-count invariant).
 
 ``mcap`` ships with the ``recording`` extra and is imported lazily through the
@@ -59,7 +60,8 @@ def validate(episode_dir: Path) -> dict:
     record("data_mcap_present", True, "present")
 
     try:
-        state_topics, state_count, monotonic, camera_marker_counts = _scan_mcap(mcap_path)
+        scan = _scan_mcap(mcap_path)
+        state_topics, state_count, monotonic, camera_marker_counts, decode_failures = scan
     except Exception as exc:  # noqa: BLE001 — this function's whole job is running
         # a battery of checks and recording pass/fail per check (see the pattern
         # above and below); "data_mcap_readable" IS the check for "does this parse
@@ -67,7 +69,15 @@ def validate(episode_dir: Path) -> dict:
         # crash of the validator itself.
         record("data_mcap_readable", False, f"data.mcap is not readable: {exc}")
         return _verdict(episode_dir, checks)
-    record("data_mcap_readable", True, "readable")
+    record("data_mcap_readable", True, "container records are structurally readable")
+
+    record(
+        "protobuf_channels_decodable",
+        not decode_failures,
+        "one message decoded on every protobuf channel"
+        if not decode_failures
+        else "; ".join(decode_failures),
+    )
 
     if state_count > 0 and state_topics:
         record("robot_state_channel", True, f"{state_topics[0]} with {state_count} messages")
@@ -109,10 +119,21 @@ def _scan_mcap(path: Path):
     last_state_ns = -1
     monotonic = True
     camera_markers: dict[str, int] = {}
+    decoded_channels: set[int] = set()
+    decode_failures: list[str] = []
 
     with open(path, "rb") as f:
         reader = reader_mod.make_reader(f)
-        for _schema, channel, message in reader.iter_messages():
+        for schema, channel, message in reader.iter_messages():
+            if (
+                schema is not None
+                and schema.encoding == "protobuf"
+                and channel.id not in decoded_channels
+            ):
+                decoded_channels.add(channel.id)
+                failure = _protobuf_decode_failure(schema, channel, message.data)
+                if failure is not None:
+                    decode_failures.append(failure)
             topic = channel.topic
             if topic.startswith("robot_state/"):
                 state_count += 1
@@ -124,7 +145,58 @@ def _scan_mcap(path: Path):
             elif topic.startswith("camera/") and topic.endswith("/color"):
                 cam_id = topic.split("/")[1]
                 camera_markers[cam_id] = camera_markers.get(cam_id, 0) + 1
-    return state_topics, state_count, monotonic, camera_markers
+    return state_topics, state_count, monotonic, camera_markers, decode_failures
+
+
+def _protobuf_decode_failure(schema, channel, payload: bytes) -> str | None:
+    """Return a cause-specific failure for the channel's first message."""
+    descriptor_pb2 = require("google.protobuf.descriptor_pb2", "protobuf")
+    descriptor_pool = require("google.protobuf.descriptor_pool", "protobuf")
+    protobuf_message = require("google.protobuf.message", "protobuf")
+    message_factory = require("google.protobuf.message_factory", "protobuf")
+
+    leading_text = schema.data[:80].decode("utf-8", errors="replace").lstrip()
+    if leading_text.startswith("syntax"):
+        found = leading_text.splitlines()[0]
+        return (
+            f"channel {channel.topic!r}: protobuf schema payload is .proto source text "
+            f"({found!r}), not a serialized FileDescriptorSet; the recording "
+            "writer must "
+            "store descriptor-set bytes and rewrite this episode"
+        )
+
+    descriptor_set = descriptor_pb2.FileDescriptorSet()
+    try:
+        descriptor_set.ParseFromString(schema.data)
+    except protobuf_message.DecodeError as exc:
+        return (
+            f"channel {channel.topic!r}: protobuf schema payload is not a serialized "
+            f"FileDescriptorSet ({exc}); the recording writer must store "
+            "descriptor-set bytes and rewrite this episode"
+        )
+
+    try:
+        pool = descriptor_pool.DescriptorPool()
+        for file_descriptor in descriptor_set.file:
+            pool.Add(file_descriptor)
+        message_descriptor = pool.FindMessageTypeByName(schema.name)
+        message_type = message_factory.GetMessageClass(message_descriptor)
+    except (KeyError, TypeError, ValueError) as exc:
+        return (
+            f"channel {channel.topic!r}: FileDescriptorSet cannot rebuild "
+            f"protobuf message {schema.name!r} ({exc}); the recording writer "
+            "must emit a complete, internally consistent descriptor set"
+        )
+
+    try:
+        message_type.FromString(payload)
+    except protobuf_message.DecodeError as exc:
+        return (
+            f"channel {channel.topic!r}: schema rebuilt, but its first message "
+            f"does not decode as {schema.name!r} ({exc}); the recording writer "
+            "must encode messages with the schema registered on this channel"
+        )
+    return None
 
 
 def _ffprobe_frame_count(path: Path) -> int:
