@@ -106,6 +106,12 @@ known_first_party = ["newt"]
 # rerun` in newt/live as an undeclared transitive.
 [tool.deptry.package_module_name_map]
 rerun-sdk = ["rerun", "rerun_sdk"]
+# protobuf installs into the `google` namespace. deptry can infer that from
+# installed metadata, so a local scan with the [recording] extra present is
+# clean — but CI lints a bare `-e .` install, where the fixture generator's
+# `from google.protobuf import ...` has nothing to resolve against. Stating the
+# mapping makes the scan answer the same either way.
+protobuf = ["google"]
 
 [tool.deptry.per_rule_ignores]
 # lerobot: declared in the [hardware] extra for the robot-path integration;
