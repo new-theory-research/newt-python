@@ -72,6 +72,10 @@ def _dispatch(args: list[str]) -> int:
         from newt._cli.rest import cmd_rest
         return cmd_rest(args[1:])
 
+    if cmd == "calibrate":
+        from newt._cli.calibrate import cmd_calibrate
+        return cmd_calibrate(args[1:])
+
     if cmd == "getip":
         from newt._cli.getip import cmd_getip
         return cmd_getip(args[1:])
@@ -125,6 +129,7 @@ def _usage() -> None:
     print("  record   Record NT episodes from an embodiment (needs the [recording] extra)")
     print("  teleop   Drive one embodiment from another's motion (try: newt teleop --help)")
     print("  rest     Run an embodiment's declared rest sequence and report where it ended up")
+    print("  calibrate  Measure where this rig's cameras are (or --skip and say you have not)")
     print("  getip    Print this machine's LAN address(es) for the console's rig address field")
     print("  episodes Validate recorded episodes (try: newt episodes validate <dir>)")
     print("  finetune Launch a training run on NT's GPUs and watch it (try: newt finetune --dataset <name>)")
