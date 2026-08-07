@@ -41,6 +41,11 @@ DEFAULT_LICENSE = "UNVERIFIED-ALPHA"
 # The one and only format this writer emits.
 FORMAT_VERSION = "0.0.3"
 
+# What ``episode_config.tags`` says when the caller states nothing. It marks the
+# format generation, not the take — a caller that has something to say about this
+# particular episode passes ``tags=`` and replaces it.
+DEFAULT_TAGS = ("alpha",)
+
 # Color video encode profile, spec v0.0.3 "Camera data".
 _FFMPEG_COLOR_ARGS = [
     "-c:v", "libx264",
@@ -76,6 +81,11 @@ class EpisodeWriter:
     camera_stub_reason: str | None = None  # set LOUDLY when cameras are unavailable
     author: str = DEFAULT_AUTHOR
     license: str = DEFAULT_LICENSE
+    # What this take was, in the caller's words. Written through to
+    # ``episode_config.tags`` verbatim — this writer defines no vocabulary and
+    # rejects no string, because a taxonomy is a product decision and the file
+    # format is not the place to hold one.
+    tags: tuple[str, ...] = DEFAULT_TAGS
 
     episode_id: str = field(init=False)
     _tmp: Path = field(init=False)
@@ -263,7 +273,7 @@ class EpisodeWriter:
         episode = {
             "episode_config": {
                 "task_name": self.task_name,
-                "tags": ["alpha"],
+                "tags": list(self.tags),
                 "duration": round(duration_s, 3),
             },
             "robot_config": {

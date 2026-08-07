@@ -49,6 +49,24 @@ view = [
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.4", "deptry>=0.20"]
 
+# `view` and `hardware` cannot be resolved into one environment, and saying so is
+# the only honest thing to write here. Our lerobot fork pins `rerun-sdk<0.23`
+# (for its own `visualize_dataset` / `teleoperate` scripts); the live view needs
+# `>=0.34.1` for `rr.Scalars`, `rerun.urdf` and the gRPC proxy. Nothing can be
+# widened to bridge that: lowering the view's pin deletes APIs it calls, and
+# raising lerobot's is a change to a different repository.
+#
+# Declaring the conflict is what lets `uv lock` produce a lock at all — without
+# it the whole resolution fails, including for the many installs that ask for
+# neither extra. It costs nothing real: `newt[hardware]` is a convenience alias
+# for the lerobot fork and NO code in this package imports it (see the DEP002
+# ignore below). A rig gets lerobot from its starter kit, not from here, which is
+# why `newt record --view` against live arms works on a real bench even though
+# these two extras will not co-resolve — see `scripts/bench/live-view/README.md`
+# § "Installing view beside lerobot" for the rig recipe and its receipts.
+[tool.uv]
+conflicts = [[{ extra = "view" }, { extra = "hardware" }]]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
