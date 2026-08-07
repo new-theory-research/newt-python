@@ -294,10 +294,10 @@ class SessionControl:
         The camera half's twin, and it exists for the sharper version of the same
         reason: a session that drives keeps driving between takes, so the gap is
         exactly where driving dies with nobody watching — no readout printing, no
-        episode open, and a page that shows a live pose looking identical whether
-        the follower is tracking or standing still. ``declares`` is what the
-        source said at construction; ``state`` is what the capture loop has
-        actually seen, never a probe this layer invented.
+        episode open, and a page whose live pose reads the same whether the rig is
+        moving or has gone still. ``declares`` is what the source said at
+        construction; ``state`` is what the capture loop has actually seen, never
+        a probe this layer invented.
         """
         drives = described["drives"]
         failure = self._session.drive_failure
