@@ -33,10 +33,10 @@ blueprint and selection panels were.
 
 The fence is four named panels now — blueprint, selection, top and time, each `Hidden`,
 each asserted in `tests/test_live_view.py`. What that actually looks like is a different
-set of pictures, taken on the same rig on 2026-08-06 through the collect page that embeds
-this view: **`portal/apps/collect/proof/`**. In those, the wordmark, the Share button, the
-toggles and the transport bar are gone, and what is left of Rerun is the help, visibility
-and expand icons in each view's own title bar.
+set of pictures, taken on the same rig on 2026-08-06 through a page that embeds this view
+in an iframe, and kept beside that page rather than here. In those, the wordmark, the
+Share button, the toggles and the transport bar are gone, and what is left of Rerun is the
+help, visibility and expand icons in each view's own title bar.
 
 These three stay because they are the only frames of the view drawing a *real robot* from
 the kit's URDF, which the passive bench source in the newer run does not declare. Read
