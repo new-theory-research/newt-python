@@ -156,6 +156,7 @@ class Session:
         self._camera_thread: threading.Thread | None = None
         self._camera_failure: tuple[str, Exception] | None = None
         self._stop_loop = threading.Event()
+        self._stop_cameras = threading.Event()
         self._lock = threading.Lock()
         self._kept = 0
         self._last_positions: dict[str, list[float]] | None = None
@@ -444,6 +445,7 @@ class Session:
         called by both ``start_episode`` and ``attach_observer``, and either may
         come first."""
         self._stop_loop.clear()
+        self._stop_cameras.clear()
         if self._drives and not self._state_pushed:
             # A driving session streams for the same reason a viewed one does,
             # and for a sharper one. Driving that stopped at the end of a take
@@ -627,7 +629,7 @@ class Session:
         period = 1.0 / max(1, max(int(getattr(c, "fps", 0) or 0) for c in self._cameras))
         cam_ids = [c.id for c in self._cameras]
         next_at = time.monotonic()
-        while not self._stop_loop.is_set():
+        while not self._stop_cameras.is_set():
             try:
                 frames = self._source.read_frames()
             except Exception as exc:  # noqa: BLE001 — this is a background thread;
@@ -670,6 +672,7 @@ class Session:
         under the frontend is a race, not a refusal."""
         self._drive_failure = exc
         self._stop_loop.set()
+        self._stop_cameras.set()
 
     def _fail_cameras(self, cause: str, exc: Exception) -> None:
         """Record why the camera bridge stopped and stop capturing. The episode is
@@ -677,7 +680,7 @@ class Session:
         a thread that tears down the in-flight episode underneath the state loop is
         a race, not a refusal."""
         self._camera_failure = (cause, exc)
-        self._stop_loop.set()
+        self._stop_cameras.set()
 
     def feed_state(self, channels: dict, ts_ns: int | None = None) -> None:
         """Push one tick's state into the in-flight episode. The state twin of
@@ -757,6 +760,7 @@ class Session:
 
         if not self._streaming:
             self._stop_loop.set()
+            self._stop_cameras.set()
             self._join_loops()
         # While a view is attached the loops keep running across the episode
         # boundary — the preview does not blink because a take ended. Clearing the
@@ -865,6 +869,7 @@ class Session:
         kill key — exit code is the frontend's call (130 by convention)."""
         if self._writer is not None:
             self._stop_loop.set()
+            self._stop_cameras.set()
             self._join_loops()
             with self._lock:
                 writer = self._writer
@@ -881,6 +886,7 @@ class Session:
             return
         self._streaming = False
         self._stop_loop.set()
+        self._stop_cameras.set()
         if self._writer is not None:
             with self._lock:
                 writer = self._writer

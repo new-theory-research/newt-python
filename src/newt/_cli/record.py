@@ -371,6 +371,13 @@ def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> 
                     flush=True,
                 )
                 return 3
+            if idle == "camera_stopped":
+                print(
+                    f"\n{_camera_stopped_between_takes(session.camera_failure)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 3
             ep_id = session.start_episode()
             print(f"[rec] episode {ep_id} — recording (SPACE to stop) …", flush=True)
 
@@ -490,9 +497,16 @@ def _drive_stopped_between_takes(exc: Exception) -> str:
     )
 
 
+def _camera_stopped_between_takes(failure: tuple[str, Exception]) -> str:
+    """Route the camera bridge's own cause-specific message to the keyboard."""
+    from newt.recording._seam import camera_failure_message
+
+    cause, exc = failure
+    return camera_failure_message(cause, f"{type(exc).__name__}: {exc}")
+
+
 def _wait_for_space(session) -> str:
-    """Block until SPACE (``"start"``), Ctrl+H (``"kill"``), or the rig stopping
-    being driven underneath the wait (``"drive_stopped"``).
+    """Block until SPACE, Ctrl+H, or a drive/camera loop fails underneath the wait.
 
     The third answer is the whole reason this watches the session and not only the
     keyboard. A driving session keeps driving between takes, so this is exactly
@@ -505,6 +519,8 @@ def _wait_for_space(session) -> str:
     while True:
         if session.drive_failure is not None:
             return "drive_stopped"
+        if session.camera_failure is not None:
+            return "camera_stopped"
         key = _read_key(0.1)
         if key == _CTRL_H:
             return "kill"
