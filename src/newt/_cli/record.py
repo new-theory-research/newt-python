@@ -285,9 +285,9 @@ def _print_preflight(session, as_json: bool, source_receipt: str | None = None) 
         # Unconditional, both ways. "Will anything move" is the question this
         # block exists to answer before somebody stands in front of the rig, and
         # the `no` is the line that was missing at the bench: a source that reads
-        # two arms and drives neither looks exactly like one that drives, right up
-        # until the follower does not follow. (Receipt, 2026-08-06: two sessions
-        # spent watching a recording-only source not track a leader.)
+        # a rig and drives none of it looks exactly like one that drives, right up
+        # until nothing moves. (Receipt, 2026-08-06: two sessions spent watching a
+        # read-only source record a rig that was never being driven.)
         print(
             "  drives        : "
             + (

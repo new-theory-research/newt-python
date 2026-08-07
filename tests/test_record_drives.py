@@ -308,6 +308,27 @@ def test_the_preflight_says_whether_this_session_will_move_the_rig(tmp_path, cap
             session.close()
 
 
+def test_a_pushed_session_never_drives_the_rig_itself(tmp_path):
+    """`newt record --teleop` hands the same composed rig to `newt.teleop`'s loop,
+    which reads the action and sends it itself. That Session is built
+    `state_pushed=True`, and it must not also drive — two commands per tick on a
+    socket that takes one client is worse than none, and it is the failure that
+    would arrive quietly as a follower that jitters."""
+    source = _DrivingSource()
+    session = _session(source, tmp_path, state_pushed=True)
+    try:
+        session.attach_observer(_Watcher())
+        time.sleep(0.2)
+    finally:
+        session.close()
+
+    assert source.drives == 0, (
+        f"a pushed session drove the rig {source.drives} time(s) on its own — the "
+        "caller's loop is already sending, so this is a second command per tick"
+    )
+    assert source.calls.count("read") == 0, "and it does not poll one either"
+
+
 def test_an_agent_reading_the_contract_is_told_the_same_thing(tmp_path):
     """`drives` is in the library's own report, so every frontend says the same
     thing — a human reading a row and an agent reading a key cannot disagree."""
