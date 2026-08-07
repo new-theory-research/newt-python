@@ -663,6 +663,28 @@ def _cmd_validate(rest: list[str]) -> int:
         print("        Fix: newt episodes validate ./episodes/episode_abcd1234", file=sys.stderr)
         return 1
 
+    if len(positional) > 1:
+        # This command reads one episode and `--json` prints one object, so a
+        # second directory used to be dropped on the floor: two paths in, one
+        # [PASS] out, exit 0. Somebody checking a session's takes in one line
+        # would have read that as both passing.
+        print(
+            f"newt episodes validate: {len(positional)} directories given, and this "
+            "command reads one.",
+            file=sys.stderr,
+        )
+        print(
+            "        Yours: the extra paths were never checked — only "
+            f"{positional[0]} would have been.",
+            file=sys.stderr,
+        )
+        print(
+            "        Do now: run it once per episode, e.g. "
+            "for d in ./episodes/*/episode_*; do newt episodes validate \"$d\"; done",
+            file=sys.stderr,
+        )
+        return 1
+
     episode_dir = Path(positional[0])
 
     try:

@@ -604,3 +604,29 @@ def test_episodes_validate_cli_round_trips(tmp_path):
     )
     assert bad.returncode == 1
     assert json.loads(bad.stdout)["valid"] is False
+
+
+@needs_extra
+def test_episodes_validate_refuses_a_second_directory(tmp_path):
+    """Two directories in must not produce one verdict and exit 0.
+
+    Why this matters and not just "the CLI takes one argument": the natural way to
+    check a session's takes is to name them all on one line, and this command used
+    to read the first and drop the rest — one [PASS], exit 0, no mention of the
+    episodes nobody looked at. That reads as "both fine". A person acting on it
+    would ship an unchecked episode. The refusal has to name what was skipped.
+    """
+    _run_simulated_session(tmp_path, ["keep", "keep"])
+    first, second = sorted(tmp_path.glob("episode_*"))[:2]
+
+    both = subprocess.run(
+        [sys.executable, "-m", "newt", "episodes", "validate", str(first), str(second)],
+        capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(_SRC.parent)},
+    )
+    assert both.returncode == 1, "a silently-partial check must not exit 0"
+    assert "[PASS]" not in both.stdout, "no verdict may be printed for a partial read"
+    # Rule 12: the cause, whose it is, and what to do instead.
+    assert "2 directories given" in both.stderr
+    assert str(first) in both.stderr, "the refusal names what it would have checked"
+    assert "Do now:" in both.stderr
