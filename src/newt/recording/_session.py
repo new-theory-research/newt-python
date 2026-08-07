@@ -275,10 +275,17 @@ class Session:
     def drive_failure(self) -> Exception | None:
         """The exception a ``drive()`` raised, or None while driving is fine.
 
-        The twin of ``camera_failure``, and read for the same reason: a frontend
-        that wants to say the rig stopped being driven *before* somebody spends
-        another three minutes recording nothing moving. None on a session that
-        does not drive at all — there is nothing to fail.
+        The twin of ``camera_failure``, and read for the same reason: the window
+        that matters is *between* takes, where a rig that stopped being driven
+        looks exactly like a rig waiting to be recorded. Two readers watch it —
+        the keyboard loop's idle wait (``_cli/record.py``, which ends the session
+        instead of letting somebody press SPACE on a dead rig) and the browser
+        view's health payload (``live/_control.py``, beside camera bridge health).
+
+        Sticky once set: driving is session-scoped, not episode-scoped, and this
+        session will not drive again, so ``start_episode`` refuses rather than
+        clearing it. None on a session that does not drive at all — there is
+        nothing to fail.
         """
         return self._drive_failure
 
@@ -474,11 +481,24 @@ class Session:
         behaves exactly as before. An empty ``dest`` directory is created on first
         use by the writer, which is why a page can name a dataset that does not
         exist yet without a separate create step.
+
+        Raises :class:`DriveFailed` if this session's ``drive()`` already stopped —
+        driving spans the gaps between takes, so a session whose driving died is
+        done driving, and opening a take on it would record a rig nobody is moving.
         """
         if self._closed:
             raise RuntimeError("Session is closed; construct a new Session to record again.")
         if self._writer is not None:
             raise RuntimeError("An episode is already recording; end it before starting another.")
+        if self._drive_failure is not None:
+            # Driving is not episode-scoped, so its failure is not either. The
+            # capture loop returned when drive() raised; opening another episode
+            # would restart it around a source that already said it cannot drive,
+            # and record a rig nobody is moving — which is the bug this whole seam
+            # exists to end, arrived at from the other side. Refused, not cleared:
+            # clearing it here is how the record of the failure disappeared.
+            exc = self._drive_failure
+            raise DriveFailed("stopped_between_takes", f"{type(exc).__name__}: {exc}")
 
         from newt.recording._writer import DEFAULT_TAGS, EpisodeWriter
 
@@ -495,7 +515,6 @@ class Session:
             tags=tuple(tags) if tags is not None else DEFAULT_TAGS,
         )
         self._camera_failure = None
-        self._drive_failure = None
         self._start_loops()
         self._notify("on_episode", "started", self._writer.episode_id)
         return self._writer.episode_id
@@ -748,10 +767,12 @@ class Session:
             # three-minute file and sat still for the rest — with nothing in the
             # episode saying which part was which. Checked before the camera
             # refusal because driving stopping is what stopped everything else.
+            # The failure is NOT cleared: the loop is down and this session will
+            # not drive again, so the next start_episode() has to refuse too
+            # rather than open a take on a rig nobody is moving.
             exc = self._drive_failure
-            self._drive_failure = None
             writer.abandon()
-            raise DriveFailed(f"{type(exc).__name__}: {exc}")
+            raise DriveFailed("stopped_mid_episode", f"{type(exc).__name__}: {exc}")
 
         if self._camera_failure is not None:
             # The video ends before the episode does. Committing it would hand

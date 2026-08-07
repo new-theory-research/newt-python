@@ -284,6 +284,94 @@ def test_a_discarded_episode_after_a_drive_failure_still_leaves_nothing(tmp_path
 
 
 # --------------------------------------------------------------------------- #
+# When the driving stops BETWEEN takes — the window nothing was watching
+# --------------------------------------------------------------------------- #
+#
+# This is the bench's own state: `--view --control`, an observer attached, no
+# episode open. Driving runs there (that is the point of keeping it running
+# across the gap), so it can die there — with no writer to refuse, no readout
+# printing, and nobody looking. The three tests below are the three places that
+# silence used to be total.
+
+def test_driving_that_dies_between_takes_survives_the_next_start_episode(tmp_path):
+    """A failure in the gap is not erased by the take that follows it.
+
+    The rig stops moving, `start_episode()` clears the record, and the next take
+    commits normally — three minutes of a still rig with nothing in the file
+    saying so. That is the original bug reached from the other side, so the
+    session refuses the take instead: driving is session-scoped, and this session
+    will not drive again.
+
+    Needs no recording extra on purpose — the refusal lands before the writer is
+    imported, so this holds in the bare-install CI leg too.
+    """
+    source = _DrivingSource(fail_after=3)
+    session = _session(source, tmp_path)
+    try:
+        session.attach_observer(_Watcher())  # a view, no episode — the bench state
+        assert _wait_for(lambda: session.drive_failure is not None), (
+            "drive() raised between takes and the session noticed nothing"
+        )
+        with pytest.raises(DriveFailed) as caught:
+            session.start_episode()
+    finally:
+        session.close()
+
+    assert caught.value.cause == "stopped_between_takes"
+    assert session.drive_failure is not None, (
+        "the failure was consumed by the refusal — a second start_episode() would "
+        "then open a take on a rig nobody is driving"
+    )
+    assert sorted(tmp_path.glob("episode_*")) == []
+
+
+def test_the_two_ways_driving_stops_never_say_the_same_thing(tmp_path):
+    """Rule 12: mid-episode and between-takes are different situations for the
+    person reading. One had an episode discarded; the other has no episode at all
+    and cannot start one. A shared string would send half of them to the wrong
+    place."""
+    from newt.recording._seam import drive_failure_message
+
+    detail = "ConnectionError: the follower stopped answering"
+    mid = drive_failure_message("stopped_mid_episode", detail)
+    between = drive_failure_message("stopped_between_takes", detail)
+
+    assert mid != between
+    assert "the episode was discarded" in mid
+    assert "No episode was started" in between
+    assert detail in mid and detail in between, "the source's own cause survives both"
+    for message in (mid, between):
+        assert "newt rest" in message, "an operator needs the next step, not just the cause"
+
+
+def test_the_idle_wait_between_takes_reads_the_drive_failure(tmp_path):
+    """The keyboard loop's reader.
+
+    Between takes the frontend is blocked on a keypress, which is why this went
+    unseen at the bench: the rig had already stopped when the operator pressed
+    SPACE. The wait watches the session as well as the keyboard, so the answer
+    arrives before the take does.
+    """
+    from newt._cli.record import _drive_stopped_between_takes, _wait_for_space
+
+    source = _DrivingSource(fail_after=2)
+    session = _session(source, tmp_path)
+    try:
+        session.attach_observer(_Watcher())
+        assert _wait_for(lambda: session.drive_failure is not None)
+        assert _wait_for_space(session) == "drive_stopped", (
+            "the wait sat on the keyboard while the rig stood still"
+        )
+        spoken = _drive_stopped_between_takes(session.drive_failure)
+    finally:
+        session.close()
+
+    assert "ConnectionError" in spoken, "the source's own cause has to reach the operator"
+    assert "no episode is affected" in spoken, "nothing was recording — say so"
+    assert "look before you reach" in spoken, "the rig is standing where it stopped"
+
+
+# --------------------------------------------------------------------------- #
 # Saying so before anything moves
 # --------------------------------------------------------------------------- #
 

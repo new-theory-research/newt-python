@@ -281,10 +281,41 @@ class SessionControl:
             "state_hz": described.get("state_hz"),
             "destination": str(self._root.resolve()),
             "cameras": self._camera_health(status),
+            "drive": self._drive_health(described),
             "observer_failures": [
                 {"observer": name, "detail": f"{type(exc).__name__}: {exc}"}
                 for name, exc in self._session.observer_failures()
             ],
+        }
+
+    def _drive_health(self, described: dict) -> dict:
+        """Whether this session moves the rig, and whether it still does.
+
+        The camera half's twin, and it exists for the sharper version of the same
+        reason: a session that drives keeps driving between takes, so the gap is
+        exactly where driving dies with nobody watching — no readout printing, no
+        episode open, and a page that shows a live pose looking identical whether
+        the follower is tracking or standing still. ``declares`` is what the
+        source said at construction; ``state`` is what the capture loop has
+        actually seen, never a probe this layer invented.
+        """
+        drives = described["drives"]
+        failure = self._session.drive_failure
+        if not drives:
+            state, detail = "not-driven", None
+        elif failure is None:
+            state, detail = "ok", None
+        else:
+            state, detail = "stopped", f"{type(failure).__name__}: {failure}"
+        return {
+            "declares": drives,
+            "state": state,
+            "detail": detail,
+            "basis": (
+                "Ticks already taken by this session — not a probe. `ok` means no "
+                "drive() has raised, including in the gaps between takes; `stopped` "
+                "means one did and this session will not open another episode."
+            ),
         }
 
     def _camera_health(self, status) -> dict:
