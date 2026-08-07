@@ -288,12 +288,18 @@ def _print_preflight(session, as_json: bool, source_receipt: str | None = None) 
         # a rig and drives none of it looks exactly like one that drives, right up
         # until nothing moves. (Receipt, 2026-08-06: two sessions spent watching a
         # read-only source record a rig that was never being driven.)
+        # When a source deliberately commands nothing it says why, and those are
+        # the words that print: a `no` an operator can act on names which source
+        # they picked, and only the kit can write that sentence.
+        chosen = report.get("not_driven_because")
         print(
             "  drives        : "
             + (
                 "YES — every tick moves the rig; recording adds a file, it does not "
                 "start or stop the motion"
                 if report["drives"]
+                else f"no — {chosen}"
+                if chosen
                 else "no — the rig is read every tick and driven never; nothing here "
                 "moves it"
             )
@@ -471,7 +477,7 @@ def _drive_stopped_between_takes(exc: Exception) -> str:
     which changes both what is true (no episode exists) and what to do next.
     """
     return (
-        f"[newt record] DRIVING STOPPED BETWEEN TAKES — the source's drive() raised "
+        f"[newt record] DRIVING STOPPED BETWEEN TAKES — the source's drive_pair() raised "
         f"({type(exc).__name__}: {exc}).\n"
         "        Yours: a driving session keeps driving in the gaps between takes, "
         "and it stopped in one. Nothing was recording, so no episode is affected and "
@@ -1351,10 +1357,9 @@ def cmd_record(args: list[str]) -> int:
     if opts["json"] and session.drives:
         session.close()
         print(
-            "[newt record] this source drives the rig — its factory returned a "
-            "source with a drive() step, so every tick would command hardware — and "
-            "--json is what an agent uses INSTEAD of a keyboard. There would be no "
-            "Ctrl+H.",
+            "[newt record] this source drives the rig — its factory returned a pair "
+            "source, whose every tick commands hardware — and --json is what an "
+            "agent uses INSTEAD of a keyboard. There would be no Ctrl+H.",
             file=sys.stderr,
         )
         print(
