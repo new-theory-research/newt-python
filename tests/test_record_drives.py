@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -33,6 +34,8 @@ import pytest
 
 from newt.recording import (
     SINGLE_ARM_DESCRIPTOR,
+    CameraCaptureFailed,
+    CameraSpec,
     DriveFailed,
     DriveStopped,
     JointState,
@@ -52,6 +55,15 @@ _HAVE_EXTRA = (
 )
 needs_extra = pytest.mark.skipif(
     not _HAVE_EXTRA, reason="needs the [recording] extra (mcap/protobuf)"
+)
+
+# A camera attached to the episode opens a real ffmpeg pipe at start_episode(),
+# whether or not any frame it offers is ever encoded — the same reason
+# test_recording_cameras.py and test_camera_seam_second_body.py gate their
+# camera-carrying tests on this rather than just the extra.
+_HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+needs_ffmpeg = pytest.mark.skipif(
+    not _HAVE_FFMPEG, reason="needs ffmpeg + ffprobe on PATH (the color encoder)"
 )
 
 
@@ -127,6 +139,17 @@ class _PairRig(PairSource):
 
     def disable_all(self) -> None:
         self.disabled = True
+
+
+class _PairRigWithDyingCamera(_PairRig):
+    """A real rig's intersection: paired arms and a camera bridge."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cameras = [CameraSpec("wrist", 64, 48, 30)]
+
+    def read_frames(self):
+        raise RuntimeError("wrist camera stopped answering (test double)")
 
 
 class _WatchingPair(PairSource):
@@ -444,6 +467,41 @@ def test_a_driving_session_keeps_driving_between_takes(tmp_path):
     assert source.driven == stopped_at, "close() must stop the driving too"
 
 
+@needs_extra
+@needs_ffmpeg
+def test_a_camera_failure_does_not_stop_the_rig_but_still_refuses_the_episode(tmp_path):
+    """A dead camera costs the take, not control of the paired arms.
+
+    Camera capture and driving share a session but not a stop condition. Once
+    the camera bridge reports its failure, the state loop must keep taking the
+    indivisible drive-and-read tick even though the episode can no longer be
+    kept.
+    """
+    source = _PairRigWithDyingCamera()
+    session = _session(source, tmp_path)
+    try:
+        session.start_episode()
+        assert _wait_for(lambda: session.camera_failure is not None), (
+            "the camera thread's failure was not recorded"
+        )
+
+        driven_after_failure = source.driven
+        assert _wait_for(lambda: source.driven >= driven_after_failure + 3), (
+            "a camera failure stopped the paired rig — the follower would freeze "
+            "while the leader kept moving"
+        )
+        with pytest.raises(CameraCaptureFailed) as caught:
+            session.end_episode(keep=True)
+    finally:
+        session.close()
+
+    assert caught.value.cause == "stopped_answering"
+    assert "wrist camera stopped answering" in str(caught.value)
+    assert sorted(tmp_path.glob("episode_*")) == [], (
+        "the rig keeps driving, but the camera-less episode must still be refused"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # When the driving stops
 # --------------------------------------------------------------------------- #
@@ -581,6 +639,53 @@ def test_the_idle_wait_between_takes_reads_the_drive_failure(tmp_path):
     assert "ConnectionError" in spoken, "the source's own cause has to reach the operator"
     assert "no episode is affected" in spoken, "nothing was recording — say so"
     assert "look before you reach" in spoken, "the rig is standing where it stopped"
+
+
+def test_the_idle_wait_distinguishes_drive_and_both_camera_failures():
+    """The keyboard reports which loop died before the operator starts a take."""
+    from types import SimpleNamespace
+
+    from newt._cli.record import (
+        _camera_stopped_between_takes,
+        _drive_stopped_between_takes,
+        _wait_for_space,
+    )
+
+    drive = ConnectionError("the driven part stopped answering")
+    stopped_answering = RuntimeError("camera 0 timed out")
+    encoder_refused = ValueError("frame changed shape")
+    cases = (
+        (
+            SimpleNamespace(drive_failure=drive, camera_failure=None),
+            "drive_stopped",
+            _drive_stopped_between_takes(drive),
+        ),
+        (
+            SimpleNamespace(
+                drive_failure=None,
+                camera_failure=("stopped_answering", stopped_answering),
+            ),
+            "camera_stopped",
+            _camera_stopped_between_takes(("stopped_answering", stopped_answering)),
+        ),
+        (
+            SimpleNamespace(
+                drive_failure=None,
+                camera_failure=("encoder_refused", encoder_refused),
+            ),
+            "camera_stopped",
+            _camera_stopped_between_takes(("encoder_refused", encoder_refused)),
+        ),
+    )
+
+    outcomes = []
+    for session, result, message in cases:
+        assert _wait_for_space(session) == result
+        outcomes.append((result, message))
+
+    assert len(set(outcomes)) == 3, "drive and the two camera causes need distinct outcomes"
+    assert "camera 0 timed out" in outcomes[1][1]
+    assert "frame changed shape" in outcomes[2][1]
 
 
 # --------------------------------------------------------------------------- #
