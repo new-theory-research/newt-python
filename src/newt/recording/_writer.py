@@ -95,6 +95,12 @@ class EpisodeWriter:
     # rejects no string, because a taxonomy is a product decision and the file
     # format is not the place to hold one.
     tags: tuple[str, ...] = DEFAULT_TAGS
+    # The file a calibrate run left on the rig's own disk. Copied into the episode
+    # on keep, so that a camera claiming measured geometry points at a file that is
+    # actually there rather than at a name. None is the ordinary case — most takes
+    # were never calibrated — and this writer still learns nothing about what a
+    # calibration is: it moves one file and checks one pointer.
+    calibration_receipt: Path | str | None = None
 
     episode_id: str = field(init=False)
     _tmp: Path = field(init=False)
@@ -279,6 +285,8 @@ class EpisodeWriter:
                     "Episode discarded; nothing written."
                 )
 
+        self._land_calibration_receipt()
+
         episode = {
             "episode_config": {
                 "task_name": self.task_name,
@@ -329,6 +337,53 @@ class EpisodeWriter:
             # left," so an mcap finish/close failure must not skip the rmtree below.
             pass
         shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _land_calibration_receipt(self) -> None:
+        """Carry the calibration receipt into the episode, then refuse any measured
+        camera whose receipt path does not resolve inside it.
+
+        ``CameraSpec`` already checks the *shape* of a measured camera's receipt
+        path — non-empty, relative, no ``..``. Nothing checked that the path was
+        true. Both halves happen here because the episode directory is the only
+        place the question can be asked: a pointer is only resolvable against the
+        thing it points into.
+        """
+        carried: str | None = None
+        if self.calibration_receipt is not None:
+            src = Path(self.calibration_receipt)
+            if not src.is_file():
+                self.abandon()
+                raise RuntimeError(
+                    f"no calibration receipt at '{src}': this episode was handed that "
+                    "path as the file a calibrate run wrote, and there is no file there. "
+                    "The source that set calibration_receipt must point it at the file "
+                    "its own calibrate run produced. Episode discarded; nothing written."
+                )
+            (self._tmp / "calibration").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, self._tmp / "calibration" / src.name)
+            carried = f"calibration/{src.name}"
+
+        for cam in self.cameras:
+            if cam.geometry_kind != "measured":
+                continue
+            if (self._tmp / cam.geometry_receipt).is_file():
+                continue
+            self.abandon()
+            if carried is None:
+                raise RuntimeError(
+                    f"camera '{cam.id}' claims measured geometry backed by "
+                    f"'{cam.geometry_receipt}', but this episode was handed no calibration "
+                    "receipt at all. The source that declared the camera must also set "
+                    "calibration_receipt to the file its calibrate run wrote, or declare "
+                    "the geometry it actually has. Episode discarded; nothing written."
+                )
+            raise RuntimeError(
+                f"camera '{cam.id}' claims measured geometry backed by "
+                f"'{cam.geometry_receipt}', but the receipt this episode carries is "
+                f"'{carried}'. The source that declared the camera must point "
+                "geometry_receipt at the file it handed over. Episode discarded; "
+                "nothing written."
+            )
 
     # --- helpers ------------------------------------------------------------
 
