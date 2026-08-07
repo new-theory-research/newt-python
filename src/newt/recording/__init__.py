@@ -6,8 +6,11 @@ The public surface:
 - ``Session``          — all recording behavior; the layering moat. Frontends
                           (``newt record``, an agent on ``--json``) hold none of it.
 - ``RecordingSource``  — the seam protocol an embodiment implements (``read_state``
-                          + ``descriptor``, optional ``drive`` / ``disable_all`` /
-                          ``close``).
+                          + ``descriptor``, optional ``disable_all`` / ``close``).
+- ``PairSource``       — the base class for a rig moved from its own motion: it
+                          writes the tick, so driving and reading are one call and
+                          neither can be had without the other. A pair that
+                          deliberately commands nothing says so in a sentence.
 - ``StateDescriptor``  — the static shape of a state stream (arms, channels, joints).
 - ``ViewDeclaration``  — what a kit declares so a live view can draw its robot:
                           a description file, an entity prefix, the joints it
@@ -36,6 +39,9 @@ The public surface:
 - ``DriveFailed``      — the same refusal for the other half: what it raises when a
                           source that drives its rig stopped being able to, so no
                           episode claims a demonstration that stopped part-way.
+- ``DriveStopped``     — what a pair source's tick raises when its driving half
+                          did, so the capture loop can tell which half of a tick
+                          died. Never raised by a kit.
 - ``validate``         — validate an NT v0.0.3 episode directory (lazy; needs the extra).
 
 ``import newt`` stays featherweight: it does NOT import this package, and importing
@@ -56,8 +62,10 @@ from newt.recording._seam import (
     CameraCaptureFailed,
     CameraOpenError,
     DriveFailed,
+    DriveStopped,
     JointDrive,
     JointState,
+    PairSource,
     RecordingSource,
     SimulatedSource,
     StateDescriptor,
@@ -74,10 +82,12 @@ __all__ = [
     "CameraOpenError",
     "CameraSpec",
     "DriveFailed",
+    "DriveStopped",
     "JointDrive",
     "JointState",
     "LocalSink",
     "NTCloudSink",
+    "PairSource",
     "RecordingExtraMissing",
     "RecordingSource",
     "Session",

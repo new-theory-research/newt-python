@@ -12,12 +12,14 @@ The capture loop runs on a background thread between ``start_episode()`` and
 read into the in-flight episode. A frontend that wants a live readout calls
 ``status()`` on its own cadence; it never touches the loop or the writer.
 
-The same loop drives, when the source says it has something to drive. A source
-that declares ``drive()`` has it called at the top of every tick, before the
-read — so one tick moves the rig and writes the frame, and recording a
-demonstration is one action rather than a teleop loop and a capture loop
-fighting over hardware that takes one client. What driving *means* stays behind
-that method: the library calls it and learns nothing else.
+The same loop drives, and it does so without a second call: a rig that is moved
+from its own motion does that inside its own tick (``newt.recording.PairSource``),
+so ``read_state()`` is the only thing this loop invokes and the driving half is
+not something a caller can leave out. One tick moves the rig and writes the
+frame, and recording a demonstration is one action rather than a teleop loop and
+a capture loop fighting over hardware that takes one client. What driving *means*
+stays behind the source's method: the library calls the tick and learns nothing
+else.
 
 One Session does not poll: ``state_pushed=True`` says the caller's own loop is
 the clock and hands each tick over through ``feed_state()``. That exists for the
@@ -40,6 +42,7 @@ from pathlib import Path
 from newt.recording._seam import (
     CameraCaptureFailed,
     DriveFailed,
+    DriveStopped,
     RecordingSource,
     StateDescriptor,
     camera_failure_message,
@@ -74,8 +77,9 @@ class Session:
     """One recording session against one embodiment.
 
     Construct with a RecordingSource-shaped object (``read_state`` + ``descriptor``,
-    optional ``drive`` / ``disable_all`` / ``close``), a task prompt, and an output
-    directory.
+    optional ``disable_all`` / ``close``; a rig driven every tick is a
+    ``PairSource``, whose driving happens inside its own ``read_state``), a task
+    prompt, and an output directory.
     Then drive the rhythm: ``start_episode()`` opens a fresh episode and spins up
     the capture loop; ``end_episode(keep=True)`` commits it atomically (or
     ``keep=False`` discards it, leaving no directory). ``status()`` returns a
@@ -128,13 +132,15 @@ class Session:
         # Whether the source polls itself (a rig bridge) or the caller pushes with
         # feed_frame. Only a source bridge gets a camera thread.
         self._reads_frames = callable(getattr(source, "read_frames", None))
-        # Whether this source moves its rig every tick. Asked of the source by
-        # name, exactly as read_frames is: a source that declares drive() gets it
-        # called at the top of every tick, and one that does not is polled the way
-        # it always was. What driving means never crosses this line — the method
-        # takes nothing and returns nothing, so the only thing recording learns
-        # about a rig it drives is that there is a step to take.
-        self._drives = callable(getattr(source, "drive", None))
+        # Whether this source moves its rig every tick, and — when it does not on
+        # purpose — the sentence it gave for that. Both are *description*: the
+        # driving happens inside the source's own tick (see
+        # newt.recording.PairSource), so nothing about whether the rig moves
+        # depends on these two lines. They decide what the preflight prints and
+        # what the live view's health payload says, which is the whole reason a
+        # session that drives and one that only watches stopped looking identical.
+        self._drives = bool(getattr(source, "drives", False))
+        self._not_driven_because = getattr(source, "not_driven_because", None)
         self._drive_failure: Exception | None = None
         self._check_camera_bridge(source, declared_by_caller=bool(cameras))
         self._check_cameras_are_declarable()
@@ -262,8 +268,8 @@ class Session:
 
     @property
     def drives(self) -> bool:
-        """Whether this session moves the rig every tick — i.e. whether the source
-        declared a ``drive()`` step.
+        """Whether this session moves the rig every tick — what the source says it
+        is, which for a pair source is whether it implements its driving half.
 
         Read by a frontend that has to say so before an operator stands in front
         of the thing: a session that drives and a session that only watches look
@@ -272,8 +278,19 @@ class Session:
         return self._drives
 
     @property
+    def not_driven_because(self) -> str | None:
+        """The sentence a pair source gave for commanding nothing, or None.
+
+        None on the ordinary driving session and on every rig that was never a
+        pair — there is nothing deliberate to explain. A sentence means somebody
+        chose the rare variant, and the operator reading the preflight gets their
+        words rather than a bare `no`.
+        """
+        return self._not_driven_because
+
+    @property
     def drive_failure(self) -> Exception | None:
-        """The exception a ``drive()`` raised, or None while driving is fine.
+        """The exception a source's driving half raised, or None while driving is fine.
 
         The twin of ``camera_failure``, and read for the same reason: the window
         that matters is *between* takes, where a rig that stopped being driven
@@ -310,6 +327,10 @@ class Session:
             # description rather than in a frontend's head: "will this session
             # move anything" is the first thing an operator reads a preflight for.
             "drives": self._drives,
+            # The kit's own sentence when a pair deliberately commands nothing,
+            # None otherwise. A frontend prints it instead of writing its own
+            # guess at why a rig is standing still on purpose.
+            "not_driven_because": self._not_driven_because,
             "joint_names": list(d.joint_names),
             "channels": [f"robot_state/{c}" for c in d.channels],
             "state_fields": list(d.state_fields),
@@ -482,7 +503,7 @@ class Session:
         use by the writer, which is why a page can name a dataset that does not
         exist yet without a separate create step.
 
-        Raises :class:`DriveFailed` if this session's ``drive()`` already stopped —
+        Raises :class:`DriveFailed` if this session's driving already stopped —
         driving spans the gaps between takes, so a session whose driving died is
         done driving, and opening a take on it would record a rig nobody is moving.
         """
@@ -492,8 +513,8 @@ class Session:
             raise RuntimeError("An episode is already recording; end it before starting another.")
         if self._drive_failure is not None:
             # Driving is not episode-scoped, so its failure is not either. The
-            # capture loop returned when drive() raised; opening another episode
-            # would restart it around a source that already said it cannot drive,
+            # capture loop returned when the tick's driving half raised; opening
+            # another episode would restart it around a source that cannot drive,
             # and record a rig nobody is moving — which is the bug this whole seam
             # exists to end, arrived at from the other side. Refused, not cleared:
             # clearing it here is how the record of the failure disappeared.
@@ -541,36 +562,35 @@ class Session:
             writer.tags = tuple(tags)
 
     def _capture_loop(self) -> None:
-        """Drive the source, then read it, at the state rate. The only place the
-        state capture rhythm lives, and cameras do not enter it: a source that
-        declared cameras is read by ``_camera_loop`` on its own thread, and a
-        frontend that owns its own bridge pushes through ``feed_frame``. Either
-        way the state rate is the state rate.
+        """Tick the source at the state rate. The only place the state capture
+        rhythm lives, and cameras do not enter it: a source that declared cameras
+        is read by ``_camera_loop`` on its own thread, and a frontend that owns
+        its own bridge pushes through ``feed_frame``. Either way the state rate is
+        the state rate.
 
-        **Drive first, then read.** A source that declares ``drive()`` moves its
-        rig at the top of every tick, before the read, so what this loop writes
-        is the state of a rig that has already been told where to go — the same
-        order ``newt.teleop``'s loop uses, and the reason recording a
-        demonstration is one action instead of two loops fighting over one arm.
-        A source that declares nothing is polled exactly as it always was: the
-        branch is the whole difference.
+        **One tick call, and there is nothing beside it to forget.** Whatever a
+        source *is* happens inside ``read_state()`` — a rig driven from its own
+        motion drives there (``newt.recording.PairSource`` fuses the halves), and
+        a rig that is only watched only reads. This loop takes the same single
+        call either way, so no verb built on it can lose the driving half by
+        omission: there is no second call to omit.
         """
         while not self._stop_loop.is_set():
-            if self._drives:
-                try:
-                    self._source.drive()
-                except Exception as exc:  # noqa: BLE001 — background thread, same
-                    # reason the camera read below catches: an uncaught exception
-                    # here dies on a thread nobody is watching, and the rig would
-                    # simply stop moving with no signal why. Recording the cause
-                    # and stopping is how driving's failure becomes visible.
-                    self._fail_drive(exc)
-                    return
-            # Stamped after the drive, as `newt.teleop` stamps after the send:
-            # this is the moment the rig was commanded, and a timestamp taken
-            # before it would date the frame by how long the drive took.
+            try:
+                channels = self._source.read_state()
+            except DriveStopped as stopped:  # the tick died in its driving half,
+                # on a background thread nobody is watching — an uncaught one here
+                # would leave the rig simply stopping with no signal why, exactly
+                # as the camera read below would. Recording the source's own cause
+                # and stopping is what makes it visible; the episode is refused at
+                # the boundary, not torn down from under the frontend here.
+                self._fail_drive(stopped.__cause__ or stopped)
+                return
+            # Stamped after the tick returns, as `_camera_loop` stamps after its
+            # read: the tick both commanded the rig and read it back, so this is
+            # the closest honest moment to when that state was true. A stamp taken
+            # before it would date the frame by however long the tick took.
             ts_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
-            channels = self._source.read_state()
             shown: dict[str, list[float]] = {}
             with self._lock:
                 if self._writer is None and not self._streaming:
