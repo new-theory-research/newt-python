@@ -282,6 +282,28 @@ def _print_preflight(session, as_json: bool, source_receipt: str | None = None) 
         print("=" * 64)
         kind = report["source_kind"]
         print(f"  source        : {kind}{f' — {source_receipt}' if source_receipt else ''}")
+        # Unconditional, both ways. "Will anything move" is the question this
+        # block exists to answer before somebody stands in front of the rig, and
+        # the `no` is the line that was missing at the bench: a source that reads
+        # a rig and drives none of it looks exactly like one that drives, right up
+        # until nothing moves. (Receipt, 2026-08-06: two sessions spent watching a
+        # read-only source record a rig that was never being driven.)
+        # When a source deliberately commands nothing it says why, and those are
+        # the words that print: a `no` an operator can act on names which source
+        # they picked, and only the kit can write that sentence.
+        chosen = report.get("not_driven_because")
+        print(
+            "  drives        : "
+            + (
+                "YES — every tick moves the rig; recording adds a file, it does not "
+                "start or stop the motion"
+                if report["drives"]
+                else f"no — {chosen}"
+                if chosen
+                else "no — the rig is read every tick and driven never; nothing here "
+                "moves it"
+            )
+        )
         print(f"  state dims    : {len(report['joint_names'])} joints {report['joint_names']}")
         print(f"  state channels: {', '.join(report['channels'])}")
         print(f"  state rate    : {report['state_hz']} Hz")
@@ -323,7 +345,7 @@ _CTRL_H = "\x08"
 
 
 def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> int:
-    from newt.recording import CameraCaptureFailed
+    from newt.recording import CameraCaptureFailed, DriveFailed
 
     if not _print_preflight(session, as_json=False, source_receipt=source_receipt):
         session.close()
@@ -335,8 +357,20 @@ def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> 
     try:
         while True:
             print("\n[session] SPACE to start an episode (Ctrl+C to end the session) …", flush=True)
-            if not _wait_for_space(session):
+            idle = _wait_for_space(session)
+            if idle == "kill":
                 return 130  # Ctrl+H during idle
+            if idle == "drive_stopped":
+                # Said here rather than at the next start_episode(), which refuses
+                # too: the operator is standing at the rig waiting to press SPACE,
+                # and the three minutes this saves are the three they would have
+                # spent recording something that stopped moving before they began.
+                print(
+                    f"\n{_drive_stopped_between_takes(session.drive_failure)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 3
             ep_id = session.start_episode()
             print(f"[rec] episode {ep_id} — recording (SPACE to stop) …", flush=True)
 
@@ -373,7 +407,13 @@ def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> 
             if verdict == "keep":
                 try:
                     path = session.end_episode(keep=True)
-                except CameraCaptureFailed as exc:
+                except (CameraCaptureFailed, DriveFailed) as exc:
+                    # One clause, one exit code: both are the same event — the rig
+                    # stopped being what this episode claims it was, so the episode
+                    # is refused rather than committed. What differs is the whole
+                    # of each exception's text, which is where the two causes stay
+                    # distinguishable; a frontend that paraphrased them here would
+                    # be the place they collapsed into one string.
                     print(f"\n[newt record] EPISODE REFUSED — {exc}", file=sys.stderr, flush=True)
                     return 3
                 print(f"[verdict] KEPT — {path}", flush=True)
@@ -428,14 +468,48 @@ def _read_key(timeout: float) -> str | None:
         return None
 
 
-def _wait_for_space(session) -> bool:
-    """Block until SPACE (start). Returns False if Ctrl+H (kill) is pressed."""
+def _drive_stopped_between_takes(exc: Exception) -> str:
+    """What the keyboard loop says when driving died in the gap.
+
+    Its own string, and deliberately not either of the library's two: those are
+    said to somebody who asked to keep an episode, or who asked to start one.
+    This is said to somebody standing at the rig with their thumb over SPACE,
+    which changes both what is true (no episode exists) and what to do next.
+    """
+    return (
+        f"[newt record] DRIVING STOPPED BETWEEN TAKES — the source's drive_pair() raised "
+        f"({type(exc).__name__}: {exc}).\n"
+        "        Yours: a driving session keeps driving in the gaps between takes, "
+        "and it stopped in one. Nothing was recording, so no episode is affected and "
+        "nothing partial was written.\n"
+        "        Do now: the session is closing, which torques the rig off through "
+        "the source's own disable_all — but it is standing where it stopped being "
+        "driven, so look before you reach. Then fix what the message in the "
+        "parentheses names (it is the source's, not ours) and run the same command "
+        "again."
+    )
+
+
+def _wait_for_space(session) -> str:
+    """Block until SPACE (``"start"``), Ctrl+H (``"kill"``), or the rig stopping
+    being driven underneath the wait (``"drive_stopped"``).
+
+    The third answer is the whole reason this watches the session and not only the
+    keyboard. A driving session keeps driving between takes, so this is exactly
+    where driving dies unobserved: nothing is recording, the readout is not
+    printing, and the next thing that happens is somebody pressing SPACE and
+    spending three minutes recording a rig that stopped moving before they
+    started. ``drive_failure`` is None every iteration on a session that does not
+    drive, which is what makes the check free on every other rig.
+    """
     while True:
+        if session.drive_failure is not None:
+            return "drive_stopped"
         key = _read_key(0.1)
         if key == _CTRL_H:
-            return False
+            return "kill"
         if key == _SPACE:
-            return True
+            return "start"
 
 
 def _record_until_stop(session) -> bool:
@@ -1273,8 +1347,48 @@ def cmd_record(args: list[str]) -> int:
     if session is None:
         return 2
 
+    # A driving source under --json would move hardware with no kill key. This is
+    # the same refusal `--teleop --json` makes and it may not share that string:
+    # there the operator asked for a demonstration and typed two flags that cannot
+    # both be honoured, and the rig was still dark. Here they asked to record, and
+    # the fact that this source drives is only knowable from the object the factory
+    # returned — which means the rig is already up, and the honest sentence has to
+    # say what was done about that.
+    if opts["json"] and session.drives:
+        session.close()
+        print(
+            "[newt record] this source drives the rig — its factory returned a pair "
+            "source, whose every tick commands hardware — and --json is what an "
+            "agent uses INSTEAD of a keyboard. There would be no Ctrl+H.",
+            file=sys.stderr,
+        )
+        print(
+            "        Do now: this was only knowable after the factory ran, so the rig "
+            "came up. The session has been closed, which torqued it off through the "
+            "source's own disable_all.\n"
+            "        Fix: run the same command in a real terminal without --json — "
+            "Ctrl+H is the kill there. Whether an agent should ever drive a rig, and "
+            "what its kill would be, is unanswered; this verb will not answer it by "
+            "accident.",
+            file=sys.stderr,
+        )
+        return 1
+
     view = None
     if opts["view"]:
+        if session.drives:
+            # Said here, and only on this path, because of what --view does next:
+            # attaching the page starts the session's tick, and on a driving rig
+            # that is the moment the metal starts moving. The preflight says the
+            # same thing in its own row, but it prints after the page's address —
+            # which on this one path is after the first tick. An operator may not
+            # learn from a block printed underneath a rig that is already moving.
+            print(
+                "\n[newt record] the rig starts being driven when the page comes up: "
+                "every tick commands it, and it keeps being driven between takes. "
+                "Ctrl+H is the kill.",
+                flush=True,
+            )
         try:
             view = _open_view(session, opts, as_json=opts["json"])
         except Exception as exc:  # noqa: BLE001 — every LiveViewUnavailable already

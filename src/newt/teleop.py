@@ -244,6 +244,28 @@ def _require_source(source: Any) -> list[MovingPart]:
                 "and send_action(). See newt.teleop.TeleopSource."
             )
 
+    # A source whose own tick drives, handed to a loop that drives. Two commands
+    # per tick on hardware that takes one client is the failure that arrives as a
+    # rig that jitters, with nothing saying why — and it is the shape the atomic
+    # tick made possible, so this verb refuses it by name rather than by shape.
+    from newt.recording._seam import PairSource  # stdlib-only seam; safe here
+
+    if isinstance(source, PairSource) and source.drives:
+        raise TeleopError(
+            "The source drives its rig inside its own tick, and so does this verb — "
+            "every tick would command the rig twice.\n"
+            "Yours: --source built a pair source, whose read_state() moves the rig "
+            "before it reports it. This loop reads an action and sends it itself, so "
+            "the two would fight over hardware that answers one client, and the rig "
+            "would jitter with nothing saying why.\n"
+            "Do now: nothing has been read and nothing has been driven. Whatever the "
+            "factory connected is still connected; put it away with `newt rest`.\n"
+            "Then: pick one. A pair source is already a whole demonstration — record "
+            "it with `newt record --source ...`, which ticks it and writes the "
+            "episode. Reserve this verb for a source that reads and sends actions and "
+            "does not drive itself."
+        )
+
     try:
         parts = list(source.moving_parts())
     except Exception as exc:

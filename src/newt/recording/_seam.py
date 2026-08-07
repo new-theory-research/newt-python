@@ -99,6 +99,184 @@ class CameraOpenError(RuntimeError):
         )
 
 
+# --- the two ways the driving half of a recording fails ---------------------
+#
+# Driving does not belong to an episode the way a writer does — it runs from the
+# moment the session starts ticking until the session closes, takes and gaps
+# alike. So it fails in two places that must never share a string: inside a take
+# (an episode exists and is refused) and between takes (no episode exists, and
+# what is refused is starting the next one).
+
+DRIVE_FAILURE_CAUSES = (
+    "stopped_mid_episode",
+    "stopped_between_takes",
+)
+
+
+def drive_failure_message(cause: str, detail: str) -> str:
+    """The message for one drive failure cause. ``detail`` is the source's own
+    exception, verbatim: what driving means is the source's, and so is the reason
+    it stopped."""
+    if cause == "stopped_mid_episode":
+        return (
+            f"The rig stopped being driven part-way through the episode: the source's "
+            f"drive_pair() raised ({detail}).\n"
+            "Yours: whatever this source drives went unreachable, refused the move, or "
+            "faulted. Nothing stale was re-sent to cover the gap, and no tick after it "
+            "was recorded.\n"
+            "Do now: the episode was discarded, so nothing partial was written, and "
+            "capture stopped when driving did. The rig is standing where it stopped "
+            "being driven and may still be holding — put it away with `newt rest` "
+            "before walking up to it.\n"
+            "Then: the message in the parentheses is the source's, not the library's. "
+            "That is where the fix is."
+        )
+    if cause == "stopped_between_takes":
+        return (
+            "This session stopped being able to drive the rig between takes, so it "
+            f"will not open another episode: the source's drive_pair() raised "
+            f"({detail}).\n"
+            "Yours: driving runs from the moment the session starts ticking, not just "
+            "while an episode is open — so it stopped in the gap, with nothing "
+            "recording. No episode was started and nothing was written.\n"
+            "Do now: the rig is standing where it stopped being driven and may still "
+            "be holding — put it away with `newt rest` before walking up to it. This "
+            "session will not drive again: close it and start a new one once the "
+            "source can drive, rather than recording takes nothing is moving.\n"
+            "Then: the message in the parentheses is the source's, not the library's. "
+            "That is where the fix is."
+        )
+    # Never reached through the call sites above; kept so an added cause that
+    # forgets its string fails loudly instead of rendering an empty one.
+    raise AssertionError(f"no message written for drive failure cause {cause!r} ({detail})")
+
+
+# --- the five ways a pair source is built wrong -----------------------------
+#
+# All five fire at class definition, where the kit author is standing and nothing
+# is connected — not at a bench with a rig that will not move. Five causes, five
+# strings, one place (Rule 12): each one names a different thing the author has to
+# go and write, so they may never share a sentence.
+
+PAIR_FAULT_CAUSES = (
+    "tick_rewritten",
+    "no_driving_half",
+    "no_reading_half",
+    "says_both",
+    "reason_not_a_sentence",
+)
+
+
+def pair_fault_message(cause: str, detail: str) -> str:
+    """The message for one way a :class:`PairSource` subclass is built wrong.
+    ``detail`` is the subclass's own name."""
+    if cause == "tick_rewritten":
+        return (
+            f"{detail} defines its own read_state(), which is the one method a pair "
+            "source does not write.\n"
+            "Yours: read_state() is where the two halves of a tick are fused — the "
+            "drive runs, then the read, and the reading is not reachable without the "
+            "drive having happened. A subclass that writes its own is back to a source "
+            "that can be read without being driven, which is what this class exists to "
+            "make unbuildable.\n"
+            "Do now: nothing was constructed and nothing connected — this fired when "
+            "the class was defined.\n"
+            "Then: put the moving half in drive_pair() and the reporting half in "
+            "read_pair(). Everything your read_state() did belongs in one of the two."
+        )
+    if cause == "no_driving_half":
+        return (
+            f"{detail} is a pair source with no driving half: it implements neither "
+            "drive_pair() nor a stated reason to command nothing.\n"
+            "Yours: a pair is one atom — the part that is moved and the part it is "
+            "moved from belong to the same tick. A pair that only reads is a rig that "
+            "stands still through a whole session while every readout looks right, and "
+            "there is no way to notice from the outside.\n"
+            "Do now: nothing was constructed and nothing connected — this fired when "
+            "the class was defined.\n"
+            "Then: implement drive_pair() — what moving this rig means is yours, the "
+            "library only calls it — or, if this source is genuinely meant to command "
+            "nothing, set not_driven_because to the sentence saying why. There is no "
+            "third state, and no default."
+        )
+    if cause == "no_reading_half":
+        return (
+            f"{detail} is a pair source with no reading half: it implements no "
+            "read_pair(), so its tick would drive the rig and report nothing.\n"
+            "Yours: an episode is written from what read_pair() returns. A source that "
+            "drives and reports nothing writes a file of a demonstration nobody can "
+            "see.\n"
+            "Do now: nothing was constructed and nothing connected — this fired when "
+            "the class was defined.\n"
+            "Then: implement read_pair(), returning one entry per channel your "
+            "descriptor declares — None for a channel that produced nothing this tick."
+        )
+    if cause == "says_both":
+        return (
+            f"{detail} implements drive_pair() and also sets not_driven_because, so it "
+            "says two things at once.\n"
+            "Yours: not_driven_because is the deliberate choice to command nothing. "
+            "Beside a drive_pair(), it leaves a method that is never called and a "
+            "reader of the class with no way to tell which statement is the true one.\n"
+            "Do now: nothing was constructed and nothing connected — this fired when "
+            "the class was defined.\n"
+            "Then: keep drive_pair() and delete the reason if this source drives; keep "
+            "the reason and delete the method if it does not."
+        )
+    if cause == "reason_not_a_sentence":
+        return (
+            f"{detail} sets not_driven_because to something that is not a sentence.\n"
+            "Yours: that attribute is read by an operator, through the preflight, "
+            "before they stand in front of a rig that is about to not move. A True, an "
+            "empty string or a bare flag answers the wrong question — the question is "
+            "*why*, and nobody but the kit can answer it.\n"
+            "Do now: nothing was constructed and nothing connected — this fired when "
+            "the class was defined.\n"
+            "Then: set not_driven_because to a plain sentence saying what this source "
+            "reads and what it deliberately does not command."
+        )
+    # Never reached through the call sites above; kept so an added cause that
+    # forgets its string fails loudly instead of rendering an empty one.
+    raise AssertionError(f"no message written for pair fault cause {cause!r} ({detail})")
+
+
+class DriveStopped(RuntimeError):
+    """A pair source's driving half raised, so the tick never completed.
+
+    Raised by :meth:`PairSource.read_state` and by nothing else — a kit raises
+    whatever its own driver raised, and this wraps it. It exists so the capture
+    loop can tell the two halves of one tick apart: driving that stopped means
+    this session is done driving (:class:`DriveFailed`, refused at the episode
+    boundary), while a read that raised is a different failure with a different
+    fix. The source's own exception is the ``__cause__``; nothing is added to it.
+    """
+
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__(f"{type(exc).__name__}: {exc}")
+
+
+class DriveFailed(RuntimeError):
+    """The source's driving half raised, so the session stopped driving.
+
+    A tick that could not drive the rig is a tick nobody demonstrated, and an
+    episode whose joints go still half-way through — with nothing in the file
+    saying the driving stopped — is the camera-that-ends-early failure wearing
+    different clothes. The capture loop learns of it as a :class:`DriveStopped`
+    out of the source's own tick. Raised by ``Session.end_episode(keep=True)``, which
+    abandons the episode rather than committing it, and by
+    ``Session.start_episode()``, which refuses to open a take on a session whose
+    driving already died.
+
+    Carries the cause key so a frontend can route on it without matching on
+    prose, exactly as ``CameraCaptureFailed`` does.
+    """
+
+    def __init__(self, cause: str, detail: str) -> None:
+        self.cause = cause
+        self.detail = detail
+        super().__init__(drive_failure_message(cause, detail))
+
+
 class CameraCaptureFailed(RuntimeError):
     """The camera bridge failed part-way through an episode, so the episode was
     refused rather than committed with video that ends before its joints do.
@@ -239,12 +417,129 @@ class RecordingSource(Protocol):
     cameras; the library encodes, timestamps and enforces the frame-count
     invariant.** The library holds no camera identity — ids travel as opaque
     strings the source chose, exactly as channel names already do.
+
+    **A rig that is moved every tick does that inside ``read_state``**, and there
+    is no second method for it. ``read_state()`` is the whole tick: one call, and
+    everything the source *is* happens behind it. A source whose rig is driven
+    from its own motion subclasses :class:`PairSource`, which writes that tick —
+    see there for why the driving is not a separate member of this protocol.
     """
 
     descriptor: StateDescriptor
 
     def read_state(self) -> dict[str, JointState | None]:
         ...
+
+
+class PairSource:
+    """A rig one part of which is moved from another part's motion — and the
+    reason ``newt`` has a class for it rather than a method: **the pair is the
+    atom.**
+
+    Reading such a rig and driving it are not two things a session does in order.
+    They are one thing. Any seam where the first can happen without the second is
+    a seam where a rig stands still through an entire session while every readout
+    on every surface looks correct — and that is not a hypothetical: it shipped
+    three times in four days, once per verb, each verb re-losing the driving half
+    on its own. A step a caller can forget is a step callers forget.
+
+    So the halves are fused here, once, in a method a kit does not write.
+    ``read_state()`` — the session's only tick call — drives and then reads, and
+    the reading is not reachable without the drive having run. A subclass
+    supplies the two halves:
+
+    ``drive_pair()``
+        Move the rig. What moving means is entirely the kit's — which part is
+        driven, from what, what an action is — and this library learns only that
+        there is a step to take. Takes nothing, returns nothing. Raising from it
+        stops the tick before the read (:class:`DriveStopped`), which stops
+        capture and refuses the episode rather than recording a rig that quietly
+        went still. A value that simply did not arrive this tick is a drop, and
+        drops belong in the read half.
+
+    ``read_pair()``
+        Report the tick, in exactly the shape ``read_state`` has always returned:
+        one entry per channel the descriptor declares, ``None`` for a channel that
+        produced nothing.
+
+    Everything else a source may expose — ``cameras`` / ``read_frames``,
+    ``disable_all``, ``close``, ``view_declaration`` — is untouched and stays on
+    the subclass. This class owns exactly one thing: that a tick is whole.
+
+    **The rare variant, chosen out loud.** A pair that is read and deliberately
+    commands nothing sets ``not_driven_because`` to the sentence saying why, and
+    implements no ``drive_pair``. That is a line somebody had to write and a
+    sentence the preflight prints back to the operator — never a state a rig
+    arrives in by a method being left out. A subclass that does neither does not
+    define at all: the refusal fires where the kit author is standing, with
+    nothing connected and nothing energized.
+    """
+
+    descriptor: StateDescriptor
+
+    #: The sentence a source sets to say it reads this pair and commands nothing.
+    #: ``None`` — the default — is the ordinary pair, which drives every tick. It
+    #: is deliberately not a boolean: "does this drive" is answered by whether
+    #: ``drive_pair`` is implemented, and the only thing left to say is *why not*.
+    not_driven_because: ClassVar[str | None] = None
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        """Refuse a subclass that is not a whole pair, at class-definition time.
+
+        This is the enforcement, and it runs at import: every way of arriving at
+        a source that reads without driving is caught here, before a factory has
+        connected anything. The alternative — finding out at a bench — is the
+        four days this class was written out of.
+        """
+        super().__init_subclass__(**kwargs)
+        if "read_state" in cls.__dict__:
+            raise TypeError(pair_fault_message("tick_rewritten", cls.__name__))
+        reason = cls.not_driven_because
+        if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+            raise TypeError(pair_fault_message("reason_not_a_sentence", cls.__name__))
+        drives = cls.drive_pair is not PairSource.drive_pair
+        if drives and reason is not None:
+            raise TypeError(pair_fault_message("says_both", cls.__name__))
+        if not drives and reason is None:
+            raise TypeError(pair_fault_message("no_driving_half", cls.__name__))
+        if cls.read_pair is PairSource.read_pair:
+            raise TypeError(pair_fault_message("no_reading_half", cls.__name__))
+
+    @property
+    def drives(self) -> bool:
+        """Whether this source's tick moves the rig — read by the Session for the
+        preflight row and the live view's health payload, and by nothing that
+        decides whether the rig actually moves. That is the point of the re-cut:
+        the driving is inside the tick, so a wrong answer here misdescribes a
+        session rather than silencing one."""
+        return type(self).not_driven_because is None
+
+    def drive_pair(self) -> None:
+        """Move the rig, once. Implemented by the kit; see the class docstring."""
+        raise TypeError(pair_fault_message("no_driving_half", type(self).__name__))
+
+    def read_pair(self) -> dict[str, JointState | None]:
+        """Report one tick's channels. Implemented by the kit."""
+        raise TypeError(pair_fault_message("no_reading_half", type(self).__name__))
+
+    def read_state(self) -> dict[str, JointState | None]:
+        """The whole tick: drive, then read. **Not a kit's to override** — a
+        subclass that defines it does not define (see ``__init_subclass__``).
+
+        The order is the one ``newt.teleop``'s loop already uses: the state a tick
+        records is the state of a rig that has just been told where to go. The
+        drive's exception is wrapped rather than passed through so the capture
+        loop can tell it from a read that failed; the read never runs after it.
+        """
+        if type(self).not_driven_because is None:
+            try:
+                self.drive_pair()
+            except Exception as exc:
+                # Re-raised, never swallowed: the wrap is what tells the capture
+                # loop which half of the tick died, and the source's own
+                # exception rides along untouched as __cause__.
+                raise DriveStopped(exc) from exc
+        return self.read_pair()
 
 
 class SimulatedSource:
