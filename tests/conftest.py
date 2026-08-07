@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from newt import _credentials
-from newt._cli import _source_spec, logout, status
+from newt._cli import _source_spec, logout, setup, status
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +38,12 @@ def _no_ambient_site_config(monkeypatch, tmp_path_factory):
     # about environments. pytest runs from wherever the developer invoked it —
     # unfenced, a refusal would notice this repo's own pyproject on one machine
     # and nothing on another.
-    monkeypatch.setattr(_source_spec, "_cwd_kit_declaring", lambda verb: None)
+    monkeypatch.setattr(_source_spec, "_cwd_kit_declaring", lambda verb, group=None: None)
+    # The fourth read, and the second declaration surface: a kit publishes its
+    # setup under a flat ``newt.setup`` group (newtrino-041). Same reasoning as
+    # the three above — a machine with a kit installed would otherwise resolve
+    # the developer's own setup, and `newt setup` in a test would run it.
+    monkeypatch.setattr(setup, "_declared_setups", lambda: [])
 
 
 @pytest.fixture(autouse=True)

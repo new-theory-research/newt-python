@@ -199,7 +199,7 @@ def _declaring_verbs() -> list[str]:
     )
 
 
-def _cwd_kit_declaring(verb: str) -> Path | None:
+def _cwd_kit_declaring(verb: str, group: str | None = None) -> Path | None:
     """The project you are standing in that publishes this verb, if that is why.
 
     The bench receipt (2026-08-06): standing inside a kit's own checkout,
@@ -219,6 +219,13 @@ def _cwd_kit_declaring(verb: str) -> Path | None:
     Returns ``None`` when this interpreter is already the project's own: then
     re-running through the project changes nothing, and handing back the command
     they just typed is a loop rather than a fix.
+
+    ``group`` is the full entry-point group to look for, and exists because the
+    second declaration surface does not have a verb tail: a kit declares its
+    setup under a flat ``newt.setup``, not ``newt.setup.<verb>``. Left unset it
+    means ``newt.sources.<verb>``, which is every caller in this file. Whichever
+    group is asked for, the answer is still read from a declaration the
+    developer wrote — never from a directory that merely looks like a kit.
 
     One function so the suite has one seam to fence (``tests/conftest.py``),
     for the reason the two entry-point reads above have theirs — a refusal that
@@ -247,7 +254,7 @@ def _cwd_kit_declaring(verb: str) -> Path | None:
     groups = project.get("entry-points") if isinstance(project, dict) else None
     if not isinstance(groups, dict):
         return None
-    return cwd if groups.get(f"{REGISTRY_GROUP}.{verb}") else None
+    return cwd if groups.get(group or f"{REGISTRY_GROUP}.{verb}") else None
 
 
 def _registry_state(verb: str, command: str) -> tuple[str, str, str | None]:
@@ -669,7 +676,7 @@ def _reported(exc: BaseException) -> str:
     return "\n".join(f"            {line}" for line in str(exc).splitlines())
 
 
-def _dependency_lantern(headline: str, spec: str, exc: BaseException) -> str:
+def _dependency_lantern(headline: str, spec: str, exc: BaseException, noun: str = "source") -> str:
     """The one message for "the code is installed, what it needs isn't".
 
     One renderer, two sites (import-time and construction-time), because three
@@ -688,9 +695,9 @@ def _dependency_lantern(headline: str, spec: str, exc: BaseException) -> str:
         f"        Run that from the kit's own directory. A kit ships that script to "
         f"install what its rig needs, and a plain `uv sync` resolves only the default "
         f"dependency set — optional drivers are exactly what it leaves out.\n"
-        f"        If this source is your own code and not an installed kit, the import "
+        f"        If this {noun} is your own code and not an installed kit, the import "
         f"below is yours — nothing else about the spec is wrong.\n"
-        f"        The source:  {spec}\n"
+        f"        The {noun}:  {spec}\n"
         f"        What it reported:\n"
         f"{_reported(exc)}"
     )
@@ -715,8 +722,15 @@ def _spec_module_missing(exc: BaseException, module_name: str) -> bool:
     return module_name == name or module_name.startswith(f"{name}.")
 
 
-def import_factory(spec: str):
+def import_factory(spec: str, noun: str = "source"):
     """Phase one: find the factory a spec names. **Never calls it.**
+
+    ``noun`` is what the declaration is called in the refusals this raises, and
+    it defaults to the word every caller but one wants. `newt setup` resolves a
+    kit's setup through this same machinery — deliberately, so there is one
+    dialect for "the code a declaration names is not here" — but a refusal that
+    calls it a *source* sends the reader to the source ladder, which has nothing
+    to do with why their setup did not run. Same message, right noun.
 
     Import is not connect; construction is. Splitting the two is what lets a
     verb read what a factory *declares* while the rig is still dark, and refuse
@@ -742,7 +756,7 @@ def import_factory(spec: str):
         if _spec_module_missing(exc, module_name):
             raise RuntimeError(
                 f"no module named {exc.name!r} could be imported, so the code this "
-                f"source names was never found.\n"
+                f"{noun} names was never found.\n"
                 f"\n"
                 f'    uv run python -c "import {exc.name}"\n'
                 f"\n"
@@ -750,22 +764,24 @@ def import_factory(spec: str):
                 f"separates the two ways this happens: a spec that names a module nobody "
                 f"has (a typo, or a package never installed) from one installed somewhere "
                 f"this environment cannot see.\n"
-                f"        The source:  {spec}"
+                f"        The {noun}:  {spec}"
             ) from exc
         raise KitDependencyMissing(
             _dependency_lantern(
-                "the code this source names is installed, but something it imports is "
-                "not — so nothing was loaded, and nothing is connected.",
+                f"the code this {noun} names is installed, but something it imports is "
+                f"not — so nothing was loaded, and nothing is connected.",
                 spec,
                 exc,
+                noun,
             )
         ) from exc
     try:
         return getattr(module, factory_name)
     except AttributeError:
         raise RuntimeError(
-            f"module {module_name!r} has no attribute {factory_name!r}, so the source "
-            f"{spec!r} names a factory that module does not export."
+            f"module {module_name!r} has no attribute {factory_name!r}, so the {noun} "
+            f"{spec!r} names a {'factory' if noun == 'source' else 'callable'} that module "
+            f"does not export."
         ) from None
 
 
