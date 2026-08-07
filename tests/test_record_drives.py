@@ -33,6 +33,8 @@ import pytest
 
 from newt.recording import (
     SINGLE_ARM_DESCRIPTOR,
+    CameraCaptureFailed,
+    CameraSpec,
     DriveFailed,
     DriveStopped,
     JointState,
@@ -127,6 +129,17 @@ class _PairRig(PairSource):
 
     def disable_all(self) -> None:
         self.disabled = True
+
+
+class _PairRigWithDyingCamera(_PairRig):
+    """A real rig's intersection: paired arms and a camera bridge."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cameras = [CameraSpec("wrist", 64, 48, 30)]
+
+    def read_frames(self):
+        raise RuntimeError("wrist camera stopped answering (test double)")
 
 
 class _WatchingPair(PairSource):
@@ -442,6 +455,40 @@ def test_a_driving_session_keeps_driving_between_takes(tmp_path):
     stopped_at = source.driven
     time.sleep(0.1)
     assert source.driven == stopped_at, "close() must stop the driving too"
+
+
+@needs_extra
+def test_a_camera_failure_does_not_stop_the_rig_but_still_refuses_the_episode(tmp_path):
+    """A dead camera costs the take, not control of the paired arms.
+
+    Camera capture and driving share a session but not a stop condition. Once
+    the camera bridge reports its failure, the state loop must keep taking the
+    indivisible drive-and-read tick even though the episode can no longer be
+    kept.
+    """
+    source = _PairRigWithDyingCamera()
+    session = _session(source, tmp_path)
+    try:
+        session.start_episode()
+        assert _wait_for(lambda: session.camera_failure is not None), (
+            "the camera thread's failure was not recorded"
+        )
+
+        driven_after_failure = source.driven
+        assert _wait_for(lambda: source.driven >= driven_after_failure + 3), (
+            "a camera failure stopped the paired rig — the follower would freeze "
+            "while the leader kept moving"
+        )
+        with pytest.raises(CameraCaptureFailed) as caught:
+            session.end_episode(keep=True)
+    finally:
+        session.close()
+
+    assert caught.value.cause == "stopped_answering"
+    assert "wrist camera stopped answering" in str(caught.value)
+    assert sorted(tmp_path.glob("episode_*")) == [], (
+        "the rig keeps driving, but the camera-less episode must still be refused"
+    )
 
 
 # --------------------------------------------------------------------------- #
