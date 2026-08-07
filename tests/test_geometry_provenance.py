@@ -4,8 +4,18 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import shutil
 
 import pytest
+
+# A camera attached to the episode opens a real ffmpeg pipe at start_episode() —
+# same reason test_record_drives.py, test_recording_cameras.py, and
+# test_camera_seam_second_body.py gate their camera-carrying tests on this
+# rather than just the [recording] extra.
+_HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+needs_ffmpeg = pytest.mark.skipif(
+    not _HAVE_FFMPEG, reason="needs ffmpeg + ffprobe on PATH (the color encoder)"
+)
 
 
 IDENTITY = [
@@ -122,6 +132,7 @@ def test_validator_rejects_unbacked_measured_claim_and_names_owner_and_repair():
 
 
 @pytest.mark.skipif(importlib.util.find_spec("mcap") is None, reason="needs the recording extra")
+@needs_ffmpeg
 def test_real_camera_episode_records_default_claim_and_validates(tmp_path):
     """Exercise the disk format, not merely the camera-dict helper."""
     from newt.recording import Session, validate
