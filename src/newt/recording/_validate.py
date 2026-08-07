@@ -46,7 +46,7 @@ def validate(episode_dir: Path) -> dict:
         return _verdict(episode_dir, checks)
 
     if not isinstance(meta, dict):
-        raise ValueError(
+        raise TypeError(
             "episode.json contains "
             f"a JSON {type(meta).__name__}, not an object; the recording writer "
             "must write an object and rewrite this episode"
