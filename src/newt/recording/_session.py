@@ -129,6 +129,12 @@ class Session:
         # (rather than in a frontend) is what keeps `newt record` a skin with no
         # camera flag and no camera identity.
         self._cameras = list(cameras) if cameras else list(getattr(source, "cameras", None) or [])
+        # Read off the source for the same reason the cameras are: the kit is the
+        # only thing that knows it calibrated, where it wrote the receipt, and what
+        # a receipt of its own procedure even looks like. A flag here would make
+        # `newt` learn all three. Most sources have no such attribute, and that is
+        # an uncalibrated take, not a failure.
+        self._calibration_receipt = getattr(source, "calibration_receipt", None)
         # Whether the source polls itself (a rig bridge) or the caller pushes with
         # feed_frame. Only a source bridge gets a camera thread.
         self._reads_frames = callable(getattr(source, "read_frames", None))
@@ -536,6 +542,7 @@ class Session:
             author=self._author,
             license=self._license,
             tags=tuple(tags) if tags is not None else DEFAULT_TAGS,
+            calibration_receipt=self._calibration_receipt,
         )
         self._camera_failure = None
         self._start_loops()
