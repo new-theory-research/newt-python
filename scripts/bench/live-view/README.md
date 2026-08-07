@@ -21,9 +21,26 @@ Three camera panes carrying live RealSense output (`d405-230422271405`,
 `d455f-419222301574`, `d455f-352222302988`), the arm drawn from the kit's URDF, a joint
 plot, and a provenance pane naming the description file the drawing came from.
 
-What is *not* in the frame is the point of the layout fence: no blueprint panel, no
-selection panel, a simplified scrubber. This is the hackathon's lean page built on Rerun's
-embedded viewer, and it is not Rerun's application.
+## What these three do not show, and the run that does
+
+These were taken when the layout fence was one line — `collapse_panels=True` — and that
+line bought less than it was described as buying. Look at the top of any of the three:
+the Rerun wordmark and its menu, a Share button, a notification bell, three panel toggles
+and a fullscreen toggle. Look at the bottom: a full transport bar, with play, pause, step,
+loop, a speed control and a scrubber. Every one of those belongs to Rerun's application,
+and the earlier version of this file claimed they were gone. They were not; only the
+blueprint and selection panels were.
+
+The fence is four named panels now — blueprint, selection, top and time, each `Hidden`,
+each asserted in `tests/test_live_view.py`. What that actually looks like is a different
+set of pictures, taken on the same rig on 2026-08-06 through a page that embeds this view
+in an iframe, and kept beside that page rather than here. In those, the wordmark, the
+Share button, the toggles and the transport bar are gone, and what is left of Rerun is the
+help, visibility and expand icons in each view's own title bar.
+
+These three stay because they are the only frames of the view drawing a *real robot* from
+the kit's URDF, which the passive bench source in the newer run does not declare. Read
+them for the cameras, the body and the recording badge. Do not read them for the chrome.
 
 ## The run these came from
 
@@ -97,6 +114,18 @@ and commands the home pose, which moves them. The joint traces in the plot are s
 and the page says so in its own footer, in the same sentence as the camera count.
 
 ## Reproducing
+
+The source is committed now — `scripts/bench/passive_source.py`, which opens a rig's
+cameras and nothing else, so a run of this kind no longer has to be read back off its own
+output the way the command line above was:
+
+```
+PYTHONPATH=scripts/bench NT_BENCH_CAMERAS=4,10,14 \
+    newt record --source passive_source:cameras_only \
+    --task "..." --dest ~/episodes --view --json
+```
+
+Then, on the machine serving the page:
 
 ```
 uv run --with playwright python scripts/shoot_view.py \

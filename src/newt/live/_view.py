@@ -6,11 +6,14 @@ one turns it into a robot moving, camera panes and joint traces in a page the ri
 serves itself. Recording adds a writer. It does not add a read, and it does not
 take anything away from the picture.
 
-**The view is not the Rerun application.** The blueprint below collapses the
-blueprint and selection panels and the served page hides the welcome screen, so
-what a person gets is the 3D robot, their cameras, their joint traces and a
-scrubber. Shipping Rerun's full app chrome instead would be a different product
-than the one this exists to be.
+**The view is not the Rerun application.** The blueprint below hides all four of
+Rerun's panels by name and the served page hides the welcome screen, so what a
+person gets is the 3D robot, their cameras, their joint traces, and the page's
+own header and footer. What is deliberately gone: the Rerun wordmark and its
+menu, the Share button, the notification bell, the three panel toggles, and the
+whole transport bar. What is still Rerun's and still on screen: the small help,
+visibility and expand icons in each view's own title bar. Shipping the full app
+chrome instead would be a different product than the one this exists to be.
 
 **Nothing here knows what a robot is.** The description file, where it hangs in the
 entity tree, which joints move and which reported number moves each one all arrive
@@ -95,6 +98,8 @@ class LiveView:
         port: int = DEFAULT_PORT,
         grpc_port: int = DEFAULT_GRPC_PORT,
         application_id: str = "newt-live-session",
+        control=None,
+        page_dir: str | Path | None = None,
     ) -> None:
         self._descriptor = descriptor
         self._task = task
@@ -109,6 +114,14 @@ class LiveView:
         self._port = port
         self._grpc_port = grpc_port
         self._application_id = application_id
+        # The view stays a reader. These two are passed straight to the server it
+        # already runs, because that server is the only one on this port and a
+        # second HTTP server on a second port would make the page cross-origin
+        # against its own control routes for no gain. The view itself never calls
+        # either: it does not know what a control is, and it never reads the page
+        # directory's contents.
+        self._control = control
+        self._page_dir = page_dir
 
         self._stream = None
         self._tree = None
@@ -156,7 +169,13 @@ class LiveView:
         self._log_provenance(rr)
         self._stream.send_blueprint(self._blueprint())
 
-        self._server = serve(self._port, self._assets, self.session_json)
+        self._server = serve(
+            self._port,
+            self._assets,
+            self.session_json,
+            control=self._control,
+            page_dir=self._page_dir,
+        )
         self._started_at = time.monotonic()
         self._url = f"http://localhost:{self._port}/"
         return self._url
@@ -313,11 +332,30 @@ class LiveView:
     def _blueprint(self):
         """The lean layout: robot, cameras, joint traces, and the provenance note.
 
-        ``collapse_panels=True`` is the single line that makes this a view rather
-        than an application — it hides the blueprint and selection panels outright
-        and swaps the full timeline for a simple scrubber. It is also the supported
-        route: the option that would do the same from JavaScript is marked private
-        in the viewer's own types.
+        Four panels are named here, and each is named because leaving it at its
+        default put something on screen that belongs to Rerun's application rather
+        than to this rig's session:
+
+        ``BlueprintPanel`` / ``SelectionPanel`` — hidden. These are for editing a
+        layout; the layout is this function and an operator has no business being
+        offered its tree mid-take.
+
+        ``TopPanel`` — hidden. It carries the Rerun wordmark and its menu, a Share
+        button, a notification bell and the three panel toggles that put the two
+        panels above back. Every one of those is the viewer advertising itself as
+        an application, and the Share button in particular offers something this
+        page cannot honour: the stream is a rig-local gRPC port.
+
+        ``TimePanel`` — hidden. It is the transport: play, pause, step, loop, a
+        speed control and a scrubber across the whole recording. All of that is for
+        reading a recording back, and this is a live view of a session in progress
+        — a scrubber offers to leave the present, which is the one thing this page
+        exists to show. Nothing legible is lost with it gone: the joint plot draws
+        its own wall-clock axis, so a screenshot still says when it was taken.
+
+        All four go through the blueprint, which is the supported route. The
+        ``panel_state_overrides`` that would do the same from JavaScript is marked
+        private in the viewer's own types.
         """
         import rerun.blueprint as rrb
 
@@ -342,7 +380,10 @@ class LiveView:
 
         return rrb.Blueprint(
             rrb.Horizontal(main, rrb.Vertical(*side), column_shares=[3, 2]),
-            collapse_panels=True,
+            rrb.BlueprintPanel(state=rrb.PanelState.Hidden),
+            rrb.SelectionPanel(state=rrb.PanelState.Hidden),
+            rrb.TopPanel(state=rrb.PanelState.Hidden),
+            rrb.TimePanel(state=rrb.PanelState.Hidden),
         )
 
     # --- the observer hooks --------------------------------------------------
