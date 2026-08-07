@@ -442,3 +442,49 @@ def test_two_causes_never_share_a_string(tmp_path):
     assert messages[0] != messages[1]
     for message in messages:
         assert "Do now:" in message, f"a refusal with no next step: {message}"
+
+
+# --------------------------------------------------------------------------- #
+# The chrome fence — what the embedded pane is allowed to put on screen
+# --------------------------------------------------------------------------- #
+
+@requires_view
+def test_the_layout_names_every_panel_it_refuses():
+    """"Hackathon-lean, not Rerun's application" is a claim about four panels, so
+    the blueprint states all four rather than relying on defaults.
+
+    This was written after a screenshot taken to prove the claim showed the Rerun
+    wordmark, a Share button, three panel toggles and a full transport bar. Every
+    one of those came from a panel nobody had named. A default is not a decision,
+    and the difference is only visible in a picture — which is exactly the kind of
+    drift a test has to hold instead.
+    """
+    import rerun.blueprint as rrb
+
+    from newt.live._view import LiveView
+
+    view = LiveView(
+        descriptor=SINGLE_ARM_DESCRIPTOR,
+        task="t",
+        camera_ids=["cam-a"],
+        port=9411,
+        grpc_port=9412,
+    )
+    blueprint = view._blueprint()
+
+    # Each attribute exists only because the matching part was passed — rerun's
+    # Blueprint sets them per-part — so `getattr(..., None)` is what catches a
+    # panel that stopped being named at all, rather than one named differently.
+    def state(attribute: str):
+        panel = getattr(blueprint, attribute, None)
+        assert panel is not None, f"{attribute} is left at rerun's default"
+        return panel.state
+
+    assert state("blueprint_panel") == rrb.PanelState.Hidden
+    assert state("selection_panel") == rrb.PanelState.Hidden
+    # The wordmark, the menu, Share, the bell and the toggles that put the two
+    # panels above back on screen all live on this one.
+    assert state("top_panel") == rrb.PanelState.Hidden
+    # The transport, and the scrubber that offers to leave the present. The joint
+    # plot's own axis is what a screenshot reads its time off instead.
+    assert state("time_panel") == rrb.PanelState.Hidden
