@@ -136,6 +136,59 @@ class StateDescriptor:
     )
 
 
+@dataclass(frozen=True)
+class JointDrive:
+    """One joint of a declared robot description, and where its value comes from.
+
+    ``urdf_joint`` is a joint name **in the kit's own description file**. ``channel``
+    is one of the descriptor's channel suffixes, and ``index`` is the position this
+    joint occupies in that channel's ``positions`` array. Three facts, all of them
+    the kit's — ``newt`` reads them and matches nothing by guesswork.
+
+    There is deliberately no sign, scale or offset here. A value is drawn exactly as
+    the arm reported it; if a kit's positive direction disagrees with its
+    description's, that is a measurement somebody has to take at a bench, and a
+    number invented to make a render look right is the fabricated input Rule 10
+    exists for. ``ViewDeclaration.joint_convention`` is where a kit says, in words,
+    how far it can vouch for the two agreeing.
+    """
+
+    urdf_joint: str
+    channel: str
+    index: int
+
+
+@dataclass(frozen=True)
+class ViewDeclaration:
+    """What a kit declares so a live view can draw its robot — the whole of what
+    ``newt`` is willing to learn about an embodiment's shape.
+
+    A source exposes this as a ``view_declaration`` attribute and ``newt`` reads it
+    at session start. Nothing in this dataclass is optional-with-a-default that
+    stands in for a measurement: a kit that cannot name its description file, its
+    driven joints, or its own convention has no live robot drawn, and the view says
+    so in words rather than drawing a plausible wrong one.
+
+    ``urdf_path``       — the description file, on the machine the session runs on.
+    ``entity_prefix``   — where the geometry lands in the entity tree.
+    ``drives``          — one entry per joint this source can move (see JointDrive).
+    ``joint_convention``— a sentence the view shows verbatim, in which the kit says
+                          how the values it reports relate to the directions its
+                          description turns, and how far it can vouch for that. This
+                          is required and has no default, because "the signs agree"
+                          is exactly the claim nobody may make on a kit's behalf.
+    ``visual_only``     — draw visual meshes and leave collision hulls out. Superimposed
+                          they are unreadable; a kit whose description has no collision
+                          geometry is unaffected either way.
+    """
+
+    urdf_path: str
+    entity_prefix: str
+    drives: tuple[JointDrive, ...]
+    joint_convention: str
+    visual_only: bool = True
+
+
 @dataclass
 class JointState:
     """One synchronized snapshot of an arm's motors. Arrays are joint-order,

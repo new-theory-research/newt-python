@@ -36,6 +36,16 @@ recording = [
     "opencv-python>=4.8,<5.0",
 ]
 
+# The live view — `newt record --view`. Pinned to one minor, not floored: the
+# viewer's WebAssembly glue is built against one exact SDK version and a
+# mismatched pair does not load at all, so newt fetches the browser half keyed on
+# `rerun.__version__`. A range wide enough to cross that boundary would serve a
+# viewer that cannot open the stream beside it.
+# Install: pip install "newt[view]"
+view = [
+    "rerun-sdk>=0.34.1,<0.35",
+]
+
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.4", "deptry>=0.20"]
 
@@ -49,15 +59,35 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/newt"]
+# The served page is data, not code: hatchling ships .py from `packages` and would
+# leave the html/css/js behind, which is a session that starts, prints a URL, and
+# serves a 404.
+artifacts = ["src/newt/live/page/*"]
 # PEP 561: ship the py.typed marker so the SDK's type hints reach mypy/pyright/
 # IDEs/agents. Explicit force-include makes this deterministic across build
 # methods (a bare `packages` include can miss a data file depending on VCS state).
-force-include = { "src/newt/py.typed" = "newt/py.typed" }
+#
+# NOTICE and licenses/ ride along for a different reason and a harder one: the
+# page assets above are adapted from Rerun-copyright code under MIT OR Apache-2.0,
+# both of which require the licence text and the copyright notice to travel with
+# every copy. Shipping those files in the wheel without these makes every install
+# a redistribution missing its licence.
+force-include = { "src/newt/py.typed" = "newt/py.typed", "NOTICE" = "newt/NOTICE", "licenses/LICENSE-MIT.rerun" = "newt/licenses/LICENSE-MIT.rerun", "licenses/LICENSE-APACHE.rerun" = "newt/licenses/LICENSE-APACHE.rerun" }
 
 [tool.deptry]
 # Scan tests too (default excludes them) — httpx/pytest are used there, not in src/.
-exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py"]
+# scripts/ holds bench instruments, not shipped code. shoot_view.py drives a real
+# browser and is run as `uv run --with playwright python scripts/shoot_view.py` —
+# declaring playwright as a project dependency to satisfy a scan would put a
+# browser download in every install of the SDK.
+exclude = ["\\.venv.*", "\\.direnv", "\\.git", "setup\\.py", "scripts"]
 known_first_party = ["newt"]
+
+# rerun-sdk installs its modules as `rerun` (and `rerun_sdk`), which deptry cannot
+# infer from the distribution name alone — without this it reads every `import
+# rerun` in newt/live as an undeclared transitive.
+[tool.deptry.package_module_name_map]
+rerun-sdk = ["rerun", "rerun_sdk"]
 
 [tool.deptry.per_rule_ignores]
 # lerobot: declared in the [hardware] extra for the robot-path integration;

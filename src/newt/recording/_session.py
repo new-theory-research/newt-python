@@ -142,6 +142,17 @@ class Session:
         self._last_dropped_frames: dict[str, int] = {}
         self._closed = False
 
+        # Observers: the second sink. Every read the capture loops take is offered
+        # to each observer as well as to the episode writer — one read of the
+        # hardware, two destinations. An observer never gates capture and never
+        # changes what is written; see attach_observer().
+        self._observers: list = []
+        self._observer_failures: list[tuple[str, Exception]] = []
+        # True once an observer is attached: the loops then run for the whole
+        # session rather than only between start_episode and end_episode, because
+        # a live view that goes dark whenever nobody is recording is not a preview.
+        self._streaming = False
+
     def _check_camera_bridge(self, source, *, declared_by_caller: bool) -> None:
         """Cameras and the read that fills them are one contract — refuse half of it.
 
@@ -220,6 +231,23 @@ class Session:
     def descriptor(self) -> StateDescriptor:
         return self._source.descriptor
 
+    @property
+    def view_declaration(self):
+        """The source's ``ViewDeclaration``, or None if it declares no robot.
+
+        Read-only and pass-through on purpose. A live view needs a description
+        file, an entity prefix and a joint mapping; all three are the kit's to
+        state and none of them is newt's to infer, so this hands over what the
+        source said and nothing else. None means the kit declared nothing, which
+        a view renders as an empty pane with a sentence — never a stand-in body.
+        """
+        return getattr(self._source, "view_declaration", None)
+
+    @property
+    def camera_ids(self) -> list[str]:
+        """The ids of the cameras this session records, in declared order."""
+        return [str(c.id) for c in self._cameras]
+
     def describe(self) -> dict:
         """Describe the exact contract this session will record — the reverse
         contract expressed descriptively. The library DESCRIBES; a frontend
@@ -268,6 +296,92 @@ class Session:
         except OSError:
             return False
 
+    # --- observers: one read, two destinations ------------------------------
+
+    def attach_observer(self, observer) -> None:
+        """Add a second destination for everything the capture loops read.
+
+        The episode file and a live view are two sinks on one source, and this is
+        the split that makes them one: the loops read the hardware once, hand each
+        read to the writer when an episode is in flight, and hand the same read to
+        every observer always. Recording therefore cannot interrupt or degrade a
+        view — starting an episode adds a writer, it does not add a read.
+
+        An observer is offered ``on_state(channels, ts_ns)`` and
+        ``on_frames(frames, ts_ns)``; both are optional, and both receive exactly
+        what the source returned, including the ``None`` entries that mark a
+        dropped read. An observer that raises is dropped from the session and its
+        failure is reported through ``observer_failures()`` — it never takes the
+        capture loop, and therefore an episode, down with it.
+
+        Attaching one starts the capture loops for the rest of the session, so a
+        view is live before the first episode and stays live between episodes.
+        """
+        if self._closed:
+            raise RuntimeError("Session is closed; construct a new Session to record again.")
+        with self._lock:
+            self._observers.append(observer)
+        self._streaming = True
+        self._start_loops()
+
+    def observer_failures(self) -> list[tuple[str, Exception]]:
+        """(observer name, exception) for every observer dropped mid-session.
+
+        Read by a frontend so a view that died says so out loud instead of just
+        going still. Never empty-by-design: an empty list means every attached
+        observer is still receiving reads.
+        """
+        with self._lock:
+            return list(self._observer_failures)
+
+    def _notify(self, method: str, *args) -> None:
+        """Offer one read to every observer, outside the writer lock.
+
+        Outside the lock on purpose: an observer is a second sink, and a slow one
+        must not hold up the read that the episode file depends on.
+        """
+        for observer in list(self._observers):
+            hook = getattr(observer, method, None)
+            if hook is None:
+                continue
+            try:
+                hook(*args)
+            except Exception as exc:  # noqa: BLE001 — an observer is the second
+                # sink, never the first. Whatever it does wrong, the episode has
+                # to keep being written; dropping the observer and recording why
+                # is how that failure stays visible instead of becoming silence.
+                with self._lock:
+                    if observer in self._observers:
+                        self._observers.remove(observer)
+                    self._observer_failures.append((type(observer).__name__, exc))
+
+    def _start_loops(self) -> None:
+        """Start whichever capture threads are not already running. Idempotent —
+        called by both ``start_episode`` and ``attach_observer``, and either may
+        come first."""
+        self._stop_loop.clear()
+        if not self._state_pushed and (
+            self._loop_thread is None or not self._loop_thread.is_alive()
+        ):
+            self._loop_thread = threading.Thread(
+                target=self._capture_loop, name="newt-record-capture", daemon=True
+            )
+            self._loop_thread.start()
+        if (
+            self._cameras
+            and self._reads_frames
+            and (self._camera_thread is None or not self._camera_thread.is_alive())
+        ):
+            # Its own thread on purpose: a camera read blocks for as long as the
+            # hardware takes, and the state loop's rhythm is not this card's to
+            # move. Started only when the source declared cameras, so the
+            # state-only path runs exactly the threads it ran before — and never
+            # for a caller-owned bridge, which pushes through feed_frame itself.
+            self._camera_thread = threading.Thread(
+                target=self._camera_loop, name="newt-record-cameras", daemon=True
+            )
+            self._camera_thread.start()
+
     # --- episode lifecycle --------------------------------------------------
 
     def start_episode(self) -> str:
@@ -293,23 +407,9 @@ class Session:
             author=self._author,
             license=self._license,
         )
-        self._stop_loop.clear()
         self._camera_failure = None
-        if not self._state_pushed:
-            self._loop_thread = threading.Thread(
-                target=self._capture_loop, name="newt-record-capture", daemon=True
-            )
-            self._loop_thread.start()
-        if self._cameras and self._reads_frames:
-            # Its own thread on purpose: a camera read blocks for as long as the
-            # hardware takes, and the state loop's rhythm is not this card's to
-            # move. Started only when the source declared cameras, so the
-            # state-only path runs exactly the threads it ran before — and never
-            # for a caller-owned bridge, which pushes through feed_frame itself.
-            self._camera_thread = threading.Thread(
-                target=self._camera_loop, name="newt-record-cameras", daemon=True
-            )
-            self._camera_thread.start()
+        self._start_loops()
+        self._notify("on_episode", "started", self._writer.episode_id)
         return self._writer.episode_id
 
     def _capture_loop(self) -> None:
@@ -323,16 +423,22 @@ class Session:
             channels = self._source.read_state()
             shown: dict[str, list[float]] = {}
             with self._lock:
-                if self._writer is None:
+                if self._writer is None and not self._streaming:
                     return
                 for key, state in channels.items():
                     if state is None:
-                        self._writer.note_dropped_state()
+                        if self._writer is not None:
+                            self._writer.note_dropped_state()
                         continue
-                    self._writer.write_state(key, state, ts_ns)
+                    if self._writer is not None:
+                        self._writer.write_state(key, state, ts_ns)
                     shown[key] = list(state.positions)
                 if shown:
                     self._last_positions = shown
+            # The second sink, outside the lock and after the first: the episode
+            # file has already taken this read, so nothing an observer does can
+            # change or delay what was written.
+            self._notify("on_state", channels, ts_ns)
             time.sleep(self._period_s)
 
     def _camera_loop(self) -> None:
@@ -366,19 +472,24 @@ class Session:
             ts_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
             try:
                 with self._lock:
-                    if self._writer is None:
+                    if self._writer is None and not self._streaming:
                         return
                     for cam_id in cam_ids:
                         frame = frames.get(cam_id)
                         if frame is None:
-                            self._writer.note_dropped_frame(cam_id)
+                            if self._writer is not None:
+                                self._writer.note_dropped_frame(cam_id)
                             continue
-                        self._writer.write_frame(cam_id, frame, ts_ns)
+                        if self._writer is not None:
+                            self._writer.write_frame(cam_id, frame, ts_ns)
             except Exception as exc:  # noqa: BLE001 — same background-thread reason
                 # as the read above: an encoder write failure must be recorded and
                 # stop the loop, not die silently on a thread nothing is watching.
                 self._fail_cameras("encoder_refused", exc)
                 return
+            # The second sink, outside the lock and after the first — see the note
+            # on the same call in _capture_loop.
+            self._notify("on_frames", frames, ts_ns)
             next_at += period
             time.sleep(max(0.0, next_at - time.monotonic()))
 
@@ -418,30 +529,33 @@ class Session:
                 "Fix: construct the Session with state_pushed=True when your own loop "
                 "owns the tick, or stop calling feed_state and let the Session poll."
             )
+        ts = ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
         with self._lock:
-            if self._writer is None:
-                return
-            ts = ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
             shown: dict[str, list[float]] = {}
             for key, state in channels.items():
                 if state is None:
-                    self._writer.note_dropped_state()
+                    if self._writer is not None:
+                        self._writer.note_dropped_state()
                     continue
-                self._writer.write_state(key, state, ts)
+                if self._writer is not None:
+                    self._writer.write_state(key, state, ts)
                 shown[key] = list(state.positions)
             if shown:
                 self._last_positions = shown
+        # The second sink, on the pushed path too: the tick that drove the rig and
+        # wrote the frame is the one a view draws, which is what keeps the picture
+        # and the file the same event rather than two readings of it.
+        self._notify("on_state", channels, ts)
 
     def feed_frame(self, cam_id: str, frame, ts_ns: int | None = None) -> None:
         """Push one camera frame into the in-flight episode. A frontend that owns
         a camera bridge calls this; the library never opens a camera itself (no
         hardware IO baked into the loop). No-op when no episode is recording."""
+        ts = ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
         with self._lock:
-            if self._writer is None:
-                return
-            self._writer.write_frame(
-                cam_id, frame, ts_ns if ts_ns is not None else time.clock_gettime_ns(time.CLOCK_REALTIME)
-            )
+            if self._writer is not None:
+                self._writer.write_frame(cam_id, frame, ts)
+        self._notify("on_frames", {cam_id: frame}, ts)
 
     def _join_loops(self) -> None:
         """Wait for both capture threads to leave the writer alone. Called before
@@ -463,8 +577,14 @@ class Session:
         if self._writer is None:
             raise RuntimeError("No episode is recording; call start_episode() first.")
 
-        self._stop_loop.set()
-        self._join_loops()
+        if not self._streaming:
+            self._stop_loop.set()
+            self._join_loops()
+        # While a view is attached the loops keep running across the episode
+        # boundary — the preview does not blink because a take ended. Clearing the
+        # writer under the lock is the whole barrier that needs: both loops take
+        # the same lock before they touch it, so no read can land in a writer that
+        # is already being finalized.
 
         with self._lock:
             writer = self._writer
@@ -476,6 +596,8 @@ class Session:
             self._last_dropped_state = writer.dropped_state
             self._last_frame_counts = writer.frame_counts
             self._last_dropped_frames = writer.dropped_frames
+
+        self._notify("on_episode", "stopped", writer.episode_id)
 
         if not keep:
             writer.abandon()
@@ -566,6 +688,7 @@ class Session:
         or it is discarded as a partial."""
         if self._closed:
             return
+        self._streaming = False
         self._stop_loop.set()
         if self._writer is not None:
             with self._lock:
