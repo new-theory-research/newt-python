@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -54,6 +55,15 @@ _HAVE_EXTRA = (
 )
 needs_extra = pytest.mark.skipif(
     not _HAVE_EXTRA, reason="needs the [recording] extra (mcap/protobuf)"
+)
+
+# A camera attached to the episode opens a real ffmpeg pipe at start_episode(),
+# whether or not any frame it offers is ever encoded — the same reason
+# test_recording_cameras.py and test_camera_seam_second_body.py gate their
+# camera-carrying tests on this rather than just the extra.
+_HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+needs_ffmpeg = pytest.mark.skipif(
+    not _HAVE_FFMPEG, reason="needs ffmpeg + ffprobe on PATH (the color encoder)"
 )
 
 
@@ -458,6 +468,7 @@ def test_a_driving_session_keeps_driving_between_takes(tmp_path):
 
 
 @needs_extra
+@needs_ffmpeg
 def test_a_camera_failure_does_not_stop_the_rig_but_still_refuses_the_episode(tmp_path):
     """A dead camera costs the take, not control of the paired arms.
 
