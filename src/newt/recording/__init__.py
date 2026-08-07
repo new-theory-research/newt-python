@@ -6,7 +6,8 @@ The public surface:
 - ``Session``          — all recording behavior; the layering moat. Frontends
                           (``newt record``, an agent on ``--json``) hold none of it.
 - ``RecordingSource``  — the seam protocol an embodiment implements (``read_state``
-                          + ``descriptor``, optional ``disable_all`` / ``close``).
+                          + ``descriptor``, optional ``drive`` / ``disable_all`` /
+                          ``close``).
 - ``StateDescriptor``  — the static shape of a state stream (arms, channels, joints).
 - ``ViewDeclaration``  — what a kit declares so a live view can draw its robot:
                           a description file, an entity prefix, the joints it
@@ -32,6 +33,9 @@ The public surface:
 - ``CameraCaptureFailed`` — what ``end_episode(keep=True)`` raises when the camera
                           bridge died mid-episode, so nothing is committed whose
                           video ends before its joints do.
+- ``DriveFailed``      — the same refusal for the other half: what it raises when a
+                          source that drives its rig stopped being able to, so no
+                          episode claims a demonstration that stopped part-way.
 - ``validate``         — validate an NT v0.0.3 episode directory (lazy; needs the extra).
 
 ``import newt`` stays featherweight: it does NOT import this package, and importing
@@ -51,6 +55,7 @@ from newt.recording._seam import (
     SINGLE_ARM_DESCRIPTOR,
     CameraCaptureFailed,
     CameraOpenError,
+    DriveFailed,
     JointDrive,
     JointState,
     RecordingSource,
@@ -68,6 +73,7 @@ __all__ = [
     "CameraCaptureFailed",
     "CameraOpenError",
     "CameraSpec",
+    "DriveFailed",
     "JointDrive",
     "JointState",
     "LocalSink",

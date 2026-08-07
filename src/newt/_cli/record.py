@@ -282,6 +282,22 @@ def _print_preflight(session, as_json: bool, source_receipt: str | None = None) 
         print("=" * 64)
         kind = report["source_kind"]
         print(f"  source        : {kind}{f' — {source_receipt}' if source_receipt else ''}")
+        # Unconditional, both ways. "Will anything move" is the question this
+        # block exists to answer before somebody stands in front of the rig, and
+        # the `no` is the line that was missing at the bench: a source that reads
+        # two arms and drives neither looks exactly like one that drives, right up
+        # until the follower does not follow. (Receipt, 2026-08-06: two sessions
+        # spent watching a recording-only source not track a leader.)
+        print(
+            "  drives        : "
+            + (
+                "YES — every tick moves the rig; recording adds a file, it does not "
+                "start or stop the motion"
+                if report["drives"]
+                else "no — the rig is read every tick and driven never; nothing here "
+                "moves it"
+            )
+        )
         print(f"  state dims    : {len(report['joint_names'])} joints {report['joint_names']}")
         print(f"  state channels: {', '.join(report['channels'])}")
         print(f"  state rate    : {report['state_hz']} Hz")
@@ -323,7 +339,7 @@ _CTRL_H = "\x08"
 
 
 def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> int:
-    from newt.recording import CameraCaptureFailed
+    from newt.recording import CameraCaptureFailed, DriveFailed
 
     if not _print_preflight(session, as_json=False, source_receipt=source_receipt):
         session.close()
@@ -373,7 +389,13 @@ def _run_interactive(session, opts: dict, source_receipt: str | None = None) -> 
             if verdict == "keep":
                 try:
                     path = session.end_episode(keep=True)
-                except CameraCaptureFailed as exc:
+                except (CameraCaptureFailed, DriveFailed) as exc:
+                    # One clause, one exit code: both are the same event — the rig
+                    # stopped being what this episode claims it was, so the episode
+                    # is refused rather than committed. What differs is the whole
+                    # of each exception's text, which is where the two causes stay
+                    # distinguishable; a frontend that paraphrased them here would
+                    # be the place they collapsed into one string.
                     print(f"\n[newt record] EPISODE REFUSED — {exc}", file=sys.stderr, flush=True)
                     return 3
                 print(f"[verdict] KEPT — {path}", flush=True)
@@ -1273,8 +1295,49 @@ def cmd_record(args: list[str]) -> int:
     if session is None:
         return 2
 
+    # A driving source under --json would move hardware with no kill key. This is
+    # the same refusal `--teleop --json` makes and it may not share that string:
+    # there the operator asked for a demonstration and typed two flags that cannot
+    # both be honoured, and the rig was still dark. Here they asked to record, and
+    # the fact that this source drives is only knowable from the object the factory
+    # returned — which means the rig is already up, and the honest sentence has to
+    # say what was done about that.
+    if opts["json"] and session.drives:
+        session.close()
+        print(
+            "[newt record] this source drives the rig — its factory returned a "
+            "source with a drive() step, so every tick would command hardware — and "
+            "--json is what an agent uses INSTEAD of a keyboard. There would be no "
+            "Ctrl+H.",
+            file=sys.stderr,
+        )
+        print(
+            "        Do now: this was only knowable after the factory ran, so the rig "
+            "came up. The session has been closed, which torqued it off through the "
+            "source's own disable_all.\n"
+            "        Fix: run the same command in a real terminal without --json — "
+            "Ctrl+H is the kill there. Whether an agent should ever drive a rig, and "
+            "what its kill would be, is unanswered; this verb will not answer it by "
+            "accident.",
+            file=sys.stderr,
+        )
+        return 1
+
     view = None
     if opts["view"]:
+        if session.drives:
+            # Said here, and only on this path, because of what --view does next:
+            # attaching the page starts the session's tick, and on a driving rig
+            # that is the moment the metal starts moving. The preflight says the
+            # same thing in its own row, but it prints after the page's address —
+            # which on this one path is after the first tick. An operator may not
+            # learn from a block printed underneath a rig that is already moving.
+            print(
+                "\n[newt record] the rig starts being driven when the page comes up: "
+                "every tick commands it, and it keeps being driven between takes. "
+                "Ctrl+H is the kill.",
+                flush=True,
+            )
         try:
             view = _open_view(session, opts, as_json=opts["json"])
         except Exception as exc:  # noqa: BLE001 — every LiveViewUnavailable already
