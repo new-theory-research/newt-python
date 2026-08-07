@@ -38,6 +38,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 import newt._cli.episodes as ep
+import newt.recording as recording
 from newt._cli.episodes import cmd_episodes, _should_skip
 
 
@@ -677,3 +678,38 @@ def test_unknown_subcommand_still_rejected(monkeypatch):
     rc = cmd_episodes(["frobnicate"])
     assert rc == 1
     assert "unknown subcommand" in err.getvalue()
+
+
+def test_validate_names_non_object_episode_metadata(monkeypatch, tmp_path):
+    """Valid JSON of the wrong shape names the writer fault and repair."""
+    episode = tmp_path / "episode_non_object"
+    episode.mkdir()
+    (episode / "episode.json").write_text('"metadata as a string"')
+
+    rc, out, err, _ = _run(["validate", str(episode)], monkeypatch)
+
+    assert rc == 1
+    assert out == ""
+    assert "JSON str, not an object" in err
+    assert "recording writer must write an object and rewrite this episode" in err
+    assert "has no attribute 'get'" not in err
+
+
+def test_validate_preserves_a_distinct_error_through_the_same_wrapper(monkeypatch, tmp_path):
+    """The CLI wrapper reports the actual cause instead of collapsing failures."""
+    episode = tmp_path / "episode_other_failure"
+    episode.mkdir()
+
+    def fail_for_another_reason(_path):
+        raise RuntimeError(
+            "recording decoder dependency is unavailable; install newt[recording]"
+        )
+
+    monkeypatch.setattr(recording, "validate", fail_for_another_reason)
+
+    rc, out, err, _ = _run(["validate", str(episode)], monkeypatch)
+
+    assert rc == 1
+    assert out == ""
+    assert "recording decoder dependency is unavailable" in err
+    assert "JSON str, not an object" not in err
