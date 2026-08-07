@@ -313,7 +313,7 @@ class SessionControl:
             "detail": detail,
             "basis": (
                 "Ticks already taken by this session — not a probe. `ok` means no "
-                "the driving half of a tick has raised, including in the gaps between "
+                "tick's driving half has raised, including in the gaps between "
                 "takes; `stopped` "
                 "means one did and this session will not open another episode."
             ),
