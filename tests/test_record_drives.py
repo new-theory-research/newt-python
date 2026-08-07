@@ -630,6 +630,53 @@ def test_the_idle_wait_between_takes_reads_the_drive_failure(tmp_path):
     assert "look before you reach" in spoken, "the rig is standing where it stopped"
 
 
+def test_the_idle_wait_distinguishes_drive_and_both_camera_failures():
+    """The keyboard reports which loop died before the operator starts a take."""
+    from types import SimpleNamespace
+
+    from newt._cli.record import (
+        _camera_stopped_between_takes,
+        _drive_stopped_between_takes,
+        _wait_for_space,
+    )
+
+    drive = ConnectionError("the driven part stopped answering")
+    stopped_answering = RuntimeError("camera 0 timed out")
+    encoder_refused = ValueError("frame changed shape")
+    cases = (
+        (
+            SimpleNamespace(drive_failure=drive, camera_failure=None),
+            "drive_stopped",
+            _drive_stopped_between_takes(drive),
+        ),
+        (
+            SimpleNamespace(
+                drive_failure=None,
+                camera_failure=("stopped_answering", stopped_answering),
+            ),
+            "camera_stopped",
+            _camera_stopped_between_takes(("stopped_answering", stopped_answering)),
+        ),
+        (
+            SimpleNamespace(
+                drive_failure=None,
+                camera_failure=("encoder_refused", encoder_refused),
+            ),
+            "camera_stopped",
+            _camera_stopped_between_takes(("encoder_refused", encoder_refused)),
+        ),
+    )
+
+    outcomes = []
+    for session, result, message in cases:
+        assert _wait_for_space(session) == result
+        outcomes.append((result, message))
+
+    assert len(set(outcomes)) == 3, "drive and the two camera causes need distinct outcomes"
+    assert "camera 0 timed out" in outcomes[1][1]
+    assert "frame changed shape" in outcomes[2][1]
+
+
 # --------------------------------------------------------------------------- #
 # Saying so before anything moves
 # --------------------------------------------------------------------------- #
